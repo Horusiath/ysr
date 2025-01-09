@@ -3,24 +3,24 @@ use std::io::{Read, Write};
 
 pub(crate) struct TransactionState {}
 
-pub struct Transaction<S: Store> {
-    inner: S::Transaction,
+pub struct Transaction<'db, S: Store + 'db> {
+    inner: S::Transaction<'db>,
     state: Option<Box<TransactionState>>,
 }
 
-impl<S: Store> Transaction<S> {
-    pub(crate) fn new(inner: S::Transaction) -> Self {
+impl<'db, S: Store> Transaction<'db, S> {
+    pub(crate) fn new(inner: S::Transaction<'db>) -> Self {
         Self { inner, state: None }
     }
 
-    pub fn split_mut(&mut self) -> (&mut S::Transaction, &mut TransactionState) {
+    pub fn split_mut(&mut self) -> (&mut S::Transaction<'db>, &mut TransactionState) {
         let state = self
             .state
             .get_or_insert_with(|| Box::new(TransactionState {}));
         (&mut self.inner, state)
     }
 
-    pub fn state_vector(&self) -> crate::Result<StateVector> {
+    pub fn state_vector(&mut self) -> crate::Result<StateVector> {
         use crate::store::Transaction;
         self.inner.state_vector()
     }

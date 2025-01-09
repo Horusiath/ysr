@@ -32,6 +32,8 @@ pub enum Error {
     EndOfBuffer,
     #[error("parsed value is out of range of expected type")]
     ValueOutOfRange,
+    #[error("failed to map data ")]
+    InvalidMapping(&'static str),
     #[error("malformed block: {0}")]
     MalformedBlock(ID),
     #[error("unsupported content type: {0}")]

@@ -55,7 +55,7 @@ pub trait Encode {
 
 impl Encode for Range<Clock> {
     fn encode<E: Encoder>(&self, encoder: &mut E) -> crate::Result<()> {
-        encoder.write_ds_clock(self.start);
+        encoder.write_ds_clock(self.start)?;
         encoder.write_ds_len(self.end - self.start)
     }
 }

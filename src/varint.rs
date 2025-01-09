@@ -196,7 +196,7 @@ impl VarInt for i8 {
 fn write_var_u32<W: Write>(mut value: u32, w: &mut W) -> crate::Result<()> {
     while value >= 0b10000000 {
         let b = ((value & 0b01111111) as u8) | 0b10000000;
-        w.write_u8(b);
+        w.write_u8(b)?;
         value = value >> 7;
     }
 

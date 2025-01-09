@@ -164,7 +164,7 @@ impl PartialOrd for StateVector {
                     }
                 }
                 (Some((ak, av)), Some((bk, bv))) => match ak.cmp(bk) {
-                    Ordering::Equal => match av.cmp(bv) {
+                    Ordering::Equal => match av.get().cmp(&(*bv).get()) {
                         Ordering::Equal => {
                             ae = a.next();
                             be = b.next();
@@ -181,18 +181,18 @@ impl PartialOrd for StateVector {
                             be = b.next();
                         }
                     },
-                    Ordering::Less if res == Some(Ordering::Greater) => {
+                    Ordering::Less if res == Some(Ordering::Less) => {
                         return None;
                     }
                     Ordering::Less => {
-                        res = Some(Ordering::Less);
+                        res = Some(Ordering::Greater);
                         ae = a.next();
                     }
-                    Ordering::Greater if res == Some(Ordering::Less) => {
+                    Ordering::Greater if res == Some(Ordering::Greater) => {
                         return None;
                     }
                     Ordering::Greater => {
-                        res = Some(Ordering::Greater);
+                        res = Some(Ordering::Less);
                         be = b.next();
                     }
                 },
