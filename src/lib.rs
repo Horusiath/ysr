@@ -1,6 +1,9 @@
+#![feature(allocator_api)]
+
 mod block;
 mod content;
 mod id_set;
+pub mod lib0;
 mod multi_doc;
 mod node;
 mod read;
@@ -30,7 +33,7 @@ pub enum Error {
     IO(#[from] std::io::Error),
     #[error("expected more data, reached end of buffer")]
     EndOfBuffer,
-    #[error("parsed value is out of range of expected type")]
+    #[error("value is out of range of expected type")]
     ValueOutOfRange,
     #[error("failed to map data ")]
     InvalidMapping(&'static str),
@@ -38,6 +41,10 @@ pub enum Error {
     MalformedBlock(ID),
     #[error("unsupported content type: {0}")]
     UnsupportedContent(u8),
+    #[error("invalid JSON: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("invalid lib0 data: {0}")]
+    Lib0(#[from] Box<crate::lib0::Error>),
     #[error("store error: {0}")]
     Store(DynError),
 }

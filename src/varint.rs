@@ -1,50 +1,71 @@
 use crate::read::ReadExt;
 use crate::write::WriteExt;
-use crate::{Error, U64};
-use std::io::{Read, Write};
+use crate::U64;
+use std::fmt::{Display, Formatter};
+use std::io::{ErrorKind, Read, Write};
+
+#[derive(Debug, Clone, Copy)]
+pub struct VarIntOutOfRangeError;
+impl std::error::Error for VarIntOutOfRangeError {}
+impl Display for VarIntOutOfRangeError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "variable length integer is out of range")
+    }
+}
+
+fn out_of_range<T>() -> std::io::Result<T> {
+    Err(std::io::Error::new(
+        ErrorKind::Other,
+        Box::new(VarIntOutOfRangeError),
+    ))
+}
 
 pub trait VarInt: Sized + Copy {
-    fn write<W: Write>(&self, w: &mut W) -> crate::Result<()>;
-    fn read<R: Read>(r: &mut R) -> crate::Result<Self>;
+    /// Write current number into given writer using variable size integer encoding.
+    /// Returns a number of bytes written.
+    fn write<W: Write>(&self, w: &mut W) -> std::io::Result<usize>;
+    /// Read a number from given reader using variable size integer encoding.
+    fn read<R: Read>(r: &mut R) -> std::io::Result<Self>;
 }
 
 impl VarInt for U64 {
     #[inline]
-    fn write<W: Write>(&self, w: &mut W) -> crate::Result<()> {
+    fn write<W: Write>(&self, w: &mut W) -> std::io::Result<usize> {
         write_var_u64(self.get(), w)
     }
 
-    fn read<R: Read>(r: &mut R) -> crate::Result<Self> {
+    fn read<R: Read>(r: &mut R) -> std::io::Result<Self> {
         Ok(read_var_u64(r)?.into())
     }
 }
 
 impl VarInt for usize {
     #[inline]
-    fn write<W: Write>(&self, w: &mut W) -> crate::Result<()> {
+    fn write<W: Write>(&self, w: &mut W) -> std::io::Result<usize> {
         write_var_u64(*self as u64, w)
     }
 
     #[inline]
-    fn read<R: Read>(r: &mut R) -> Result<Self, Error> {
+    fn read<R: Read>(r: &mut R) -> std::io::Result<Self> {
         Ok(read_var_u64(r)? as Self)
     }
 }
 
 impl VarInt for u128 {
-    fn write<W: Write>(&self, w: &mut W) -> crate::Result<()> {
+    fn write<W: Write>(&self, w: &mut W) -> std::io::Result<usize> {
+        let mut n = 1;
         let mut value = *self;
         while value >= 0b10000000 {
             let b = ((value & 0b01111111) as u8) | 0b10000000;
             w.write_u8(b)?;
+            n += 1;
             value = value >> 7;
         }
-
-        Ok(w.write_u8((value & 0b01111111) as u8)?)
+        w.write_u8((value & 0b01111111) as u8)?;
+        Ok(n)
     }
 
-    #[inline]
-    fn read<R: Read>(r: &mut R) -> Result<Self, Error> {
+    fn read<R: Read>(r: &mut R) -> std::io::Result<Self> {
         let mut num = 0u128;
         let mut len: usize = 0;
         loop {
@@ -55,7 +76,7 @@ impl VarInt for u128 {
                 return Ok(num);
             }
             if len > 180 {
-                return Err(Error::ValueOutOfRange);
+                return out_of_range();
             }
         }
     }
@@ -63,157 +84,162 @@ impl VarInt for u128 {
 
 impl VarInt for u64 {
     #[inline]
-    fn write<W: Write>(&self, w: &mut W) -> crate::Result<()> {
+    fn write<W: Write>(&self, w: &mut W) -> std::io::Result<usize> {
         write_var_u64(*self, w)
     }
 
     #[inline]
-    fn read<R: Read>(r: &mut R) -> Result<Self, Error> {
+    fn read<R: Read>(r: &mut R) -> std::io::Result<Self> {
         read_var_u64(r)
     }
 }
 
 impl VarInt for u32 {
     #[inline]
-    fn write<W: Write>(&self, w: &mut W) -> crate::Result<()> {
+    fn write<W: Write>(&self, w: &mut W) -> std::io::Result<usize> {
         write_var_u32(*self, w)
     }
 
     #[inline]
-    fn read<R: Read>(r: &mut R) -> Result<Self, Error> {
+    fn read<R: Read>(r: &mut R) -> std::io::Result<Self> {
         read_var_u32(r)
     }
 }
 
 impl VarInt for u16 {
     #[inline]
-    fn write<W: Write>(&self, w: &mut W) -> crate::Result<()> {
+    fn write<W: Write>(&self, w: &mut W) -> std::io::Result<usize> {
         write_var_u32(*self as u32, w)
     }
 
-    fn read<R: Read>(r: &mut R) -> Result<Self, Error> {
+    fn read<R: Read>(r: &mut R) -> std::io::Result<Self> {
         let value = read_var_u32(r)?;
         if let Ok(value) = value.try_into() {
             Ok(value)
         } else {
-            Err(Error::ValueOutOfRange)
+            out_of_range()
         }
     }
 }
 
 impl VarInt for u8 {
     #[inline]
-    fn write<W: Write>(&self, w: &mut W) -> crate::Result<()> {
+    fn write<W: Write>(&self, w: &mut W) -> std::io::Result<usize> {
         write_var_u32(*self as u32, w)
     }
 
-    fn read<R: Read>(r: &mut R) -> Result<Self, Error> {
+    fn read<R: Read>(r: &mut R) -> std::io::Result<Self> {
         let value = read_var_u32(r)?;
         if let Ok(value) = value.try_into() {
             Ok(value)
         } else {
-            Err(Error::ValueOutOfRange)
+            out_of_range()
         }
     }
 }
 
 impl VarInt for isize {
     #[inline]
-    fn write<W: Write>(&self, w: &mut W) -> crate::Result<()> {
+    fn write<W: Write>(&self, w: &mut W) -> std::io::Result<usize> {
         write_var_i64(*self as i64, w)
     }
 
-    fn read<R: Read>(r: &mut R) -> Result<Self, Error> {
+    fn read<R: Read>(r: &mut R) -> std::io::Result<Self> {
         let value = read_var_i64(r)?;
         if let Ok(value) = value.try_into() {
             Ok(value)
         } else {
-            Err(Error::ValueOutOfRange)
+            out_of_range()
         }
     }
 }
 
 impl VarInt for i64 {
     #[inline]
-    fn write<W: Write>(&self, w: &mut W) -> crate::Result<()> {
+    fn write<W: Write>(&self, w: &mut W) -> std::io::Result<usize> {
         write_var_i64(*self, w)
     }
 
     #[inline]
-    fn read<R: Read>(r: &mut R) -> Result<Self, Error> {
+    fn read<R: Read>(r: &mut R) -> std::io::Result<Self> {
         read_var_i64(r)
     }
 }
 
 impl VarInt for i32 {
     #[inline]
-    fn write<W: Write>(&self, w: &mut W) -> crate::Result<()> {
+    fn write<W: Write>(&self, w: &mut W) -> std::io::Result<usize> {
         write_var_i64(*self as i64, w)
     }
 
-    fn read<R: Read>(r: &mut R) -> Result<Self, Error> {
+    fn read<R: Read>(r: &mut R) -> std::io::Result<Self> {
         let value = read_var_i64(r)?;
         if let Ok(value) = value.try_into() {
             Ok(value)
         } else {
-            Err(Error::ValueOutOfRange)
+            out_of_range()
         }
     }
 }
 
 impl VarInt for i16 {
     #[inline]
-    fn write<W: Write>(&self, w: &mut W) -> crate::Result<()> {
+    fn write<W: Write>(&self, w: &mut W) -> std::io::Result<usize> {
         write_var_i64(*self as i64, w)
     }
 
-    fn read<R: Read>(r: &mut R) -> Result<Self, Error> {
+    fn read<R: Read>(r: &mut R) -> std::io::Result<Self> {
         let value = read_var_i64(r)?;
         if let Ok(value) = value.try_into() {
             Ok(value)
         } else {
-            Err(Error::ValueOutOfRange)
+            out_of_range()
         }
     }
 }
 
 impl VarInt for i8 {
     #[inline]
-    fn write<W: Write>(&self, w: &mut W) -> crate::Result<()> {
+    fn write<W: Write>(&self, w: &mut W) -> std::io::Result<usize> {
         write_var_i64(*self as i64, w)
     }
 
-    fn read<R: Read>(r: &mut R) -> Result<Self, Error> {
+    fn read<R: Read>(r: &mut R) -> std::io::Result<Self> {
         let value = read_var_i64(r)?;
         if let Ok(value) = value.try_into() {
             Ok(value)
         } else {
-            Err(Error::ValueOutOfRange)
+            out_of_range()
         }
     }
 }
 
-fn write_var_u32<W: Write>(mut value: u32, w: &mut W) -> crate::Result<()> {
+fn write_var_u32<W: Write>(mut value: u32, w: &mut W) -> std::io::Result<usize> {
+    let mut n = 1;
     while value >= 0b10000000 {
         let b = ((value & 0b01111111) as u8) | 0b10000000;
         w.write_u8(b)?;
+        n += 1;
         value = value >> 7;
     }
-
-    Ok(w.write_u8((value & 0b01111111) as u8)?)
+    w.write_u8((value & 0b01111111) as u8)?;
+    Ok(n)
 }
 
-fn write_var_u64<W: Write>(mut value: u64, w: &mut W) -> crate::Result<()> {
+fn write_var_u64<W: Write>(mut value: u64, w: &mut W) -> std::io::Result<usize> {
+    let mut n = 1;
     while value >= 0b10000000 {
         let b = ((value & 0b01111111) as u8) | 0b10000000;
         w.write_u8(b)?;
+        n += 1;
         value = value >> 7;
     }
-
-    Ok(w.write_u8((value & 0b01111111) as u8)?)
+    w.write_u8((value & 0b01111111) as u8)?;
+    Ok(n)
 }
 
-fn write_var_i64<W: Write>(mut value: i64, w: &mut W) -> crate::Result<()> {
+fn write_var_i64<W: Write>(mut value: i64, w: &mut W) -> std::io::Result<usize> {
+    let mut n = 1;
     let is_negative = value < 0;
     value = if is_negative { -value } else { value };
     w.write_u8(
@@ -233,12 +259,13 @@ fn write_var_i64<W: Write>(mut value: i64, w: &mut W) -> crate::Result<()> {
                 0
             } | (0b01111111i64 & value) as u8,
         )?;
+        n += 1;
         value >>= 7;
     }
-    Ok(())
+    Ok(n)
 }
 
-fn read_var_u64<R: Read>(r: &mut R) -> crate::Result<u64> {
+fn read_var_u64<R: Read>(r: &mut R) -> std::io::Result<u64> {
     let mut num = 0;
     let mut len: usize = 0;
     loop {
@@ -249,12 +276,12 @@ fn read_var_u64<R: Read>(r: &mut R) -> crate::Result<u64> {
             return Ok(num);
         }
         if len > 70 {
-            return Err(Error::ValueOutOfRange);
+            return out_of_range();
         }
     }
 }
 
-fn read_var_u32<R: Read>(r: &mut R) -> crate::Result<u32> {
+fn read_var_u32<R: Read>(r: &mut R) -> std::io::Result<u32> {
     let mut num = 0;
     let mut len: usize = 0;
     loop {
@@ -267,12 +294,12 @@ fn read_var_u32<R: Read>(r: &mut R) -> crate::Result<u32> {
         if len > 70 {
             // a proper setting for 32bit int would be 35 bits, however for Yjs compatibility
             // we allow wrap up up to 64bit ints (with int overflow wrap)
-            return Err(Error::ValueOutOfRange);
+            return out_of_range();
         }
     }
 }
 
-fn read_var_i64<R: Read>(reader: &mut R) -> crate::Result<i64> {
+fn read_var_i64<R: Read>(reader: &mut R) -> std::io::Result<i64> {
     let mut r = reader.read_u8()?;
     let mut num = (r & 0b00111111u8) as i64;
     let mut len: u32 = 6;
@@ -288,14 +315,14 @@ fn read_var_i64<R: Read>(reader: &mut R) -> crate::Result<i64> {
             return Ok(if is_negative { -num } else { num });
         }
         if len > 70 {
-            return Err(Error::ValueOutOfRange);
+            return out_of_range();
         }
     }
 }
 
 pub trait SignedVarInt: Sized + Copy {
-    fn write_signed<W: Write>(value: &Signed<Self>, w: &mut W) -> crate::Result<()>;
-    fn read_signed<R: Read>(r: &mut R) -> crate::Result<Signed<Self>>;
+    fn write_signed<W: Write>(value: &Signed<Self>, w: &mut W) -> std::io::Result<()>;
+    fn read_signed<R: Read>(r: &mut R) -> std::io::Result<Signed<Self>>;
 }
 
 /// Struct which recognizes signed integer values. This special case has been build for Yjs encoding
@@ -340,7 +367,7 @@ impl<T: Sized + Copy> Signed<T> {
 }
 
 impl SignedVarInt for i64 {
-    fn write_signed<W: Write>(s: &Signed<Self>, w: &mut W) -> crate::Result<()> {
+    fn write_signed<W: Write>(s: &Signed<Self>, w: &mut W) -> std::io::Result<()> {
         let mut value = s.value;
         let is_negative = s.is_negative;
         value = if is_negative { -value } else { value };
@@ -366,7 +393,7 @@ impl SignedVarInt for i64 {
         Ok(())
     }
 
-    fn read_signed<R: Read>(reader: &mut R) -> crate::Result<Signed<Self>> {
+    fn read_signed<R: Read>(reader: &mut R) -> std::io::Result<Signed<Self>> {
         let mut r = reader.read_u8()?;
         let mut num = (r & 0b00111111u8) as i64;
         let mut len: u32 = 6;
@@ -384,68 +411,68 @@ impl SignedVarInt for i64 {
                 return Ok(Signed::new(num, is_negative));
             }
             if len > 70 {
-                return Err(Error::ValueOutOfRange);
+                return out_of_range();
             }
         }
     }
 }
 
 impl SignedVarInt for isize {
-    fn write_signed<W: Write>(value: &Signed<Self>, w: &mut W) -> crate::Result<()> {
+    fn write_signed<W: Write>(value: &Signed<Self>, w: &mut W) -> std::io::Result<()> {
         let value = value.map(|v| v as i64);
         i64::write_signed(&value, w)
     }
 
-    fn read_signed<R: Read>(r: &mut R) -> crate::Result<Signed<Self>> {
+    fn read_signed<R: Read>(r: &mut R) -> std::io::Result<Signed<Self>> {
         let result = i64::read_signed(r)?;
         match result.value.try_into() {
             Ok(i) => Ok(Signed::new(i, result.is_negative)),
-            Err(_) => Err(Error::ValueOutOfRange),
+            Err(_) => out_of_range(),
         }
     }
 }
 
 impl SignedVarInt for i32 {
-    fn write_signed<W: Write>(value: &Signed<Self>, w: &mut W) -> crate::Result<()> {
+    fn write_signed<W: Write>(value: &Signed<Self>, w: &mut W) -> std::io::Result<()> {
         let value = value.map(|v| v as i64);
         i64::write_signed(&value, w)
     }
 
-    fn read_signed<R: Read>(r: &mut R) -> crate::Result<Signed<Self>> {
+    fn read_signed<R: Read>(r: &mut R) -> std::io::Result<Signed<Self>> {
         let result = i64::read_signed(r)?;
         match result.value.try_into() {
             Ok(i) => Ok(Signed::new(i, result.is_negative)),
-            Err(_) => Err(Error::ValueOutOfRange),
+            Err(_) => out_of_range(),
         }
     }
 }
 
 impl SignedVarInt for i16 {
-    fn write_signed<W: Write>(value: &Signed<Self>, w: &mut W) -> crate::Result<()> {
+    fn write_signed<W: Write>(value: &Signed<Self>, w: &mut W) -> std::io::Result<()> {
         let value = value.map(|v| v as i64);
         i64::write_signed(&value, w)
     }
 
-    fn read_signed<R: Read>(r: &mut R) -> crate::Result<Signed<Self>> {
+    fn read_signed<R: Read>(r: &mut R) -> std::io::Result<Signed<Self>> {
         let result = i64::read_signed(r)?;
         match result.value.try_into() {
             Ok(i) => Ok(Signed::new(i, result.is_negative)),
-            Err(_) => Err(Error::ValueOutOfRange),
+            Err(_) => out_of_range(),
         }
     }
 }
 
 impl SignedVarInt for i8 {
-    fn write_signed<W: Write>(value: &Signed<Self>, w: &mut W) -> crate::Result<()> {
+    fn write_signed<W: Write>(value: &Signed<Self>, w: &mut W) -> std::io::Result<()> {
         let value = value.map(|v| v as i64);
         i64::write_signed(&value, w)
     }
 
-    fn read_signed<R: Read>(r: &mut R) -> crate::Result<Signed<Self>> {
+    fn read_signed<R: Read>(r: &mut R) -> std::io::Result<Signed<Self>> {
         let result = i64::read_signed(r)?;
         match result.value.try_into() {
             Ok(i) => Ok(Signed::new(i, result.is_negative)),
-            Err(_) => Err(Error::ValueOutOfRange),
+            Err(_) => out_of_range(),
         }
     }
 }

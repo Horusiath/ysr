@@ -1,10 +1,10 @@
+use crate::block::BlockMut;
 use crate::store::keys::STATE_VECTOR_KEY;
 use crate::store::{AsKey, Cursor, CursorEntry, Transaction};
 use crate::{ClientID, Clock, MultiDoc, Store};
 use heed::types::Bytes;
-use heed::{Database, Env, MdbError, PutFlags, RwPrefix, RwTxn};
-use smallvec::{smallvec, smallvec_inline, SmallVec};
-use std::borrow::Cow;
+use heed::{Database, Env, RwPrefix, RwTxn};
+use smallvec::smallvec_inline;
 use std::io::Write;
 use std::marker::PhantomData;
 use std::str::from_utf8;
@@ -67,12 +67,12 @@ impl<'db> Transaction<'db> for LmdbTransaction<'db> {
         Ok(())
     }
 
-    fn get<K: AsKey>(&self, key: &K) -> crate::Result<Option<K::Value>> {
+    fn put_block(&mut self, block: BlockMut) -> crate::Result<()> {
         todo!()
     }
 
-    fn prefixed<'tx, K: AsKey>(&'tx mut self, from: K) -> crate::Result<Self::Cursor<'tx, K>> {
-        let prefix = from.as_key();
+    fn prefixed<K: AsKey>(&mut self, prefix: &K) -> crate::Result<Self::Cursor<'_, K>> {
+        let prefix = prefix.as_key();
         let cursor = self.db.prefix_iter_mut(&mut self.tx, prefix)?;
         Ok(LmdbCursor::new(cursor))
     }

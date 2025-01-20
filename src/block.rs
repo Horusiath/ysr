@@ -13,6 +13,14 @@ pub struct ID {
     pub client: ClientID,
     pub clock: Clock,
 }
+
+impl ID {
+    #[inline]
+    pub fn new(client: ClientID, clock: Clock) -> Self {
+        Self { client, clock }
+    }
+}
+
 impl Debug for ID {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         Display::fmt(self, f)

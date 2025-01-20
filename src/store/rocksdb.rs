@@ -1,3 +1,4 @@
+use crate::block::BlockMut;
 use crate::store::keys::STATE_VECTOR_KEY;
 use crate::store::{AsKey, Cursor, CursorEntry, Transaction};
 use crate::{ClientID, Clock, MultiDoc, Store};
@@ -62,12 +63,12 @@ impl<'db> Transaction<'db> for RocksDbTransaction<'db> {
         Ok(self.inner.rollback()?)
     }
 
-    fn get<K: AsKey>(&self, key: &K) -> crate::Result<Option<K::Value>> {
+    fn put_block(&mut self, block: BlockMut) -> crate::Result<()> {
         todo!()
     }
 
-    fn prefixed<'tx, K: AsKey>(&'tx mut self, from: K) -> crate::Result<Self::Cursor<'tx, K>> {
-        let key = from.as_key();
+    fn prefixed<K: AsKey>(&mut self, prefix: &K) -> crate::Result<Self::Cursor<'_, K>> {
+        let key = prefix.as_key();
         let mut prefix = self.prefix.clone();
         prefix.extend_from_slice(key);
         let iter = self.inner.prefix_iterator(prefix);

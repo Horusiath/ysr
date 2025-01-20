@@ -1,3 +1,4 @@
+use crate::block::BlockMut;
 use crate::{ClientID, Clock, StateVector};
 use std::collections::BTreeMap;
 
@@ -33,12 +34,11 @@ pub trait Transaction<'db> {
     fn commit(self) -> crate::Result<()>;
     fn rollback(self) -> crate::Result<()>;
 
-    fn get<K: AsKey>(&self, key: &K) -> crate::Result<Option<K::Value>>;
-    fn prefixed<'tx, K: AsKey>(&'tx mut self, from: K) -> crate::Result<Self::Cursor<'tx, K>>;
-
+    fn put_block(&mut self, block: BlockMut) -> crate::Result<()>;
+    fn prefixed<'tx, K: AsKey>(&'tx mut self, prefix: &K) -> crate::Result<Self::Cursor<'tx, K>>;
     fn next_sequence_number(&mut self, client_id: &ClientID) -> crate::Result<Clock>;
     fn state_vector(&mut self) -> crate::Result<StateVector> {
-        let mut cursor = self.prefixed(keys::StateVectorKey)?;
+        let mut cursor = self.prefixed(&keys::StateVectorKey)?;
         let mut sv = BTreeMap::new();
         for res in cursor {
             let entry = res?;
