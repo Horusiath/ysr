@@ -1,4 +1,3 @@
-#![feature(allocator_api)]
 
 mod block;
 mod content;

@@ -2,7 +2,6 @@ use crate::block::ID;
 use crate::varint::{Signed, SignedVarInt, VarInt};
 use crate::{lib0, ClientID, Clock, U64};
 use serde::de::DeserializeOwned;
-use std::alloc::{Allocator, Global, GlobalAlloc};
 use std::fmt::{Debug, Display, Formatter};
 use std::io::{ErrorKind, Read};
 use std::ops::Range;
@@ -96,7 +95,7 @@ pub trait ReadExt: Read + Sized {
     }
 
     /// Read a variable length buffer.
-    fn read_bytes<A: Allocator>(&mut self, buf: &mut Vec<u8, A>) -> std::io::Result<()> {
+    fn read_bytes(&mut self, buf: &mut Vec<u8>) -> std::io::Result<()> {
         let len: u64 = self.read_var()?;
         if buf.try_reserve(len as usize).is_err() {
             return Err(std::io::Error::new(
@@ -157,26 +156,20 @@ pub trait ReadExt: Read + Sized {
 
 impl<T: Read> ReadExt for T {}
 
-pub struct DecoderV1<R, A: Allocator = Global> {
+pub struct DecoderV1<R> {
     reader: R,
-    alloc: A,
 }
 
-impl<R: Read> DecoderV1<R, Global> {
+impl<R: Read> DecoderV1<R> {
     #[inline]
     pub fn new(reader: R) -> Self {
         DecoderV1 {
-            reader,
-            alloc: Global,
+            reader
         }
     }
 }
 
-impl<R: Read, A: Allocator> DecoderV1<R, A> {
-    #[inline]
-    pub fn new_in(reader: R, alloc: A) -> Self {
-        DecoderV1 { reader, alloc }
-    }
+impl<R: Read> DecoderV1<R> {
 
     fn read_id(&mut self) -> crate::Result<ID> {
         let client: ClientID = self.reader.read_var()?;
@@ -185,7 +178,7 @@ impl<R: Read, A: Allocator> DecoderV1<R, A> {
     }
 }
 
-impl<R: Read> From<R> for DecoderV1<R, Global> {
+impl<R: Read> From<R> for DecoderV1<R> {
     #[inline]
     fn from(reader: R) -> Self {
         Self::new(reader)
@@ -258,7 +251,7 @@ impl<R: Read> Decoder for DecoderV1<R> {
     }
 
     fn read_json<D: DeserializeOwned>(&mut self) -> crate::Result<D> {
-        let mut buf = Vec::new_in(self.alloc);
+        let mut buf = Vec::new();
         self.read_bytes(&mut buf)?;
         let data = serde_json::from_slice(&buf)?;
         Ok(data)

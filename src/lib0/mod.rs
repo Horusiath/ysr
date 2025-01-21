@@ -1,6 +1,5 @@
 use serde::de::{DeserializeOwned, Expected};
 use serde::{Deserialize, Serialize};
-use std::alloc::Allocator;
 use std::fmt::Display;
 use std::io::{Read, Write};
 
