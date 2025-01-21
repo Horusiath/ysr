@@ -5,20 +5,26 @@ use crate::lib0::{
 use crate::read::ReadExt;
 use serde::de::{DeserializeSeed, Error, MapAccess, SeqAccess, Unexpected, Visitor};
 use serde::{de, Deserialize};
-use std::io::Read;
+use smallvec::SmallVec;
+use std::io::{Cursor, Read};
+
+const DEFAULT_INLINE_STRING_SIZE: usize = 16;
 
 pub(super) struct Deserializer<R> {
     reader: R,
-    peek: Option<u8>,
+    peeked_tag: Option<u8>,
 }
 
 impl<R: Read> Deserializer<R> {
     pub fn new(reader: R) -> Self {
-        Deserializer { reader, peek: None }
+        Deserializer {
+            reader,
+            peeked_tag: None,
+        }
     }
 
     fn read_tag(&mut self) -> Result<u8, super::Error> {
-        match self.peek.take() {
+        match self.peeked_tag.take() {
             Some(tag) => Ok(tag),
             None => Ok(self.reader.read_u8()?),
         }
@@ -35,11 +41,11 @@ impl<R: Read> Deserializer<R> {
     }
 
     fn peek_tag(&mut self) -> Result<u8, super::Error> {
-        match self.peek {
+        match self.peeked_tag {
             Some(tag) => Ok(tag),
             None => {
                 let tag = self.reader.read_u8()?;
-                self.peek = Some(tag);
+                self.peeked_tag = Some(tag);
                 Ok(tag)
             }
         }
@@ -75,9 +81,10 @@ impl<R: Read> Deserializer<R> {
             Tag::True => visitor.visit_bool(true),
             Tag::False => visitor.visit_bool(false),
             Tag::String => {
-                let mut buf = String::new(); // TODO: String::new_in(self.alloc)
+                let mut buf: SmallVec<[u8; DEFAULT_INLINE_STRING_SIZE]> = SmallVec::new();
                 self.reader.read_string(&mut buf)?;
-                visitor.visit_string(buf)
+                let str = std::str::from_utf8(&buf)?;
+                visitor.visit_str(str)
             }
             Tag::Object => visitor.visit_map(Access::new(self)?),
             Tag::Array => visitor.visit_seq(Access::new(self)?),
@@ -220,9 +227,10 @@ impl<'de, R: Read> serde::Deserializer<'de> for &'de mut Deserializer<R> {
         V: Visitor<'de>,
     {
         self.expect_tag(TAG_STRING)?;
-        let mut buf = String::new(); // TODO: String::new_in(self.alloc)
+        let mut buf: SmallVec<[u8; 4]> = SmallVec::new();
         self.reader.read_string(&mut buf)?;
-        match buf.chars().next() {
+        let str = std::str::from_utf8(&buf)?;
+        match str.chars().next() {
             None => Err(super::Error::invalid_value(
                 Unexpected::Str(""),
                 &ExpectedString("character"),
@@ -236,16 +244,21 @@ impl<'de, R: Read> serde::Deserializer<'de> for &'de mut Deserializer<R> {
         V: Visitor<'de>,
     {
         self.expect_tag(TAG_STRING)?;
-        let mut buf = String::new(); // TODO: String::new_in(self.alloc)
+        let mut buf: SmallVec<[u8; DEFAULT_INLINE_STRING_SIZE]> = SmallVec::new();
         self.reader.read_string(&mut buf)?;
-        visitor.visit_string(buf)
+        let str = std::str::from_utf8(&buf)?;
+        visitor.visit_str(str)
     }
 
     fn deserialize_string<V>(self, visitor: V) -> Result<V::Value, Self::Error>
     where
         V: Visitor<'de>,
     {
-        self.deserialize_str(visitor)
+        self.expect_tag(TAG_STRING)?;
+        let mut buf = String::new();
+        let writer = unsafe { buf.as_mut_vec() };
+        self.reader.read_string(writer)?;
+        visitor.visit_string(buf)
     }
 
     fn deserialize_bytes<V>(self, visitor: V) -> Result<V::Value, Self::Error>
@@ -272,7 +285,7 @@ impl<'de, R: Read> serde::Deserializer<'de> for &'de mut Deserializer<R> {
         let tag = self.peek_tag()?;
         match tag {
             TAG_UNDEFINED | TAG_NULL => {
-                self.peek = None; // reset peek
+                self.peeked_tag = None; // reset peek
                 visitor.visit_none()
             }
             _ => visitor.visit_some(self),
@@ -396,12 +409,6 @@ impl<'a, R: Read> Access<'a, R> {
     fn new(de: &'a mut Deserializer<R>) -> Result<Self, super::Error> {
         let len = de.reader.read_var()?;
         Ok(Access { de, len })
-    }
-
-    fn read_variant(self) -> Result<String, super::Error> {
-        let mut buf = String::new();
-        self.de.reader.read_string(&mut buf)?;
-        Ok(buf)
     }
 }
 
@@ -655,7 +662,10 @@ impl<'a, 'de, R: Read> de::Deserializer<'de> for MapKey<'a, R> {
     where
         V: Visitor<'de>,
     {
-        self.deserialize_string(visitor)
+        let mut buf: SmallVec<[u8; DEFAULT_INLINE_STRING_SIZE]> = SmallVec::new();
+        self.de.reader.read_string(&mut buf)?;
+        let str = std::str::from_utf8(&buf)?;
+        visitor.visit_str(str)
     }
 
     #[inline]
@@ -663,9 +673,10 @@ impl<'a, 'de, R: Read> de::Deserializer<'de> for MapKey<'a, R> {
     where
         V: Visitor<'de>,
     {
-        let mut buf = String::new(); // TODO: String::new_in(self.alloc)
-        self.de.reader.read_string(&mut buf)?;
-        visitor.visit_string(buf)
+        let mut s = String::new();
+        let buf = unsafe { s.as_mut_vec() };
+        self.de.reader.read_string(buf)?;
+        visitor.visit_string(s)
     }
 
     #[inline]

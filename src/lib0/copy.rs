@@ -21,7 +21,6 @@ fn copy_any<R: Read, W: Write>(
 ) -> Result<(), super::Error> {
     let tag = src.read_u8()?;
     let tag = Tag::try_from(tag)?;
-    //println!("tag: {:?}", tag);
     dst.write_u8(tag as u8)?;
     *n += 1;
     match tag {
@@ -44,26 +43,21 @@ fn copy_any<R: Read, W: Write>(
             let num: i64 = src.read_var()?;
             *n += dst.write_var(num)?;
         }
-        Tag::String => copy_string(src, dst, n)?,
+        Tag::String | Tag::ByteArray => copy_var_bytes(src, dst, n)?,
         Tag::Object => copy_object(src, dst, n)?,
         Tag::Array => copy_array(src, dst, n)?,
-        Tag::ByteArray => {
-            let mut buf = Vec::new();
-            src.read_bytes(&mut buf)?;
-            *n += dst.write_bytes(&buf)?;
-        }
     }
     Ok(())
 }
 
-fn copy_string<R: Read, W: Write>(
+fn copy_var_bytes<R: Read, W: Write>(
     src: &mut R,
     dst: &mut W,
     n: &mut usize,
 ) -> Result<(), super::Error> {
-    let mut buf = String::new();
-    src.read_string(&mut buf)?;
-    *n += dst.write_string(&buf)?;
+    let len: u64 = src.read_var()?;
+    *n += dst.write_var(len)?;
+    *n += std::io::copy(&mut src.take(len), dst)? as usize;
     Ok(())
 }
 
@@ -74,9 +68,8 @@ fn copy_object<R: Read, W: Write>(
 ) -> Result<(), super::Error> {
     let len: usize = src.read_var()?;
     *n += dst.write_var(len)?;
-    //println!("\t copy object with {} fields", len);
     for _ in 0..len {
-        copy_string(src, dst, n)?;
+        copy_var_bytes(src, dst, n)?;
         copy_any(src, dst, n)?;
     }
     Ok(())

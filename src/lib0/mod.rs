@@ -2,6 +2,7 @@ use serde::de::{DeserializeOwned, Expected};
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use std::io::{Read, Write};
+use std::str::Utf8Error;
 
 mod copy;
 mod de;
@@ -97,6 +98,8 @@ pub enum Error {
     NonStringKey,
     #[error("cannot deserialize payload - unknown tag: {0}")]
     UnknownTag(u8),
+    #[error("invalid UTF8 string: {0}")]
+    Utf8(#[from] Utf8Error),
     #[error("lib0 error: {0}")]
     Custom(String),
 }

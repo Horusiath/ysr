@@ -3,18 +3,12 @@ use crate::varint::{Signed, SignedVarInt, VarInt};
 use crate::{lib0, ClientID, Clock, U64};
 use serde::de::DeserializeOwned;
 use std::fmt::{Debug, Display, Formatter};
-use std::io::{ErrorKind, Read};
+use std::io::{Read, Write};
 use std::ops::Range;
 
-#[derive(Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct BufferReservationError;
 impl std::error::Error for BufferReservationError {}
-
-impl Debug for BufferReservationError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        todo!()
-    }
-}
 
 impl Display for BufferReservationError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -54,7 +48,7 @@ pub trait Decoder: Read {
     fn read_len(&mut self) -> crate::Result<U64>;
 
     /// Read key string.
-    fn read_key(&mut self, buf: &mut String) -> crate::Result<()>;
+    fn read_key<W: Write>(&mut self, w: &mut W) -> crate::Result<u64>;
 
     /// Decode a JSON-like data type. It's a complex type which is an extension of native JavaScript
     /// Object Notation.
@@ -95,26 +89,14 @@ pub trait ReadExt: Read + Sized {
     }
 
     /// Read a variable length buffer.
-    fn read_bytes(&mut self, buf: &mut Vec<u8>) -> std::io::Result<()> {
+    fn read_bytes<W: Write>(&mut self, w: &mut W) -> std::io::Result<u64> {
         let len: u64 = self.read_var()?;
-        if buf.try_reserve(len as usize).is_err() {
-            return Err(std::io::Error::new(
-                ErrorKind::InvalidInput,
-                BufferReservationError,
-            ));
-        }
-        let len = buf.len() + len as usize;
-        let slice: &mut [u8] = unsafe { std::mem::transmute(buf.spare_capacity_mut()) };
-        self.read_exact(&mut slice[0..len])?;
-        unsafe {
-            buf.set_len(len);
-        }
-        Ok(())
+        Ok(std::io::copy(&mut self.take(len), w)?)
     }
 
     /// Read string of variable length.
-    fn read_string(&mut self, str: &mut String) -> std::io::Result<()> {
-        self.read_bytes(unsafe { str.as_mut_vec() })
+    fn read_string<W: Write>(&mut self, w: &mut W) -> std::io::Result<u64> {
+        self.read_bytes(w)
     }
 
     /// Read float32 in big endian order
@@ -163,14 +145,11 @@ pub struct DecoderV1<R> {
 impl<R: Read> DecoderV1<R> {
     #[inline]
     pub fn new(reader: R) -> Self {
-        DecoderV1 {
-            reader
-        }
+        DecoderV1 { reader }
     }
 }
 
 impl<R: Read> DecoderV1<R> {
-
     fn read_id(&mut self) -> crate::Result<ID> {
         let client: ClientID = self.reader.read_var()?;
         let clock: Clock = self.reader.read_var()?;
@@ -242,8 +221,8 @@ impl<R: Read> Decoder for DecoderV1<R> {
     }
 
     #[inline]
-    fn read_key(&mut self, buf: &mut String) -> crate::Result<()> {
-        Ok(self.read_string(buf)?)
+    fn read_key<W: Write>(&mut self, w: &mut W) -> crate::Result<u64> {
+        Ok(self.read_string(w)?)
     }
 
     fn read_any<D: DeserializeOwned>(&mut self) -> crate::Result<D> {

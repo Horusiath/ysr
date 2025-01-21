@@ -3,6 +3,12 @@ use std::io::{Read, Write};
 
 pub(crate) struct TransactionState {}
 
+impl TransactionState {
+    fn commit<'db, T: crate::store::Transaction<'db>>(&self, tx: &T) -> crate::Result<()> {
+        todo!()
+    }
+}
+
 pub struct Transaction<'db, S: Store + 'db> {
     inner: S::Transaction<'db>,
     state: Option<Box<TransactionState>>,
@@ -37,7 +43,14 @@ impl<'db, S: Store> Transaction<'db, S> {
         todo!()
     }
 
-    pub fn commit(self) {
-        todo!()
+    pub fn commit(mut self) -> crate::Result<()> {
+        use crate::store::Transaction;
+        if let Some(state) = self.state.take() {
+            // commit the transaction
+            state.commit(&self.inner)?;
+            self.inner.commit()
+        } else {
+            Ok(()) // readonly or already committed transaction
+        }
     }
 }

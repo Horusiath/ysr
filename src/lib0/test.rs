@@ -1,5 +1,6 @@
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::io::Cursor;
@@ -15,8 +16,9 @@ where
 
     // 2. copy object over
     let mut buf2 = Vec::new();
-    super::copy(&mut Cursor::new(&buf), &mut buf2).unwrap();
+    let copied = super::copy(&mut Cursor::new(&buf), &mut buf2).unwrap();
     assert_eq!(buf, buf2);
+    assert_eq!(buf.len(), copied);
 
     // 3. read object from copy
     let deserialized: T = super::from_reader(&mut Cursor::new(buf2)).unwrap();
