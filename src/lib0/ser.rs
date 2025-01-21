@@ -1,6 +1,6 @@
 use crate::lib0::{
-    ExpectedString, TAG_ARRAY, TAG_BIGINT, TAG_BYTE_ARRAY, TAG_FALSE, TAG_FLOAT32, TAG_FLOAT64,
-    TAG_INTEGER, TAG_NULL, TAG_OBJECT, TAG_STRING, TAG_TRUE, TAG_UNDEFINED,
+    ExpectedString, Tag, TAG_ARRAY, TAG_BIGINT, TAG_BYTE_ARRAY, TAG_FALSE, TAG_FLOAT32,
+    TAG_FLOAT64, TAG_INTEGER, TAG_NULL, TAG_OBJECT, TAG_STRING, TAG_TRUE, TAG_UNDEFINED,
 };
 use crate::write::WriteExt;
 use serde::de::{Error, Expected, Unexpected};
@@ -93,21 +93,21 @@ impl<'a, W: Write> serde::ser::Serializer for &'a mut Serializer<W> {
     fn serialize_u8(self, v: u8) -> Result<Self::Ok, Self::Error> {
         // TYPE 125: INTEGER
         self.writer.write_u8(TAG_INTEGER)?;
-        self.writer.write_var(v)?;
+        self.writer.write_var(v as i64)?;
         Ok(())
     }
 
     fn serialize_u16(self, v: u16) -> Result<Self::Ok, Self::Error> {
         // TYPE 125: INTEGER
         self.writer.write_u8(TAG_INTEGER)?;
-        self.writer.write_var(v)?;
+        self.writer.write_var(v as i64)?;
         Ok(())
     }
 
     fn serialize_u32(self, v: u32) -> Result<Self::Ok, Self::Error> {
         // TYPE 125: INTEGER
         self.writer.write_u8(125)?;
-        self.writer.write_var(v)?;
+        self.writer.write_var(v as i64)?;
         Ok(())
     }
 
@@ -120,6 +120,7 @@ impl<'a, W: Write> serde::ser::Serializer for &'a mut Serializer<W> {
                 &ExpectedString("integer within i64 bounds"),
             ));
         }
+
         self.serialize_i64(v)
     }
 
@@ -131,9 +132,15 @@ impl<'a, W: Write> serde::ser::Serializer for &'a mut Serializer<W> {
     }
 
     fn serialize_f64(self, v: f64) -> Result<Self::Ok, Self::Error> {
-        // TYPE 123: FLOAT64
-        self.writer.write_u8(TAG_FLOAT64)?;
-        self.writer.write_f64(v)?;
+        if ((v as f32) as f64) == v {
+            // TYPE 1234 FLOAT32
+            self.writer.write_u8(TAG_FLOAT32)?;
+            self.writer.write_f32(v as f32)?;
+        } else {
+            // TYPE 123: FLOAT64
+            self.writer.write_u8(TAG_FLOAT64)?;
+            self.writer.write_f64(v)?;
+        }
         Ok(())
     }
 
@@ -186,14 +193,16 @@ impl<'a, W: Write> serde::ser::Serializer for &'a mut Serializer<W> {
         _variant_index: u32,
         variant: &'static str,
     ) -> Result<Self::Ok, Self::Error> {
-        /* same as serializing `{ "variant": undefined }` */
+        /* same as serializing { "variant": [] } */
 
         // TYPE 118: Map
         self.writer.write_u8(TAG_OBJECT)?;
         self.writer.write_var(1)?;
         self.writer.write_string(variant)?;
-        // TYPE 127: undefined
-        ().serialize(self)?;
+        // TYPE 117: Array
+
+        self.writer.write_u8(TAG_ARRAY)?;
+        self.writer.write_var(0)?;
         Ok(())
     }
 
@@ -218,14 +227,14 @@ impl<'a, W: Write> serde::ser::Serializer for &'a mut Serializer<W> {
     where
         T: ?Sized + Serialize,
     {
-        /* same as serializing `{ "variant": value }` */
+        /* same as serializing `{ "variant": [value] }` */
 
         // TYPE 118: Map
         self.writer.write_u8(TAG_OBJECT)?;
         self.writer.write_var(1)?;
         self.writer.write_string(variant)?;
-        // TYPE 127: undefined
-        value.serialize(self)?;
+        // TYPE 117: Array
+        [value].serialize(self)?;
         Ok(())
     }
 
@@ -256,6 +265,7 @@ impl<'a, W: Write> serde::ser::Serializer for &'a mut Serializer<W> {
         len: usize,
     ) -> Result<Self::SerializeTupleVariant, Self::Error> {
         /* same as serializing `{ "variant": [a, b, c] }` */
+
         // TYPE 118: Map
         self.writer.write_u8(TAG_OBJECT)?;
         self.writer.write_var(1)?;
@@ -286,6 +296,7 @@ impl<'a, W: Write> serde::ser::Serializer for &'a mut Serializer<W> {
         len: usize,
     ) -> Result<Self::SerializeStructVariant, Self::Error> {
         /* same as serializing `{ "variant": { "a": b, "c": d } }` */
+
         // TYPE 118: Map
         self.writer.write_u8(TAG_OBJECT)?;
         self.writer.write_var(1)?;
@@ -524,7 +535,8 @@ impl<'a, 'b, W: Write> serde::Serializer for &'b mut MapSerializer<'a, W> {
 
     #[inline]
     fn serialize_str(self, v: &str) -> Result<Self::Ok, Self::Error> {
-        self.ser.serialize_str(v)
+        self.ser.writer.write_string(v)?;
+        Ok(())
     }
 
     #[inline]

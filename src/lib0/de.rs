@@ -1,62 +1,91 @@
 use crate::lib0::{
-    ExpectedString, TAG_ARRAY, TAG_BIGINT, TAG_BYTE_ARRAY, TAG_FALSE, TAG_FLOAT32, TAG_FLOAT64,
-    TAG_INTEGER, TAG_NULL, TAG_OBJECT, TAG_STRING, TAG_TRUE, TAG_UNDEFINED,
+    ExpectedString, Tag, Value, TAG_ARRAY, TAG_BIGINT, TAG_BYTE_ARRAY, TAG_FALSE, TAG_FLOAT32,
+    TAG_FLOAT64, TAG_INTEGER, TAG_NULL, TAG_OBJECT, TAG_STRING, TAG_TRUE, TAG_UNDEFINED,
 };
 use crate::read::ReadExt;
-use serde::de::{DeserializeSeed, Error, Unexpected, Visitor};
+use serde::de::{DeserializeSeed, Error, MapAccess, SeqAccess, Unexpected, Visitor};
+use serde::{de, Deserialize};
 use std::io::Read;
 
 pub(super) struct Deserializer<R> {
     reader: R,
+    peek: Option<u8>,
 }
 
 impl<R: Read> Deserializer<R> {
     pub fn new(reader: R) -> Self {
-        Deserializer { reader }
+        Deserializer { reader, peek: None }
+    }
+
+    fn read_tag(&mut self) -> Result<u8, super::Error> {
+        match self.peek.take() {
+            Some(tag) => Ok(tag),
+            None => Ok(self.reader.read_u8()?),
+        }
+    }
+
+    #[inline]
+    fn expect_tag(&mut self, tag: u8) -> Result<(), super::Error> {
+        let actual = self.read_tag()?;
+        if actual == tag {
+            Ok(())
+        } else {
+            Err(super::Error::UnknownTag(actual))
+        }
+    }
+
+    fn peek_tag(&mut self) -> Result<u8, super::Error> {
+        match self.peek {
+            Some(tag) => Ok(tag),
+            None => {
+                let tag = self.reader.read_u8()?;
+                self.peek = Some(tag);
+                Ok(tag)
+            }
+        }
     }
 
     fn deserialize_any_tagged<'de, V>(
         &'de mut self,
-        tag: u8,
+        tag: Tag,
         visitor: V,
     ) -> Result<V::Value, super::Error>
     where
         V: Visitor<'de>,
     {
         match tag {
-            TAG_UNDEFINED => visitor.visit_unit(),
-            TAG_NULL => visitor.visit_none(),
-            TAG_INTEGER => {
+            Tag::Undefined => visitor.visit_unit(),
+            Tag::Null => visitor.visit_none(),
+            Tag::VarInt => {
                 let num: i64 = self.reader.read_var()?;
                 visitor.visit_i64(num)
             }
-            TAG_FLOAT32 => {
+            Tag::Float32 => {
                 let num: f32 = self.reader.read_f32()?;
                 visitor.visit_f32(num)
             }
-            TAG_FLOAT64 => {
+            Tag::Float64 => {
                 let num: f64 = self.reader.read_f64()?;
                 visitor.visit_f64(num)
             }
-            TAG_BIGINT => {
+            Tag::BigInt => {
                 let num: i64 = self.reader.read_i64()?;
                 visitor.visit_i64(num)
             }
-            TAG_TRUE => visitor.visit_bool(true),
-            TAG_FALSE => visitor.visit_bool(false),
-            TAG_STRING => {
+            Tag::True => visitor.visit_bool(true),
+            Tag::False => visitor.visit_bool(false),
+            Tag::String => {
                 let mut buf = String::new(); // TODO: String::new_in(self.alloc)
                 self.reader.read_string(&mut buf)?;
                 visitor.visit_string(buf)
             }
-            TAG_OBJECT => visitor.visit_map(MapAccess::new(self)?),
-            TAG_ARRAY => visitor.visit_seq(SeqAccess::new(self)?),
-            TAG_BYTE_ARRAY => {
+            Tag::Object => visitor.visit_map(Access::new(self)?),
+            Tag::Array => visitor.visit_seq(Access::new(self)?),
+            Tag::ByteArray => {
                 let mut buf = Vec::new(); // TODO: String::new_in(self.alloc)
                 self.reader.read_bytes(&mut buf)?;
                 visitor.visit_byte_buf(buf)
             }
-            tag => Err(super::Error::UnknownTag(tag)),
         }
     }
 }
@@ -68,7 +97,7 @@ impl<'de, R: Read> serde::Deserializer<'de> for &'de mut Deserializer<R> {
     where
         V: Visitor<'de>,
     {
-        let tag = self.reader.read_u8()?;
+        let tag: Tag = self.read_tag()?.try_into()?;
         self.deserialize_any_tagged(tag, visitor)
     }
 
@@ -76,7 +105,7 @@ impl<'de, R: Read> serde::Deserializer<'de> for &'de mut Deserializer<R> {
     where
         V: Visitor<'de>,
     {
-        let tag = self.reader.read_u8()?;
+        let tag = self.read_tag()?;
         match tag {
             TAG_TRUE => visitor.visit_bool(true),
             TAG_FALSE => visitor.visit_bool(false),
@@ -109,25 +138,25 @@ impl<'de, R: Read> serde::Deserializer<'de> for &'de mut Deserializer<R> {
     where
         V: Visitor<'de>,
     {
-        let tag = self.reader.read_u8()?;
+        let tag: Tag = self.read_tag()?.try_into()?;
         match tag {
-            TAG_INTEGER => {
+            Tag::VarInt => {
                 let num: i64 = self.reader.read_var()?;
                 visitor.visit_i64(num)
             }
-            TAG_FLOAT32 => {
+            Tag::Float32 => {
                 let num: f32 = self.reader.read_f32()?;
                 visitor.visit_i64(num as i64)
             }
-            TAG_FLOAT64 => {
+            Tag::Float64 => {
                 let num: f64 = self.reader.read_f64()?;
                 visitor.visit_i64(num as i64)
             }
-            TAG_BIGINT => {
+            Tag::BigInt => {
                 let num: i64 = self.reader.read_i64()?;
                 visitor.visit_i64(num)
             }
-            tag => Err(super::Error::UnknownTag(tag)),
+            tag => Err(super::Error::UnknownTag(tag as u8)),
         }
     }
 
@@ -163,21 +192,16 @@ impl<'de, R: Read> serde::Deserializer<'de> for &'de mut Deserializer<R> {
     where
         V: Visitor<'de>,
     {
-        let tag = self.reader.read_u8()?;
-        match tag {
-            TAG_FLOAT32 => {
-                let num = self.reader.read_f32()?;
-                visitor.visit_f32(num)
-            }
-            tag => Err(super::Error::UnknownTag(tag)),
-        }
+        self.expect_tag(TAG_FLOAT32)?;
+        let num = self.reader.read_f32()?;
+        visitor.visit_f32(num)
     }
 
     fn deserialize_f64<V>(self, visitor: V) -> Result<V::Value, Self::Error>
     where
         V: Visitor<'de>,
     {
-        let tag = self.reader.read_u8()?;
+        let tag = self.read_tag()?;
         match tag {
             TAG_FLOAT64 => {
                 let num = self.reader.read_f64()?;
@@ -195,20 +219,15 @@ impl<'de, R: Read> serde::Deserializer<'de> for &'de mut Deserializer<R> {
     where
         V: Visitor<'de>,
     {
-        let tag = self.reader.read_u8()?;
-        match tag {
-            TAG_STRING => {
-                let mut buf = String::new(); // TODO: String::new_in(self.alloc)
-                self.reader.read_string(&mut buf)?;
-                match buf.chars().next() {
-                    None => Err(super::Error::invalid_value(
-                        Unexpected::Str(""),
-                        &ExpectedString("character"),
-                    )),
-                    Some(c) => visitor.visit_char(c),
-                }
-            }
-            tag => Err(super::Error::UnknownTag(tag)),
+        self.expect_tag(TAG_STRING)?;
+        let mut buf = String::new(); // TODO: String::new_in(self.alloc)
+        self.reader.read_string(&mut buf)?;
+        match buf.chars().next() {
+            None => Err(super::Error::invalid_value(
+                Unexpected::Str(""),
+                &ExpectedString("character"),
+            )),
+            Some(c) => visitor.visit_char(c),
         }
     }
 
@@ -216,15 +235,10 @@ impl<'de, R: Read> serde::Deserializer<'de> for &'de mut Deserializer<R> {
     where
         V: Visitor<'de>,
     {
-        let tag = self.reader.read_u8()?;
-        match tag {
-            TAG_STRING => {
-                let mut buf = String::new(); // TODO: String::new_in(self.alloc)
-                self.reader.read_string(&mut buf)?;
-                visitor.visit_string(buf)
-            }
-            tag => Err(super::Error::UnknownTag(tag)),
-        }
+        self.expect_tag(TAG_STRING)?;
+        let mut buf = String::new(); // TODO: String::new_in(self.alloc)
+        self.reader.read_string(&mut buf)?;
+        visitor.visit_string(buf)
     }
 
     fn deserialize_string<V>(self, visitor: V) -> Result<V::Value, Self::Error>
@@ -238,15 +252,10 @@ impl<'de, R: Read> serde::Deserializer<'de> for &'de mut Deserializer<R> {
     where
         V: Visitor<'de>,
     {
-        let tag = self.reader.read_u8()?;
-        match tag {
-            TAG_BYTE_ARRAY => {
-                let mut buf = Vec::new(); // TODO: Vec::new_in(self.alloc)
-                self.reader.read_bytes(&mut buf)?;
-                visitor.visit_byte_buf(buf)
-            }
-            tag => Err(super::Error::UnknownTag(tag)),
-        }
+        self.expect_tag(TAG_BYTE_ARRAY)?;
+        let mut buf = Vec::new(); // TODO: Vec::new_in(self.alloc)
+        self.reader.read_bytes(&mut buf)?;
+        visitor.visit_byte_buf(buf)
     }
 
     fn deserialize_byte_buf<V>(self, visitor: V) -> Result<V::Value, Self::Error>
@@ -260,14 +269,21 @@ impl<'de, R: Read> serde::Deserializer<'de> for &'de mut Deserializer<R> {
     where
         V: Visitor<'de>,
     {
-        self.deserialize_any(visitor)
+        let tag = self.peek_tag()?;
+        match tag {
+            TAG_UNDEFINED | TAG_NULL => {
+                self.peek = None; // reset peek
+                visitor.visit_none()
+            }
+            _ => visitor.visit_some(self),
+        }
     }
 
     fn deserialize_unit<V>(self, visitor: V) -> Result<V::Value, Self::Error>
     where
         V: Visitor<'de>,
     {
-        let tag = self.reader.read_u8()?;
+        let tag = self.read_tag()?;
         match tag {
             TAG_UNDEFINED | TAG_NULL => visitor.visit_unit(),
             tag => Err(super::Error::UnknownTag(tag)),
@@ -300,11 +316,8 @@ impl<'de, R: Read> serde::Deserializer<'de> for &'de mut Deserializer<R> {
     where
         V: Visitor<'de>,
     {
-        let tag = self.reader.read_u8()?;
-        match tag {
-            TAG_ARRAY => visitor.visit_seq(SeqAccess::new(self)?),
-            tag => Err(super::Error::UnknownTag(tag)),
-        }
+        self.expect_tag(TAG_ARRAY)?;
+        visitor.visit_seq(Access::new(self)?)
     }
 
     fn deserialize_tuple<V>(self, _len: usize, visitor: V) -> Result<V::Value, Self::Error>
@@ -330,11 +343,8 @@ impl<'de, R: Read> serde::Deserializer<'de> for &'de mut Deserializer<R> {
     where
         V: Visitor<'de>,
     {
-        let tag = self.reader.read_u8()?;
-        match tag {
-            TAG_OBJECT => visitor.visit_map(MapAccess::new(self)?),
-            tag => Err(super::Error::UnknownTag(tag)),
-        }
+        self.expect_tag(TAG_OBJECT)?;
+        visitor.visit_map(Access::new(self)?)
     }
 
     fn deserialize_struct<V>(
@@ -358,7 +368,8 @@ impl<'de, R: Read> serde::Deserializer<'de> for &'de mut Deserializer<R> {
     where
         V: Visitor<'de>,
     {
-        self.deserialize_map(visitor)
+        self.expect_tag(TAG_OBJECT)?;
+        visitor.visit_enum(Access::new(self)?)
     }
 
     fn deserialize_identifier<V>(self, visitor: V) -> Result<V::Value, Self::Error>
@@ -376,65 +387,411 @@ impl<'de, R: Read> serde::Deserializer<'de> for &'de mut Deserializer<R> {
     }
 }
 
-struct MapAccess<'a, R: 'a> {
+struct Access<'a, R> {
     de: &'a mut Deserializer<R>,
-    remaining: usize,
+    len: usize,
 }
 
-impl<'a, R: Read + 'a> MapAccess<'a, R> {
+impl<'a, R: Read> Access<'a, R> {
     fn new(de: &'a mut Deserializer<R>) -> Result<Self, super::Error> {
-        let remaining: usize = de.reader.read_var()?;
-        Ok(MapAccess { de, remaining })
+        let len = de.reader.read_var()?;
+        Ok(Access { de, len })
+    }
+
+    fn read_variant(self) -> Result<String, super::Error> {
+        let mut buf = String::new();
+        self.de.reader.read_string(&mut buf)?;
+        Ok(buf)
     }
 }
 
-impl<'de, R: Read + 'de> serde::de::MapAccess<'de> for MapAccess<'de, R> {
+impl<'a, 'de, R: Read> de::SeqAccess<'de> for Access<'a, R>
+where
+    'a: 'de,
+{
     type Error = super::Error;
 
-    fn next_key_seed<K>(&mut self, seed: K) -> Result<Option<K::Value>, Self::Error>
-    where
-        K: DeserializeSeed<'de>,
-    {
-        if self.remaining == 0 {
-            Ok(None)
-        } else {
-            self.remaining -= 1;
-            seed.deserialize(&mut *self.de).map(Some)
-        }
-    }
-
-    fn next_value_seed<V>(&mut self, seed: V) -> Result<V::Value, Self::Error>
-    where
-        V: DeserializeSeed<'de>,
-    {
-        seed.deserialize(&mut *self.de)
-    }
-}
-
-struct SeqAccess<'a, R: 'a> {
-    de: &'a mut Deserializer<R>,
-    remaining: usize,
-}
-
-impl<'a, R: Read + 'a> SeqAccess<'a, R> {
-    fn new(de: &'a mut Deserializer<R>) -> Result<Self, super::Error> {
-        let remaining: usize = de.reader.read_var()?;
-        Ok(SeqAccess { de, remaining })
-    }
-}
-
-impl<'de, R: Read + 'de> serde::de::SeqAccess<'de> for SeqAccess<'de, R> {
-    type Error = super::Error;
-
+    #[inline]
     fn next_element_seed<T>(&mut self, seed: T) -> Result<Option<T::Value>, Self::Error>
     where
         T: DeserializeSeed<'de>,
     {
-        if self.remaining == 0 {
-            Ok(None)
+        if self.len > 0 {
+            self.len -= 1;
+            //FIXME: fix borrow checker error
+            let de: &'a mut Deserializer<R> = unsafe { std::mem::transmute(&mut *self.de) };
+            seed.deserialize(de).map(Some)
         } else {
-            self.remaining -= 1;
-            seed.deserialize(&mut *self.de).map(Some)
+            Ok(None)
         }
+    }
+
+    #[inline]
+    fn size_hint(&self) -> Option<usize> {
+        Some(self.len)
+    }
+}
+
+impl<'a, 'de, R: Read> de::MapAccess<'de> for Access<'a, R>
+where
+    'a: 'de,
+{
+    type Error = super::Error;
+
+    #[inline]
+    fn next_key_seed<K>(&mut self, seed: K) -> Result<Option<K::Value>, Self::Error>
+    where
+        K: DeserializeSeed<'de>,
+    {
+        if self.len > 0 {
+            self.len -= 1;
+            //FIXME: fix borrow checker error
+            let de: &'a mut Deserializer<R> = unsafe { std::mem::transmute(&mut *self.de) };
+            seed.deserialize(MapKey { de }).map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+
+    #[inline]
+    fn next_value_seed<V>(&mut self, seed: V) -> Result<V::Value, Self::Error>
+    where
+        V: DeserializeSeed<'de>,
+    {
+        //FIXME: fix borrow checker error
+        let de: &'a mut Deserializer<R> = unsafe { std::mem::transmute(&mut *self.de) };
+        seed.deserialize(de)
+    }
+
+    #[inline]
+    fn size_hint(&self) -> Option<usize> {
+        Some(self.len)
+    }
+}
+
+impl<'a, 'de, R: Read> de::EnumAccess<'de> for Access<'a, R>
+where
+    'a: 'de,
+{
+    type Error = super::Error;
+    type Variant = Self;
+
+    fn variant_seed<V>(self, seed: V) -> Result<(V::Value, Self::Variant), Self::Error>
+    where
+        V: DeserializeSeed<'de>,
+    {
+        seed.deserialize(MapKey { de: self.de }).map(|v| (v, self))
+    }
+}
+
+impl<'a, 'de, R: Read> de::VariantAccess<'de> for Access<'a, R>
+where
+    'a: 'de,
+{
+    type Error = super::Error;
+
+    fn unit_variant(self) -> Result<(), Self::Error> {
+        self.de.expect_tag(TAG_ARRAY)?;
+        let mut access = Access::new(self.de)?;
+        while let Some(_) = access.next_element::<Value>()? {
+            // skip over all possible values for forward compatibility
+        }
+        Ok(())
+    }
+
+    fn newtype_variant_seed<T>(self, seed: T) -> Result<T::Value, Self::Error>
+    where
+        T: DeserializeSeed<'de>,
+    {
+        self.de.expect_tag(TAG_ARRAY)?;
+        let mut access = Access::new(self.de)?;
+        let value = match access.next_element_seed(seed)? {
+            None => {
+                return Err(super::Error::invalid_length(
+                    0,
+                    &"newtype variant with >1 element",
+                ))
+            }
+            Some(value) => value,
+        };
+        while let Some(_) = access.next_element::<Value>()? {
+            // skip over all possible values for forward compatibility
+        }
+        Ok(value)
+    }
+
+    fn tuple_variant<V>(self, _len: usize, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        de::Deserializer::deserialize_seq(self.de, visitor)
+    }
+
+    fn struct_variant<V>(
+        self,
+        fields: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        de::Deserializer::deserialize_struct(self.de, "", fields, visitor)
+    }
+}
+
+struct MapKey<'a, R> {
+    de: &'a mut Deserializer<R>,
+}
+
+impl<'a, 'de, R: Read> de::Deserializer<'de> for MapKey<'a, R> {
+    type Error = super::Error;
+
+    #[inline]
+    fn deserialize_any<V>(self, _: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        Err(super::Error::NonStringKey)
+    }
+
+    #[inline]
+    fn deserialize_bool<V>(self, _: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        Err(super::Error::NonStringKey)
+    }
+
+    #[inline]
+    fn deserialize_i8<V>(self, _: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        Err(super::Error::NonStringKey)
+    }
+
+    #[inline]
+    fn deserialize_i16<V>(self, _: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        Err(super::Error::NonStringKey)
+    }
+
+    #[inline]
+    fn deserialize_i32<V>(self, _: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        Err(super::Error::NonStringKey)
+    }
+
+    #[inline]
+    fn deserialize_i64<V>(self, _: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        Err(super::Error::NonStringKey)
+    }
+
+    #[inline]
+    fn deserialize_u8<V>(self, _: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        Err(super::Error::NonStringKey)
+    }
+
+    #[inline]
+    fn deserialize_u16<V>(self, _: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        Err(super::Error::NonStringKey)
+    }
+
+    #[inline]
+    fn deserialize_u32<V>(self, _: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        Err(super::Error::NonStringKey)
+    }
+
+    #[inline]
+    fn deserialize_u64<V>(self, _: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        Err(super::Error::NonStringKey)
+    }
+
+    #[inline]
+    fn deserialize_f32<V>(self, _: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        Err(super::Error::NonStringKey)
+    }
+
+    #[inline]
+    fn deserialize_f64<V>(self, _: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        Err(super::Error::NonStringKey)
+    }
+
+    #[inline]
+    fn deserialize_char<V>(self, _: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        Err(super::Error::NonStringKey)
+    }
+
+    #[inline]
+    fn deserialize_str<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        self.deserialize_string(visitor)
+    }
+
+    #[inline]
+    fn deserialize_string<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        let mut buf = String::new(); // TODO: String::new_in(self.alloc)
+        self.de.reader.read_string(&mut buf)?;
+        visitor.visit_string(buf)
+    }
+
+    #[inline]
+    fn deserialize_bytes<V>(self, _: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        Err(super::Error::NonStringKey)
+    }
+
+    #[inline]
+    fn deserialize_byte_buf<V>(self, _: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        Err(super::Error::NonStringKey)
+    }
+
+    #[inline]
+    fn deserialize_option<V>(self, _: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        Err(super::Error::NonStringKey)
+    }
+
+    #[inline]
+    fn deserialize_unit<V>(self, _: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        Err(super::Error::NonStringKey)
+    }
+
+    #[inline]
+    fn deserialize_unit_struct<V>(self, _: &'static str, _: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        Err(super::Error::NonStringKey)
+    }
+
+    #[inline]
+    fn deserialize_newtype_struct<V>(self, _: &'static str, _: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        Err(super::Error::NonStringKey)
+    }
+
+    #[inline]
+    fn deserialize_seq<V>(self, _: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        Err(super::Error::NonStringKey)
+    }
+
+    #[inline]
+    fn deserialize_tuple<V>(self, _: usize, _: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        Err(super::Error::NonStringKey)
+    }
+
+    #[inline]
+    fn deserialize_tuple_struct<V>(
+        self,
+        _: &'static str,
+        _: usize,
+        _: V,
+    ) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        Err(super::Error::NonStringKey)
+    }
+
+    #[inline]
+    fn deserialize_map<V>(self, _: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        Err(super::Error::NonStringKey)
+    }
+
+    #[inline]
+    fn deserialize_struct<V>(
+        self,
+        _: &'static str,
+        _: &'static [&'static str],
+        _: V,
+    ) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        Err(super::Error::NonStringKey)
+    }
+
+    #[inline]
+    fn deserialize_enum<V>(
+        self,
+        name: &'static str,
+        variants: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        self.deserialize_string(visitor)
+    }
+
+    #[inline]
+    fn deserialize_identifier<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        self.deserialize_string(visitor)
+    }
+
+    #[inline]
+    fn deserialize_ignored_any<V>(self, _: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        Err(super::Error::NonStringKey)
     }
 }

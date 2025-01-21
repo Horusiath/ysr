@@ -9,6 +9,7 @@ mod de;
 mod ser;
 #[cfg(test)]
 mod test;
+mod value;
 
 pub const TAG_UNDEFINED: u8 = 127;
 pub const TAG_NULL: u8 = 126;
@@ -23,10 +24,51 @@ pub const TAG_OBJECT: u8 = 118;
 pub const TAG_ARRAY: u8 = 117;
 pub const TAG_BYTE_ARRAY: u8 = 116;
 
+#[repr(u8)]
+#[derive(Debug, Copy, Clone)]
+pub enum Tag {
+    Undefined = TAG_UNDEFINED,
+    Null = TAG_NULL,
+    VarInt = TAG_INTEGER,
+    Float32 = TAG_FLOAT32,
+    Float64 = TAG_FLOAT64,
+    BigInt = TAG_BIGINT,
+    False = TAG_FALSE,
+    True = TAG_TRUE,
+    String = TAG_STRING,
+    Object = TAG_OBJECT,
+    Array = TAG_ARRAY,
+    ByteArray = TAG_BYTE_ARRAY,
+}
+
+impl TryFrom<u8> for Tag {
+    type Error = Error;
+
+    #[inline]
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            TAG_UNDEFINED => Ok(Self::Undefined),
+            TAG_NULL => Ok(Self::Null),
+            TAG_INTEGER => Ok(Self::VarInt),
+            TAG_FLOAT32 => Ok(Self::Float32),
+            TAG_FLOAT64 => Ok(Self::Float64),
+            TAG_BIGINT => Ok(Self::BigInt),
+            TAG_FALSE => Ok(Self::False),
+            TAG_TRUE => Ok(Self::True),
+            TAG_STRING => Ok(Self::String),
+            TAG_OBJECT => Ok(Self::Object),
+            TAG_ARRAY => Ok(Self::Array),
+            TAG_BYTE_ARRAY => Ok(Self::ByteArray),
+            _ => Err(Error::UnknownTag(value)),
+        }
+    }
+}
+
 pub const F64_MAX_SAFE_INTEGER: i64 = (i64::pow(2, 53) - 1);
 pub const F64_MIN_SAFE_INTEGER: i64 = -F64_MAX_SAFE_INTEGER;
 
 pub use copy::copy;
+pub use value::Value;
 
 pub fn to_writer<W, T>(writer: W, value: &T) -> Result<(), Error>
 where

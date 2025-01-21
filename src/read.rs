@@ -105,7 +105,8 @@ pub trait ReadExt: Read + Sized {
             ));
         }
         let len = buf.len() + len as usize;
-        self.read_exact(unsafe { std::mem::transmute(buf.spare_capacity_mut()) })?;
+        let slice: &mut [u8] = unsafe { std::mem::transmute(buf.spare_capacity_mut()) };
+        self.read_exact(&mut slice[0..len])?;
         unsafe {
             buf.set_len(len);
         }
