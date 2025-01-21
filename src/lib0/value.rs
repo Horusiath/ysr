@@ -3,6 +3,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
 use std::fmt::Formatter;
 
+#[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Undefined,
     Null,

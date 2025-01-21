@@ -1,3 +1,4 @@
+use crate::lib0::Value;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
@@ -52,6 +53,26 @@ fn serialize_adt() {
     roundtrip(&ADT::C(Some(56.7)));
     roundtrip(&MultiFieldADT::A(100, 200));
     roundtrip(&NamedFieldEnum::B { y: 10.0 })
+}
+
+#[test]
+fn serialize_value() {
+    roundtrip(&Value::Undefined);
+    roundtrip(&Value::Null);
+    roundtrip(&Value::Bool(true));
+    roundtrip(&Value::Bool(false));
+    roundtrip(&Value::Float(14.5));
+    roundtrip(&Value::Int(123));
+    roundtrip(&Value::String("hello".into()));
+    roundtrip(&Value::ByteArray(b"deadbeef".into()));
+    roundtrip(&Value::Array(vec![
+        Value::Int(123),
+        Value::String("hello".into()),
+    ]));
+    roundtrip(&Value::Object(HashMap::from([
+        ("A".to_string(), Value::Int(100)),
+        ("B".to_string(), Value::String("hello".into())),
+    ])));
 }
 
 #[test]
