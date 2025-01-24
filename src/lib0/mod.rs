@@ -96,7 +96,7 @@ pub enum Error {
     UnknownLength,
     #[error("tried to serialize/deserialize map with non-string keys")]
     NonStringKey,
-    #[error("cannot deserialize payload - unknown tag: {0}")]
+    #[error("cannot deserialize payload - unknown type tag: {0}")]
     UnknownTag(u8),
     #[error("invalid UTF8 string: {0}")]
     Utf8(#[from] Utf8Error),

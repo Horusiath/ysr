@@ -1,11 +1,12 @@
-use crate::content::BlockContent;
-use crate::node::NodeID;
-use crate::{ClientID, Clock, U32};
+use crate::content::{BlockContent, ContentAtom, ContentFormat, ContentJson, ContentType};
+use crate::node::{NodeHeader, NodeID};
+use crate::{ClientID, Clock};
 use crate::{Error, Result};
-use bytes::{BufMut, BytesMut};
+use bytes::BytesMut;
 use std::fmt::{Debug, Display, Formatter};
+use std::io::Write;
 use std::ops::{Deref, DerefMut};
-use zerocopy::{CastError, FromBytes, FromZeros, Immutable, IntoBytes, KnownLayout, TryFromBytes};
+use zerocopy::{CastError, FromBytes, Immutable, IntoBytes, KnownLayout};
 
 #[repr(C)]
 #[derive(PartialEq, Eq, Copy, Clone, FromBytes, KnownLayout, Immutable, IntoBytes)]
@@ -27,6 +28,7 @@ impl Debug for ID {
     }
 }
 
+#[cfg(test)]
 impl Display for ID {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "<{}:{}>", self.client, self.clock)
@@ -36,15 +38,28 @@ impl Display for ID {
 #[repr(C)]
 #[derive(FromBytes, KnownLayout, Immutable, IntoBytes)]
 pub struct BlockHeader {
-    clock_len: U32,
+    /// Yjs-compatible length of the block. Counted as a number of countable elements or
+    /// UTF-16 characters.
+    clock_len: Clock,
+    /// Flags that define the block's state, including presence/absence of other fields like
+    /// neighbor blocks or origins.
     flags: BlockFlags,
+    /// Flags that define the block's content type.
     content_type: u8,
-    content_offset: u8,
+    /// ID of the left neighbor block (if such exists).
     left: ID,
+    /// ID of the right neighbor block (if such exists).
     right: ID,
-    origin_left: ID,
-    origin_right: ID,
+    /// NodeID of the parent node collection that contains this block.
     parent: NodeID,
+    /// Length of the key in bytes. Key must be a non-empty string.
+    key_len: u8,
+    /// Version of the block header in use.
+    version: u8,
+    /// ID of the left neighbor block at the point of insertion (if such existed).
+    origin_left: ID,
+    /// ID of the right neighbor block at the point of insertion (if such existed).
+    origin_right: ID,
 }
 
 impl BlockHeader {
@@ -110,6 +125,11 @@ impl BlockHeader {
         }
     }
 
+    pub fn set_origin_left(&mut self, id: ID) {
+        self.origin_left = id;
+        self.flags.set(BlockFlags::ORIGIN_LEFT);
+    }
+
     pub fn origin_right(&self) -> Option<&ID> {
         if self.flags.has(BlockFlags::ORIGIN_RIGHT) {
             Some(&self.origin_right)
@@ -118,77 +138,59 @@ impl BlockHeader {
         }
     }
 
-    pub fn parent_sub<'a>(&self, body: &'a [u8]) -> Option<&'a [u8]> {
-        let content_offset = self.content_offset as usize;
-        if content_offset > 0 {
-            Some(&body[..content_offset])
-        } else {
+    pub fn set_origin_right(&mut self, id: ID) {
+        self.origin_right = id;
+        self.flags.set(BlockFlags::ORIGIN_RIGHT);
+    }
+
+    pub fn entry_key<'a>(&self, body: &'a [u8]) -> Option<&'a [u8]> {
+        if self.key_len == 0 {
             None
+        } else {
+            let key_offset = body.len() - self.key_len as usize;
+            Some(&body[..key_offset])
         }
+    }
+
+    #[inline]
+    pub fn set_parent(&mut self, parent_id: NodeID) {
+        self.parent = parent_id;
     }
 
     pub fn content<'a>(&self, body: &'a [u8]) -> Result<BlockContent<'a>> {
-        let content_offset = self.content_offset as usize;
-        let content = &body[content_offset..];
-        match self.content_type {
-            CONTENT_TYPE_ATOM => Ok(BlockContent::Atom(content)),
-            CONTENT_TYPE_BINARY => Ok(BlockContent::Binary(content)),
-            CONTENT_TYPE_DELETED => {
-                let len: [u8; 8] = content.try_into().map_err(|_| Error::EndOfBuffer)?;
-                Ok(BlockContent::Deleted(u64::from_le_bytes(len)))
+        let content_end = body.len() - self.key_len as usize;
+        let content = &body[..content_end];
+        match self.content_type.try_into()? {
+            ContentType::Deleted => Ok(BlockContent::Deleted(self.clock_len)),
+            ContentType::Json => Ok(BlockContent::Json(ContentJson::new(content))),
+            ContentType::Atom => Ok(BlockContent::Atom(ContentAtom::new(content))),
+            ContentType::Binary => Ok(BlockContent::Binary(content)),
+            ContentType::Doc => Ok(BlockContent::Doc(content)),
+            ContentType::Embed => Ok(BlockContent::Embed(content)),
+            ContentType::Format => Ok(BlockContent::Format(ContentFormat::new(content)?)),
+            ContentType::Node => {
+                let node: &NodeHeader = NodeHeader::ref_from_bytes(content)
+                    .map_err(|_| crate::Error::InvalidMapping("NodeHeader"))?;
+                Ok(BlockContent::Node(node))
             }
-            CONTENT_TYPE_DOC => Ok(BlockContent::Doc(content)),
-            CONTENT_TYPE_EMBED => Ok(BlockContent::Embed(content)),
-            CONTENT_TYPE_FORMAT => {
-                let len = content[0] as usize;
-                let content = &content[1..];
-                let (format, content) = content.split_at(len);
-                let format = unsafe { std::str::from_utf8_unchecked(format) };
-                Ok(BlockContent::Format(format, content))
-            }
-            CONTENT_TYPE_NODE => {
-                let node_id: [u8; 8] = content.try_into().map_err(|_| Error::EndOfBuffer)?;
-                Ok(BlockContent::Node(node_id.into()))
-            }
-            CONTENT_TYPE_STRING => {
+            ContentType::String => {
                 let str = unsafe { std::str::from_utf8_unchecked(content) };
                 Ok(BlockContent::Text(str))
             }
-            _ => Err(Error::UnsupportedContent(self.content_type)),
         }
     }
 
-    pub fn set_content(&mut self, content: BlockContent, body: &mut BytesMut) {
-        self.content_type = content.content_type();
-        match content {
-            BlockContent::Atom(content) => {
-                body.extend_from_slice(content);
-            }
-            BlockContent::Binary(content) => {
-                body.extend_from_slice(content);
-            }
-            BlockContent::Deleted(len) => {
-                body.put_u64_le(len);
-            }
-            BlockContent::Doc(content) => {
-                body.extend_from_slice(content);
-            }
-            BlockContent::Embed(content) => {
-                body.extend_from_slice(content);
-            }
-            BlockContent::Format(format, content) => {
-                body.reserve(format.len() + content.len() + 1);
-                body.put_u8(format.len() as u8);
-                body.extend_from_slice(format.as_bytes());
-                body.extend_from_slice(content);
-            }
-            BlockContent::Node(node_id) => {
-                body.put_u64_le(node_id.into());
-            }
-            BlockContent::Text(content) => {
-                body.extend_from_slice(content.as_bytes());
-            }
-        }
+    pub fn set_content_type(&mut self, content_type: u8) {
+        self.content_type = content_type;
+    }
+
+    pub fn set_clock_len(&mut self, len: Clock) {
+        self.clock_len = len;
+    }
+
+    #[cfg(test)]
+    pub fn display<'a>(&'a self, body: &'a [u8]) -> DisplayBlock<'a> {
+        DisplayBlock { header: self, body }
     }
 }
 
@@ -208,12 +210,32 @@ impl BlockMut {
 
     pub fn parent_sub(&self) -> Option<&[u8]> {
         let (header, body) = BlockHeader::parse(&self.body).unwrap();
-        header.parent_sub(body)
+        header.entry_key(body)
     }
 
     pub fn content(&self) -> Result<BlockContent> {
         let (header, body) = BlockHeader::parse(&self.body).unwrap();
         header.content(body)
+    }
+
+    pub(crate) fn clock_len(&self) -> Clock {
+        let (header, body) = BlockHeader::parse(&self.body).unwrap();
+        header.clock_len
+    }
+
+    pub(crate) fn init_entry_key<S: AsRef<[u8]>>(&mut self, key: S) -> crate::Result<()> {
+        let key = key.as_ref();
+        let key_len = key.len();
+        if key_len > u8::MAX as usize {
+            return Err(Error::KeyTooLong);
+        }
+        self.key_len = key_len as u8;
+        self.body.extend_from_slice(key);
+        Ok(())
+    }
+
+    pub fn as_writer(&mut self) -> Writer<'_> {
+        Writer::new(self)
     }
 }
 
@@ -228,6 +250,43 @@ impl Deref for BlockMut {
 impl DerefMut for BlockMut {
     fn deref_mut(&mut self) -> &mut Self::Target {
         BlockHeader::mut_from_bytes(&mut self.body).unwrap()
+    }
+}
+
+#[cfg(test)]
+impl Display for BlockMut {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let (header, body) = BlockHeader::parse(&self.body).unwrap();
+        header.display(body).fmt(f)
+    }
+}
+
+pub struct Writer<'a> {
+    block: &'a mut BlockMut,
+}
+
+impl<'a> Writer<'a> {
+    fn new(block: &'a mut BlockMut) -> Self {
+        Self { block }
+    }
+}
+
+impl<'a> Write for Writer<'a> {
+    #[inline]
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.block.body.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    #[inline]
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    #[inline]
+    fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
+        self.block.body.extend_from_slice(buf);
+        Ok(())
     }
 }
 
@@ -292,3 +351,19 @@ pub const CONTENT_TYPE_ATOM: u8 = 8;
 pub const CONTENT_TYPE_DOC: u8 = 9;
 pub const CONTENT_TYPE_SKIP: u8 = 10;
 pub const CONTENT_TYPE_MOVE: u8 = 11;
+
+#[cfg(test)]
+pub struct DisplayBlock<'a> {
+    header: &'a BlockHeader,
+    body: &'a [u8],
+}
+
+#[cfg(test)]
+impl<'a> Display for DisplayBlock<'a> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "(")?;
+        todo!();
+        write!(f, ")")?;
+        Ok(())
+    }
+}

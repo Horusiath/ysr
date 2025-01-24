@@ -1,5 +1,5 @@
-
 mod block;
+mod block_reader;
 mod content;
 mod id_set;
 pub mod lib0;
@@ -22,6 +22,7 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 pub type U16 = zerocopy::U16<zerocopy::byteorder::LE>;
 pub type U32 = zerocopy::U32<zerocopy::byteorder::LE>;
 pub type U64 = zerocopy::U64<zerocopy::byteorder::LE>;
+pub type U128 = zerocopy::U128<zerocopy::byteorder::LE>;
 pub type ClientID = U64;
 pub type Clock = U64;
 
@@ -34,6 +35,8 @@ pub enum Error {
     EndOfBuffer,
     #[error("value is out of range of expected type")]
     ValueOutOfRange,
+    #[error("provided key is longer than 255 bytes")]
+    KeyTooLong,
     #[error("failed to map data ")]
     InvalidMapping(&'static str),
     #[error("malformed block: {0}")]

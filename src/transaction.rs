@@ -1,9 +1,18 @@
+use crate::block_reader::BlockReader;
+use crate::read::Decoder;
 use crate::{StateVector, Store};
+use smallvec::SmallVec;
 use std::io::{Read, Write};
 
-pub(crate) struct TransactionState {}
+pub(crate) struct TransactionState {
+    origin: Option<Origin>,
+}
 
 impl TransactionState {
+    fn new() -> Self {
+        todo!()
+    }
+
     fn commit<'db, T: crate::store::Transaction<'db>>(&self, tx: &T) -> crate::Result<()> {
         todo!()
     }
@@ -22,7 +31,7 @@ impl<'db, S: Store> Transaction<'db, S> {
     pub fn split_mut(&mut self) -> (&mut S::Transaction<'db>, &mut TransactionState) {
         let state = self
             .state
-            .get_or_insert_with(|| Box::new(TransactionState {}));
+            .get_or_insert_with(|| Box::new(TransactionState::new()));
         (&mut self.inner, state)
     }
 
@@ -39,7 +48,8 @@ impl<'db, S: Store> Transaction<'db, S> {
         todo!()
     }
 
-    pub fn apply_update<R: Read>(&mut self, reader: &mut R) -> crate::Result<()> {
+    pub fn apply_update<D: Decoder>(&mut self, decoder: &mut D) -> crate::Result<()> {
+        let block_reader = BlockReader::new(decoder)?;
         todo!()
     }
 
@@ -54,3 +64,6 @@ impl<'db, S: Store> Transaction<'db, S> {
         }
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Origin(SmallVec<[u8; 16]>);

@@ -1,7 +1,8 @@
+use bytes::Bytes;
 use serde::de::{Error, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
-use std::fmt::Formatter;
+use std::fmt::{Debug, Display, Formatter};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
@@ -161,4 +162,67 @@ impl<'de> Deserialize<'de> for Value {
 
         deserializer.deserialize_any(ValueVisitor)
     }
+}
+
+impl Display for Value {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Value::Undefined => write!(f, "undefined"),
+            Value::Null => write!(f, "null"),
+            Value::Int(v) => Display::fmt(v, f),
+            Value::Float(v) => Display::fmt(v, f),
+            Value::Bool(v) => Display::fmt(v, f),
+            Value::String(v) => write!(f, "\"{}\"", v),
+            Value::Object(v) => {
+                let mut i = v.iter();
+                write!(f, "{{")?;
+                if let Some((k, v)) = i.next() {
+                    write!(f, "\"{}\": {}", k, v)?;
+                }
+                while let Some((k, v)) = i.next() {
+                    write!(f, ", \"{}\": {}", k, v)?;
+                }
+                write!(f, "}}")?;
+                Ok(())
+            }
+            Value::Array(v) => {
+                let mut i = v.iter();
+                write!(f, "[")?;
+                if let Some(v) = i.next() {
+                    write!(f, "{}", v)?;
+                }
+                while let Some(v) = i.next() {
+                    write!(f, ", {}", v)?;
+                }
+                write!(f, "]")?;
+                Ok(())
+            }
+            Value::ByteArray(v) => display_bytes(f, v),
+        }
+    }
+}
+
+fn display_bytes(f: &mut Formatter, bytes: &[u8]) -> std::fmt::Result {
+    write!(f, "b\"")?;
+    for &b in bytes {
+        // https://doc.rust-lang.org/reference/tokens.html#byte-escapes
+        if b == b'\n' {
+            write!(f, "\\n")?;
+        } else if b == b'\r' {
+            write!(f, "\\r")?;
+        } else if b == b'\t' {
+            write!(f, "\\t")?;
+        } else if b == b'\\' || b == b'"' {
+            write!(f, "\\{}", b as char)?;
+        } else if b == b'\0' {
+            write!(f, "\\0")?;
+        // ASCII printable
+        } else if (0x20..0x7f).contains(&b) {
+            write!(f, "{}", b as char)?;
+        } else {
+            write!(f, "\\x{:02x}", b)?;
+        }
+    }
+    write!(f, "\"")?;
+    Ok(())
 }

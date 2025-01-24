@@ -281,6 +281,22 @@ fn read_var_u64<R: Read>(r: &mut R) -> std::io::Result<u64> {
     }
 }
 
+pub(crate) fn var_u64_from_slice(r: &[u8]) -> (u64, usize) {
+    let mut num = 0;
+    let mut len = 0;
+    for &r in r {
+        num |= u64::wrapping_shl((r & 0b01111111) as u64, len as u32);
+        len += 7;
+        if r < 0b10000000 {
+            return (num, len / 7);
+        }
+        if len > 70 {
+            break;
+        }
+    }
+    (0, 0)
+}
+
 fn read_var_u32<R: Read>(r: &mut R) -> std::io::Result<u32> {
     let mut num = 0;
     let mut len: usize = 0;

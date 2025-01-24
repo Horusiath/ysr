@@ -43,6 +43,11 @@ fn serialize_numbers() {
 }
 
 #[test]
+fn i() {
+    println!("{}", std::mem::size_of::<crate::block::BlockHeader>());
+}
+
+#[test]
 fn serialize_string() {
     roundtrip(&"hello".to_string());
 }
