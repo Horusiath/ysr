@@ -8,6 +8,7 @@ use crate::varint::var_u64_from_slice;
 use crate::{lib0, U64};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
+use std::fmt::{Display, Formatter};
 use std::io::Cursor;
 use std::marker::PhantomData;
 use zerocopy::{Immutable, IntoBytes, KnownLayout, TryFromBytes};
@@ -76,6 +77,23 @@ impl<'a> BlockContent<'a> {
     }
 }
 
+#[cfg(test)]
+impl<'a> Display for BlockContent<'a> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BlockContent::Deleted(len) => write!(f, "deleted({})", len),
+            BlockContent::Json(jsons) => write!(f, "{}", jsons),
+            BlockContent::Atom(atoms) => write!(f, "{}", atoms),
+            BlockContent::Binary(bin) => write!(f, "binary({})", simple_base64::encode(bin)),
+            BlockContent::Embed(bin) => write!(f, "embed({})", simple_base64::encode(bin)),
+            BlockContent::Text(text) => write!(f, "'{}'", text),
+            BlockContent::Node(node) => write!(f, "{}", node),
+            BlockContent::Format(format) => write!(f, "{}", format),
+            BlockContent::Doc(doc) => todo!("Display::fmt(doc)"),
+        }
+    }
+}
+
 pub struct ContentIter<'a> {
     data: &'a [u8],
 }
@@ -121,6 +139,24 @@ impl<'a> ContentJson<'a> {
     }
 }
 
+#[cfg(test)]
+impl<'a> Display for ContentJson<'a> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let mut i = self.iter::<serde_json::Value>();
+        write!(f, "[")?;
+        if let Some(res) = i.next() {
+            let v = res.map_err(|e| std::fmt::Error)?;
+            write!(f, "{}", v)?;
+        }
+        while let Some(res) = i.next() {
+            let v = res.map_err(|e| std::fmt::Error)?;
+            write!(f, ", {}", v)?;
+        }
+
+        write!(f, "]")
+    }
+}
+
 pub struct ContentJsonIter<'a, D> {
     inner: ContentIter<'a>,
     _marker: PhantomData<D>,
@@ -159,6 +195,24 @@ impl<'a> ContentAtom<'a> {
             inner: ContentIter::new(self.data),
             _marker: PhantomData::default(),
         }
+    }
+}
+
+#[cfg(test)]
+impl<'a> Display for ContentAtom<'a> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let mut i = self.iter::<lib0::Value>();
+        write!(f, "[")?;
+        if let Some(res) = i.next() {
+            let v = res.map_err(|e| std::fmt::Error)?;
+            write!(f, "{}", v)?;
+        }
+        while let Some(res) = i.next() {
+            let v = res.map_err(|e| std::fmt::Error)?;
+            write!(f, ", {}", v)?;
+        }
+
+        write!(f, "]")
     }
 }
 
@@ -202,5 +256,11 @@ impl<'a> ContentFormat<'a> {
 
     pub fn value(&self) -> &'a [u8] {
         self.value
+    }
+}
+
+impl<'a> Display for ContentFormat<'a> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "\"{}\"={:?}", self.key, self.value)
     }
 }

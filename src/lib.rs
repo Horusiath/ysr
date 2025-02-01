@@ -43,6 +43,8 @@ pub enum Error {
     MalformedBlock(ID),
     #[error("unsupported content type: {0}")]
     UnsupportedContent(u8),
+    #[error("unknown yjs collection type: {0}")]
+    UnknownNodeType(u8),
     #[error("invalid JSON: {0}")]
     Json(#[from] serde_json::Error),
     #[error("invalid lib0 data: {0}")]

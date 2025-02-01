@@ -164,6 +164,7 @@ impl<'de> Deserialize<'de> for Value {
     }
 }
 
+#[cfg(test)]
 impl Display for Value {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -182,8 +183,7 @@ impl Display for Value {
                 while let Some((k, v)) = i.next() {
                     write!(f, ", \"{}\": {}", k, v)?;
                 }
-                write!(f, "}}")?;
-                Ok(())
+                write!(f, "}}")
             }
             Value::Array(v) => {
                 let mut i = v.iter();
@@ -194,35 +194,12 @@ impl Display for Value {
                 while let Some(v) = i.next() {
                     write!(f, ", {}", v)?;
                 }
-                write!(f, "]")?;
-                Ok(())
+                write!(f, "]")
             }
-            Value::ByteArray(v) => display_bytes(f, v),
+            Value::ByteArray(v) => {
+                let base64 = simple_base64::encode(v);
+                write!(f, "{}", base64)
+            }
         }
     }
-}
-
-fn display_bytes(f: &mut Formatter, bytes: &[u8]) -> std::fmt::Result {
-    write!(f, "b\"")?;
-    for &b in bytes {
-        // https://doc.rust-lang.org/reference/tokens.html#byte-escapes
-        if b == b'\n' {
-            write!(f, "\\n")?;
-        } else if b == b'\r' {
-            write!(f, "\\r")?;
-        } else if b == b'\t' {
-            write!(f, "\\t")?;
-        } else if b == b'\\' || b == b'"' {
-            write!(f, "\\{}", b as char)?;
-        } else if b == b'\0' {
-            write!(f, "\\0")?;
-        // ASCII printable
-        } else if (0x20..0x7f).contains(&b) {
-            write!(f, "{}", b as char)?;
-        } else {
-            write!(f, "\\x{:02x}", b)?;
-        }
-    }
-    write!(f, "\"")?;
-    Ok(())
 }

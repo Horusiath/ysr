@@ -143,12 +143,13 @@ impl BlockHeader {
         self.flags.set(BlockFlags::ORIGIN_RIGHT);
     }
 
-    pub fn entry_key<'a>(&self, body: &'a [u8]) -> Option<&'a [u8]> {
+    pub fn entry_key<'a>(&self, body: &'a [u8]) -> Option<&'a str> {
         if self.key_len == 0 {
             None
         } else {
             let key_offset = body.len() - self.key_len as usize;
-            Some(&body[..key_offset])
+            let str = unsafe { std::str::from_utf8_unchecked(&body[key_offset..]) };
+            Some(str)
         }
     }
 
@@ -208,7 +209,7 @@ impl BlockMut {
         }
     }
 
-    pub fn parent_sub(&self) -> Option<&[u8]> {
+    pub fn entry_key(&self) -> Option<&str> {
         let (header, body) = BlockHeader::parse(&self.body).unwrap();
         header.entry_key(body)
     }
@@ -257,7 +258,7 @@ impl DerefMut for BlockMut {
 impl Display for BlockMut {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let (header, body) = BlockHeader::parse(&self.body).unwrap();
-        header.display(body).fmt(f)
+        write!(f, "{}, {}", self.id, header.display(body))
     }
 }
 
@@ -361,9 +362,36 @@ pub struct DisplayBlock<'a> {
 #[cfg(test)]
 impl<'a> Display for DisplayBlock<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "(")?;
-        todo!();
-        write!(f, ")")?;
+        write!(f, "parent: {}", self.header.parent)?;
+        if let Some(key) = self.header.entry_key(self.body) {
+            write!(f, ", key: \"{}\"", key)?;
+        }
+        if self.header.flags.has(BlockFlags::COUNTABLE) {
+            write!(f, ", clock-len: {}", self.header.clock_len)?;
+        }
+        if self.header.flags.has(BlockFlags::LEFT) {
+            write!(f, ", left: {}", self.header.left)?;
+        }
+        if self.header.flags.has(BlockFlags::RIGHT) {
+            write!(f, ", right: {}", self.header.right)?;
+        }
+        if self.header.flags.has(BlockFlags::ORIGIN_LEFT) {
+            write!(f, ", origin-l: {}", self.header.origin_left)?;
+        }
+        if self.header.flags.has(BlockFlags::ORIGIN_RIGHT) {
+            write!(f, ", origin-l: {}", self.header.origin_right)?;
+        }
+        let deleted = self.header.flags.has(CONTENT_TYPE_DELETED);
+        if deleted {
+            write!(f, " ~~")?;
+        } else {
+            write!(f, " ")?;
+        }
+        let content = self.header.content(self.body).unwrap();
+        write!(f, "{}", content)?;
+        if deleted {
+            write!(f, "~~")?;
+        }
         Ok(())
     }
 }

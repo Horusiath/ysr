@@ -20,3 +20,4 @@ twox-hash = "2.1.0"
 
 [dev-dependencies]
 tempfile = "3.15.0"
+simple-base64 = "0.23.2"
