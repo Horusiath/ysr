@@ -27,7 +27,7 @@ impl<'a, D: Decoder> BlockReader<'a, D> {
         let num_of_state_updates: usize = decoder.read_var()?;
         Ok(Self {
             decoder,
-            remaining_clients: num_of_state_updates + 1,
+            remaining_clients: num_of_state_updates,
             remaining_blocks: 0,
             current_client: ClientID::new(0),
             current_clock: Clock::new(0),
@@ -68,10 +68,9 @@ impl<'a, D: Decoder> BlockReader<'a, D> {
                 self.remaining_blocks -= 1;
                 Ok(Some(carrier))
             }
-            info => {
+            _ => {
                 let block_id = ID::new(self.current_client, self.current_clock);
                 let block = self.read_block(block_id, info)?;
-                println!("block: {}", block);
                 self.remaining_blocks -= 1;
                 self.current_clock += block.clock_len();
                 Ok(Some(Carrier::Block(block)))
@@ -80,30 +79,23 @@ impl<'a, D: Decoder> BlockReader<'a, D> {
     }
 
     fn read_block(&mut self, id: ID, info: u8) -> crate::Result<BlockMut> {
-        println!("decoding block {}", id);
         let mut block = BlockMut::new(id, BytesMut::zeroed(BlockHeader::SIZE))?;
         let cannot_copy_parent_info = info & (HAS_RIGHT_ID | HAS_LEFT_ID) == 0;
         if info & HAS_LEFT_ID != 0 {
             let left_id = self.decoder.read_left_id()?;
-            println!("\tleft_id: {}", left_id);
             block.set_origin_left(left_id);
         }
         if info & HAS_RIGHT_ID != 0 {
             let right_id = self.decoder.read_right_id()?;
-            println!("\tright_id: {}", right_id);
             block.set_origin_right(right_id);
         }
         if cannot_copy_parent_info {
             let parent_id = if self.decoder.read_parent_info()? {
                 let mut root_parent_name = SmallVec::<[u8; 16]>::new();
                 self.decoder.read_string(&mut root_parent_name)?;
-                println!("\tparent: {}", unsafe {
-                    std::str::from_utf8_unchecked(&root_parent_name)
-                });
                 NodeID::from_root(&root_parent_name)
             } else {
                 let nested_parent_id = self.decoder.read_left_id()?;
-                println!("\tparent: {}", nested_parent_id);
                 NodeID::from_nested(nested_parent_id)
             };
             block.set_parent(parent_id);
@@ -111,9 +103,6 @@ impl<'a, D: Decoder> BlockReader<'a, D> {
         let entry_key = if cannot_copy_parent_info && (info & HAS_PARENT_SUB) != 0 {
             let mut entry_key = SmallVec::<[u8; 16]>::new();
             self.decoder.read_string(&mut entry_key)?;
-            println!("\tentry_key: {}", unsafe {
-                std::str::from_utf8_unchecked(&entry_key)
-            });
             entry_key
         } else {
             SmallVec::default()
@@ -128,16 +117,11 @@ impl<'a, D: Decoder> BlockReader<'a, D> {
     fn init_content(&mut self, info: u8, block: &mut BlockMut) -> crate::Result<()> {
         let content_type = info & CARRIER_INFO;
         block.set_content_type(content_type);
-        print!(
-            "\tcontent_type: {:?}",
-            ContentType::try_from(content_type).unwrap()
-        );
         match content_type {
             CONTENT_TYPE_GC => Err(crate::Error::UnsupportedContent(CONTENT_TYPE_GC)),
             CONTENT_TYPE_DELETED => {
                 let deleted_len = self.decoder.read_len()?;
                 block.set_clock_len(deleted_len);
-                println!("({})", deleted_len);
                 Ok(())
             }
             CONTENT_TYPE_JSON => copy_content(self.decoder, block),
@@ -152,7 +136,6 @@ impl<'a, D: Decoder> BlockReader<'a, D> {
             CONTENT_TYPE_STRING => {
                 let len = self.decoder.read_len()?;
                 block.set_clock_len(len);
-                println!("({})", len);
                 let mut w = block.as_writer();
                 std::io::copy(&mut self.decoder.take(len.into()), &mut w)?;
                 Ok(())
@@ -168,21 +151,18 @@ impl<'a, D: Decoder> BlockReader<'a, D> {
                 let mut w = block.as_writer();
                 let mut buf: SmallVec<[u8; 16]> = SmallVec::new();
                 self.decoder.read_string(&mut buf)?;
-                println!("({}=", unsafe { std::str::from_utf8_unchecked(&buf) });
                 if buf.len() > u8::MAX as usize {
                     return Err(crate::Error::KeyTooLong);
                 }
                 w.write_u8(buf.len() as u8)?;
                 w.write_all(&buf)?;
                 let value = self.decoder.read_json()?;
-                println!("{:?})", value);
                 serde_json::to_writer(w, &value)?;
                 Ok(())
             }
             CONTENT_TYPE_NODE => {
                 block.set_clock_len(1.into());
                 let type_ref = self.decoder.read_type_ref()?;
-                println!("({:?})", NodeType::try_from(type_ref).unwrap());
                 let node_header = NodeHeader::new(type_ref);
                 block.as_writer().write_all(node_header.as_bytes())?;
                 Ok(())
@@ -234,7 +214,6 @@ pub enum Carrier {
     Block(BlockMut),
 }
 
-#[cfg(test)]
 impl Display for Carrier {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -250,7 +229,6 @@ pub struct BlockRange {
     len: Clock,
 }
 
-#[cfg(test)]
 impl Display for BlockRange {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(

@@ -52,7 +52,6 @@ impl NodeHeader {
     }
 }
 
-#[cfg(test)]
 impl Display for NodeHeader {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let node_type = NodeType::try_from(self.type_ref).unwrap_or(NodeType::Unknown);

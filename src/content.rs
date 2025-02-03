@@ -77,7 +77,6 @@ impl<'a> BlockContent<'a> {
     }
 }
 
-#[cfg(test)]
 impl<'a> Display for BlockContent<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -139,7 +138,6 @@ impl<'a> ContentJson<'a> {
     }
 }
 
-#[cfg(test)]
 impl<'a> Display for ContentJson<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let mut i = self.iter::<serde_json::Value>();
@@ -198,7 +196,6 @@ impl<'a> ContentAtom<'a> {
     }
 }
 
-#[cfg(test)]
 impl<'a> Display for ContentAtom<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let mut i = self.iter::<lib0::Value>();

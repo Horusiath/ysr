@@ -28,7 +28,6 @@ impl Debug for ID {
     }
 }
 
-#[cfg(test)]
 impl Display for ID {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "<{}:{}>", self.client, self.clock)
@@ -189,7 +188,6 @@ impl BlockHeader {
         self.clock_len = len;
     }
 
-    #[cfg(test)]
     pub fn display<'a>(&'a self, body: &'a [u8]) -> DisplayBlock<'a> {
         DisplayBlock { header: self, body }
     }
@@ -254,7 +252,6 @@ impl DerefMut for BlockMut {
     }
 }
 
-#[cfg(test)]
 impl Display for BlockMut {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let (header, body) = BlockHeader::parse(&self.body).unwrap();
@@ -353,13 +350,11 @@ pub const CONTENT_TYPE_DOC: u8 = 9;
 pub const CONTENT_TYPE_SKIP: u8 = 10;
 pub const CONTENT_TYPE_MOVE: u8 = 11;
 
-#[cfg(test)]
 pub struct DisplayBlock<'a> {
     header: &'a BlockHeader,
     body: &'a [u8],
 }
 
-#[cfg(test)]
 impl<'a> Display for DisplayBlock<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "parent: {}", self.header.parent)?;

@@ -164,7 +164,6 @@ impl<'de> Deserialize<'de> for Value {
     }
 }
 
-#[cfg(test)]
 impl Display for Value {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
