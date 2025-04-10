@@ -71,7 +71,7 @@ impl<'a> BlockContent<'a> {
             BlockContent::Embed(_) => ContentType::Embed,
             BlockContent::Format(_) => ContentType::Format,
             BlockContent::Node(_) => ContentType::Node,
-            BlockContent::Text(_) => ContentType::Format,
+            BlockContent::Text(_) => ContentType::String,
             BlockContent::Json(_) => ContentType::Json,
         }
     }

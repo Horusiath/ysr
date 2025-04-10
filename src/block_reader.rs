@@ -1,10 +1,8 @@
 use crate::block::{
     BlockHeader, BlockMut, CONTENT_TYPE_ATOM, CONTENT_TYPE_BINARY, CONTENT_TYPE_DELETED,
-    CONTENT_TYPE_DOC, CONTENT_TYPE_EMBED, CONTENT_TYPE_FORMAT, CONTENT_TYPE_GC, CONTENT_TYPE_JSON,
-    CONTENT_TYPE_MOVE, CONTENT_TYPE_NODE, CONTENT_TYPE_SKIP, CONTENT_TYPE_STRING, ID,
+    CONTENT_TYPE_DOC, CONTENT_TYPE_EMBED, CONTENT_TYPE_FORMAT, CONTENT_TYPE_GC, CONTENT_TYPE_JSON, CONTENT_TYPE_NODE, CONTENT_TYPE_SKIP, CONTENT_TYPE_STRING, ID,
 };
-use crate::content::ContentType;
-use crate::node::{NodeHeader, NodeID, NodeType};
+use crate::node::{NodeHeader, NodeID};
 use crate::read::{Decoder, ReadExt};
 use crate::write::WriteExt;
 use crate::{ClientID, Clock};
@@ -35,15 +33,15 @@ impl<'a, D: Decoder> BlockReader<'a, D> {
     }
 
     fn next_block(&mut self) -> crate::Result<Option<Carrier>> {
+        if self.remaining_blocks == 0 && self.remaining_clients == 0 {
+            return Ok(None);
+        }
+
         while self.remaining_blocks == 0 && self.remaining_clients > 0 {
             self.remaining_blocks = self.decoder.read_var()?;
             self.current_client = self.decoder.read_client()?;
             self.current_clock = self.decoder.read_var()?;
             self.remaining_clients -= 1;
-        }
-
-        if self.remaining_clients == 0 {
-            return Ok(None);
         }
 
         let info = self.decoder.read_info()?;
@@ -243,9 +241,12 @@ impl Display for BlockRange {
 
 #[cfg(test)]
 mod test {
-    use crate::block_reader::BlockReader;
+    use crate::block_reader::{BlockReader, Carrier};
     use crate::read::DecoderV1;
     use std::io::Cursor;
+    use crate::block::ID;
+    use crate::ClientID;
+    use crate::content::BlockContent;
 
     #[test]
     fn decode_basic_v1() {
@@ -254,10 +255,30 @@ mod test {
             198, 5, 0, 1, 49, 68, 227, 214, 245, 198, 5, 1, 1, 50, 0,
         ];
         let mut decoder = DecoderV1::new(Cursor::new(update));
-        let reader = BlockReader::new(&mut decoder).unwrap();
-        for res in reader {
-            let carrier = res.unwrap();
-            println!("{}", carrier);
-        }
+        let mut reader = BlockReader::new(&mut decoder).unwrap();
+        const CLIENT: ClientID = ClientID::new(1490905955);
+        // index: 0
+        let Carrier::Block(n) = reader.next().unwrap().unwrap() else { unreachable!() };
+        assert_eq!(n.id(), &ID::new(CLIENT, 0.into()));
+        assert_eq!(n.origin_right(), None);
+        assert_eq!(n.origin_left(), None);
+        let BlockContent::Text(text) = n.content().unwrap() else { unreachable!() };
+        assert_eq!(text, "0");
+
+        // index: 1
+        let Carrier::Block(n) = reader.next().unwrap().unwrap() else { unreachable!() };
+        assert_eq!(n.id(), &ID::new(CLIENT, 1.into()));
+        assert_eq!(n.origin_right(), Some(&ID::new(CLIENT, 0.into())));
+        let BlockContent::Text(text) = n.content().unwrap() else { unreachable!() };
+        assert_eq!(text, "1");
+
+        // index: 2
+        let Carrier::Block(n) = reader.next().unwrap().unwrap() else { unreachable!() };
+        assert_eq!(n.id(), &ID::new(CLIENT, 2.into()));
+        let BlockContent::Text(text) = n.content().unwrap() else { unreachable!() };
+        assert_eq!(text, "2");
+
+        // finish
+        assert!(reader.next().is_none());
     }
 }

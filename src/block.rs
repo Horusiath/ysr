@@ -207,6 +207,10 @@ impl BlockMut {
         }
     }
 
+    pub fn id(&self) -> &ID {
+        &self.id
+    }
+
     pub fn entry_key(&self) -> Option<&str> {
         let (header, body) = BlockHeader::parse(&self.body).unwrap();
         header.entry_key(body)
@@ -242,7 +246,7 @@ impl Deref for BlockMut {
     type Target = BlockHeader;
 
     fn deref(&self) -> &Self::Target {
-        BlockHeader::ref_from_bytes(&self.body).unwrap()
+        BlockHeader::ref_from_bytes(&self.body[..BlockHeader::SIZE]).unwrap()
     }
 }
 
@@ -374,7 +378,7 @@ impl<'a> Display for DisplayBlock<'a> {
             write!(f, ", origin-l: {}", self.header.origin_left)?;
         }
         if self.header.flags.has(BlockFlags::ORIGIN_RIGHT) {
-            write!(f, ", origin-l: {}", self.header.origin_right)?;
+            write!(f, ", origin-r: {}", self.header.origin_right)?;
         }
         let deleted = self.header.flags.has(CONTENT_TYPE_DELETED);
         if deleted {
