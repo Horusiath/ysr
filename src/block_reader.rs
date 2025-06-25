@@ -1,6 +1,7 @@
 use crate::block::{
     BlockHeader, BlockMut, CONTENT_TYPE_ATOM, CONTENT_TYPE_BINARY, CONTENT_TYPE_DELETED,
-    CONTENT_TYPE_DOC, CONTENT_TYPE_EMBED, CONTENT_TYPE_FORMAT, CONTENT_TYPE_GC, CONTENT_TYPE_JSON, CONTENT_TYPE_NODE, CONTENT_TYPE_SKIP, CONTENT_TYPE_STRING, ID,
+    CONTENT_TYPE_DOC, CONTENT_TYPE_EMBED, CONTENT_TYPE_FORMAT, CONTENT_TYPE_GC, CONTENT_TYPE_JSON,
+    CONTENT_TYPE_NODE, CONTENT_TYPE_SKIP, CONTENT_TYPE_STRING, ID,
 };
 use crate::node::{NodeHeader, NodeID};
 use crate::read::{Decoder, ReadExt};
@@ -27,7 +28,7 @@ impl<'a, D: Decoder> BlockReader<'a, D> {
             decoder,
             remaining_clients: num_of_state_updates,
             remaining_blocks: 0,
-            current_client: ClientID::new(0),
+            current_client: 0.into(),
             current_clock: Clock::new(0),
         })
     }
@@ -77,7 +78,7 @@ impl<'a, D: Decoder> BlockReader<'a, D> {
     }
 
     fn read_block(&mut self, id: ID, info: u8) -> crate::Result<BlockMut> {
-        let mut block = BlockMut::new(id, BytesMut::zeroed(BlockHeader::SIZE))?;
+        let mut block = BlockMut::parse(id, BytesMut::zeroed(BlockHeader::SIZE))?;
         let cannot_copy_parent_info = info & (HAS_RIGHT_ID | HAS_LEFT_ID) == 0;
         if info & HAS_LEFT_ID != 0 {
             let left_id = self.decoder.read_left_id()?;
@@ -227,6 +228,24 @@ pub struct BlockRange {
     len: Clock,
 }
 
+impl BlockRange {
+    pub fn new(head: ID, len: Clock) -> Self {
+        Self { head, len }
+    }
+
+    pub fn head(&self) -> &ID {
+        &self.head
+    }
+
+    pub fn end(&self) -> Clock {
+        self.head.clock + self.len - 1
+    }
+
+    pub fn len(&self) -> Clock {
+        self.len
+    }
+}
+
 impl Display for BlockRange {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -241,12 +260,12 @@ impl Display for BlockRange {
 
 #[cfg(test)]
 mod test {
-    use crate::block_reader::{BlockReader, Carrier};
-    use crate::read::DecoderV1;
-    use std::io::Cursor;
     use crate::block::ID;
-    use crate::ClientID;
+    use crate::block_reader::{BlockReader, Carrier};
     use crate::content::BlockContent;
+    use crate::read::DecoderV1;
+    use crate::ClientID;
+    use std::io::Cursor;
 
     #[test]
     fn decode_basic_v1() {
@@ -256,26 +275,38 @@ mod test {
         ];
         let mut decoder = DecoderV1::new(Cursor::new(update));
         let mut reader = BlockReader::new(&mut decoder).unwrap();
-        const CLIENT: ClientID = ClientID::new(1490905955);
+        const CLIENT: ClientID = unsafe { ClientID::new_unchecked(1490905955) };
         // index: 0
-        let Carrier::Block(n) = reader.next().unwrap().unwrap() else { unreachable!() };
+        let Carrier::Block(n) = reader.next().unwrap().unwrap() else {
+            unreachable!()
+        };
         assert_eq!(n.id(), &ID::new(CLIENT, 0.into()));
         assert_eq!(n.origin_right(), None);
         assert_eq!(n.origin_left(), None);
-        let BlockContent::Text(text) = n.content().unwrap() else { unreachable!() };
+        let BlockContent::Text(text) = n.content().unwrap() else {
+            unreachable!()
+        };
         assert_eq!(text, "0");
 
         // index: 1
-        let Carrier::Block(n) = reader.next().unwrap().unwrap() else { unreachable!() };
+        let Carrier::Block(n) = reader.next().unwrap().unwrap() else {
+            unreachable!()
+        };
         assert_eq!(n.id(), &ID::new(CLIENT, 1.into()));
         assert_eq!(n.origin_right(), Some(&ID::new(CLIENT, 0.into())));
-        let BlockContent::Text(text) = n.content().unwrap() else { unreachable!() };
+        let BlockContent::Text(text) = n.content().unwrap() else {
+            unreachable!()
+        };
         assert_eq!(text, "1");
 
         // index: 2
-        let Carrier::Block(n) = reader.next().unwrap().unwrap() else { unreachable!() };
+        let Carrier::Block(n) = reader.next().unwrap().unwrap() else {
+            unreachable!()
+        };
         assert_eq!(n.id(), &ID::new(CLIENT, 2.into()));
-        let BlockContent::Text(text) = n.content().unwrap() else { unreachable!() };
+        let BlockContent::Text(text) = n.content().unwrap() else {
+            unreachable!()
+        };
         assert_eq!(text, "2");
 
         // finish

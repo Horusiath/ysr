@@ -103,6 +103,22 @@ impl StateVector {
             *e = (*e).max(clock);
         }
     }
+
+    /// Updates current state vector by clock values from another state vector. If `other` doesn't
+    /// have a given client, entry is retained. If `other` has a given client, entry is set to its
+    /// value, if it's lesser than the current one. Otherwise, it is removed.
+    ///
+    /// This method is used to calculate the set of missing updates between two peers.
+    pub fn clear_present(&self, other: &Self) -> Self {
+        let mut diff = BTreeMap::new();
+        for (client, &local_clock) in self.iter() {
+            let remote_clock = other.get(client);
+            if local_clock > remote_clock {
+                diff.insert(*client, remote_clock);
+            }
+        }
+        StateVector(diff)
+    }
 }
 
 impl FromIterator<(ClientID, Clock)> for StateVector {

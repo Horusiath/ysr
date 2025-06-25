@@ -3,7 +3,7 @@ use crate::block::{
     CONTENT_TYPE_EMBED, CONTENT_TYPE_FORMAT, CONTENT_TYPE_GC, CONTENT_TYPE_JSON, CONTENT_TYPE_NODE,
     CONTENT_TYPE_STRING,
 };
-use crate::node::{NodeHeader, NodeID};
+use crate::node::NodeHeader;
 use crate::varint::var_u64_from_slice;
 use crate::{lib0, U64};
 use serde::de::DeserializeOwned;
@@ -14,7 +14,7 @@ use std::marker::PhantomData;
 use zerocopy::{Immutable, IntoBytes, KnownLayout, TryFromBytes};
 
 #[repr(u8)]
-#[derive(Debug, TryFromBytes, KnownLayout, Immutable, IntoBytes)]
+#[derive(Debug, PartialEq, Eq, TryFromBytes, KnownLayout, Immutable, IntoBytes)]
 pub(crate) enum ContentType {
     Deleted = CONTENT_TYPE_DELETED,
     Json = CONTENT_TYPE_JSON,

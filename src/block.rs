@@ -2,6 +2,7 @@ use crate::content::{BlockContent, ContentAtom, ContentFormat, ContentJson, Cont
 use crate::node::{NodeHeader, NodeID};
 use crate::{ClientID, Clock};
 use crate::{Error, Result};
+use bitflags::bitflags;
 use bytes::BytesMut;
 use std::fmt::{Debug, Display, Formatter};
 use std::io::Write;
@@ -9,7 +10,7 @@ use std::ops::{Deref, DerefMut};
 use zerocopy::{CastError, FromBytes, Immutable, IntoBytes, KnownLayout};
 
 #[repr(C)]
-#[derive(PartialEq, Eq, Copy, Clone, FromBytes, KnownLayout, Immutable, IntoBytes)]
+#[derive(PartialEq, Eq, Copy, Clone, FromBytes, KnownLayout, Immutable, IntoBytes, Default)]
 pub struct ID {
     pub client: ClientID,
     pub clock: Clock,
@@ -35,7 +36,7 @@ impl Display for ID {
 }
 
 #[repr(C)]
-#[derive(FromBytes, KnownLayout, Immutable, IntoBytes)]
+#[derive(FromBytes, KnownLayout, Immutable, IntoBytes, Default)]
 pub struct BlockHeader {
     /// Yjs-compatible length of the block. Counted as a number of countable elements or
     /// UTF-16 characters.
@@ -77,7 +78,7 @@ impl BlockHeader {
     }
 
     pub fn left(&self) -> Option<&ID> {
-        if self.flags.has(BlockFlags::LEFT) {
+        if self.flags.contains(BlockFlags::LEFT) {
             Some(&self.left)
         } else {
             None
@@ -87,17 +88,17 @@ impl BlockHeader {
     pub fn set_left(&mut self, id: Option<&ID>) {
         match id {
             Some(id) => {
-                self.flags.set(BlockFlags::LEFT);
+                self.flags |= BlockFlags::LEFT;
                 self.left = *id;
             }
             None => {
-                self.flags.clear(BlockFlags::LEFT);
+                self.flags -= BlockFlags::LEFT;
             }
         }
     }
 
     pub fn right(&self) -> Option<&ID> {
-        if self.flags.has(BlockFlags::RIGHT) {
+        if self.flags.contains(BlockFlags::RIGHT) {
             Some(&self.right)
         } else {
             None
@@ -107,17 +108,17 @@ impl BlockHeader {
     pub fn set_right(&mut self, id: Option<&ID>) {
         match id {
             Some(id) => {
-                self.flags.set(BlockFlags::RIGHT);
+                self.flags |= BlockFlags::RIGHT;
                 self.right = *id;
             }
             None => {
-                self.flags.clear(BlockFlags::RIGHT);
+                self.flags -= BlockFlags::RIGHT;
             }
         }
     }
 
     pub fn origin_left(&self) -> Option<&ID> {
-        if self.flags.has(BlockFlags::ORIGIN_LEFT) {
+        if self.flags.contains(BlockFlags::ORIGIN_LEFT) {
             Some(&self.origin_left)
         } else {
             None
@@ -126,11 +127,11 @@ impl BlockHeader {
 
     pub fn set_origin_left(&mut self, id: ID) {
         self.origin_left = id;
-        self.flags.set(BlockFlags::ORIGIN_LEFT);
+        self.flags |= BlockFlags::ORIGIN_LEFT;
     }
 
     pub fn origin_right(&self) -> Option<&ID> {
-        if self.flags.has(BlockFlags::ORIGIN_RIGHT) {
+        if self.flags.contains(BlockFlags::ORIGIN_RIGHT) {
             Some(&self.origin_right)
         } else {
             None
@@ -139,7 +140,7 @@ impl BlockHeader {
 
     pub fn set_origin_right(&mut self, id: ID) {
         self.origin_right = id;
-        self.flags.set(BlockFlags::ORIGIN_RIGHT);
+        self.flags |= BlockFlags::ORIGIN_RIGHT;
     }
 
     pub fn entry_key<'a>(&self, body: &'a [u8]) -> Option<&'a str> {
@@ -193,13 +194,81 @@ impl BlockHeader {
     }
 }
 
+pub struct Block<'a> {
+    id: ID,
+    data: &'a [u8],
+}
+
+impl<'a> Block<'a> {
+    pub fn new(id: ID, data: &'a [u8]) -> Result<Self> {
+        if BlockHeader::parse(data).is_err() {
+            Err(Error::MalformedBlock(id))
+        } else {
+            Ok(Self { id, data })
+        }
+    }
+
+    pub unsafe fn new_unchecked(id: ID, data: &'a [u8]) -> Self {
+        Self { id, data }
+    }
+
+    pub fn id(&self) -> &ID {
+        &self.id
+    }
+
+    #[inline]
+    pub fn header(&self) -> &BlockHeader {
+        BlockHeader::ref_from_bytes(self.data).unwrap()
+    }
+
+    pub fn entry_key(&self) -> Option<&str> {
+        let (header, body) = BlockHeader::parse(&self.data).unwrap();
+        header.entry_key(body)
+    }
+
+    pub fn content(&self) -> Result<BlockContent<'a>> {
+        let (header, body) = BlockHeader::parse(self.data).unwrap();
+        header.content(body)
+    }
+
+    pub fn display(&self) -> DisplayBlock<'a> {
+        let (header, body) = BlockHeader::parse(self.data).unwrap();
+        header.display(body)
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        self.data
+    }
+
+    pub fn to_owned(&self) -> BlockMut {
+        let mut body = BytesMut::with_capacity(self.data.len());
+        body.extend_from_slice(self.data);
+        BlockMut::parse(self.id, body).unwrap()
+    }
+}
+
+impl Deref for Block<'_> {
+    type Target = BlockHeader;
+
+    fn deref(&self) -> &Self::Target {
+        self.header()
+    }
+}
+
 pub struct BlockMut {
     id: ID,
     body: BytesMut,
 }
 
 impl BlockMut {
-    pub fn new(id: ID, body: BytesMut) -> Result<Self> {
+    pub fn new(id: ID) -> Self {
+        let header = BlockHeader::default();
+        let mut bytes = BytesMut::with_capacity(BlockHeader::SIZE);
+        bytes.extend_from_slice(header.as_bytes());
+        BlockMut { id, body: bytes }
+    }
+
+    pub fn parse(id: ID, body: BytesMut) -> Result<Self> {
         if let Err(_) = BlockHeader::parse(&*body) {
             Err(Error::MalformedBlock(id))
         } else {
@@ -239,6 +308,10 @@ impl BlockMut {
 
     pub fn as_writer(&mut self) -> Writer<'_> {
         Writer::new(self)
+    }
+
+    pub fn as_ref(&self) -> Block<'_> {
+        unsafe { Block::new_unchecked(self.id, &self.body) }
     }
 }
 
@@ -296,45 +369,27 @@ pub type ParseError<'a> = CastError<&'a [u8], BlockHeader>;
 pub type ParseMutError<'a> = CastError<&'a mut [u8], BlockHeader>;
 
 #[repr(transparent)]
-#[derive(FromBytes, IntoBytes, KnownLayout, Immutable)]
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Default)]
 pub struct BlockFlags(u8);
 
-impl BlockFlags {
-    /// Bit flag (1st bit) used for an item which should be kept - not used atm.
-    const KEEP: u8 = 0b0000_0001;
-    /// Bit flag (2nd bit) for an item, which contents are considered countable.
-    const COUNTABLE: u8 = 0b0000_0010;
-    /// Bit flag (3rd bit) for a tombstoned (deleted) item.
-    const DELETED: u8 = 0b0000_0100;
-    /// Bit flag (4th bit) for a marked item - not used atm.
-    const MARKED: u8 = 0b0000_1000;
-    /// Bit flag (5th bit) marking if block has defined right origin.
-    const RIGHT: u8 = 0b0001_0000;
-    /// Bit flag (6th bit) marking if block has defined right origin.
-    const LEFT: u8 = 0b0010_0000;
-    /// Bit flag (7th bit) marking if block has defined right origin.
-    const ORIGIN_RIGHT: u8 = 0b0100_0000;
-    /// Bit flag (8th bit) marking if block has defined right origin.
-    const ORIGIN_LEFT: u8 = 0b1000_0000;
-
-    #[inline]
-    pub fn new(source: u8) -> Self {
-        BlockFlags(source)
-    }
-
-    #[inline]
-    fn has(&self, value: u8) -> bool {
-        self.0 & value == value
-    }
-
-    #[inline]
-    fn set(&mut self, value: u8) {
-        self.0 |= value
-    }
-
-    #[inline]
-    fn clear(&mut self, value: u8) {
-        self.0 &= !value
+bitflags! {
+    impl BlockFlags : u8 {
+        /// Bit flag (1st bit) used for an item which should be kept - not used atm.
+        const KEEP = 0b0000_0001;
+        /// Bit flag (2nd bit) for an item, which contents are considered countable.
+        const COUNTABLE = 0b0000_0010;
+        /// Bit flag (3rd bit) for a tombstoned (deleted) item.
+        const DELETED = 0b0000_0100;
+        /// Bit flag (4th bit) for a marked item - not used atm.
+        const MARKED = 0b0000_1000;
+        /// Bit flag (5th bit) marking if block has defined right origin.
+        const RIGHT = 0b0001_0000;
+        /// Bit flag (6th bit) marking if block has defined right origin.
+        const LEFT = 0b0010_0000;
+        /// Bit flag (7th bit) marking if block has defined right origin.
+        const ORIGIN_RIGHT = 0b0100_0000;
+        /// Bit flag (8th bit) marking if block has defined right origin.
+        const ORIGIN_LEFT = 0b1000_0000;
     }
 }
 
@@ -365,22 +420,22 @@ impl<'a> Display for DisplayBlock<'a> {
         if let Some(key) = self.header.entry_key(self.body) {
             write!(f, ", key: \"{}\"", key)?;
         }
-        if self.header.flags.has(BlockFlags::COUNTABLE) {
+        if self.header.flags.contains(BlockFlags::COUNTABLE) {
             write!(f, ", clock-len: {}", self.header.clock_len)?;
         }
-        if self.header.flags.has(BlockFlags::LEFT) {
+        if self.header.flags.contains(BlockFlags::LEFT) {
             write!(f, ", left: {}", self.header.left)?;
         }
-        if self.header.flags.has(BlockFlags::RIGHT) {
+        if self.header.flags.contains(BlockFlags::RIGHT) {
             write!(f, ", right: {}", self.header.right)?;
         }
-        if self.header.flags.has(BlockFlags::ORIGIN_LEFT) {
+        if self.header.flags.contains(BlockFlags::ORIGIN_LEFT) {
             write!(f, ", origin-l: {}", self.header.origin_left)?;
         }
-        if self.header.flags.has(BlockFlags::ORIGIN_RIGHT) {
+        if self.header.flags.contains(BlockFlags::ORIGIN_RIGHT) {
             write!(f, ", origin-r: {}", self.header.origin_right)?;
         }
-        let deleted = self.header.flags.has(CONTENT_TYPE_DELETED);
+        let deleted = self.header.flags.contains(BlockFlags::DELETED);
         if deleted {
             write!(f, " ~~")?;
         } else {
@@ -392,5 +447,44 @@ impl<'a> Display for DisplayBlock<'a> {
             write!(f, "~~")?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::block::{BlockMut, CONTENT_TYPE_DELETED, ID};
+    use crate::content::ContentType;
+    use crate::Clock;
+
+    #[test]
+    fn block_set_header_values() {
+        let id = ID::new(123.into(), 1.into());
+        let left = ID::new(234.into(), 3.into());
+        let origin_left = ID::new(234.into(), 13.into());
+        let right = ID::new(345.into(), 4.into());
+        let origin_right = ID::new(345.into(), 4.into());
+        let parent = ID::new(456.into(), 5.into());
+
+        let mut block = BlockMut::new(id);
+        block.set_left(Some(&left));
+        block.set_right(Some(&right));
+        block.set_parent(parent);
+        block.set_origin_left(origin_left);
+        block.set_origin_right(origin_right);
+
+        assert_eq!(block.left(), Some(&left));
+        assert_eq!(block.right(), Some(&right));
+        assert_eq!(block.origin_left(), Some(&origin_left));
+        assert_eq!(block.origin_right(), Some(&origin_right));
+        assert_eq!(block.parent, parent);
+
+        block.set_content_type(CONTENT_TYPE_DELETED);
+        block.set_clock_len(2.into());
+        block.init_entry_key("key").unwrap();
+
+        assert_eq!(block.clock_len(), Clock::new(2));
+        let content = block.content().unwrap();
+        assert_eq!(content.content_type(), ContentType::Deleted);
+        assert_eq!(block.entry_key(), Some("key"));
     }
 }

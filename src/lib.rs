@@ -17,13 +17,13 @@ pub use multi_doc::MultiDoc;
 pub use state_vector::StateVector;
 pub use store::Store;
 pub use transaction::Transaction;
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 pub type U16 = zerocopy::U16<zerocopy::byteorder::LE>;
 pub type U32 = zerocopy::U32<zerocopy::byteorder::LE>;
 pub type U64 = zerocopy::U64<zerocopy::byteorder::LE>;
 pub type U128 = zerocopy::U128<zerocopy::byteorder::LE>;
-pub type ClientID = U64;
 pub type Clock = U64;
 
 pub type DynError = Box<dyn std::error::Error + Send + Sync>;
@@ -51,4 +51,88 @@ pub enum Error {
     Lib0(#[from] Box<crate::lib0::Error>),
     #[error("store error: {0}")]
     Store(DynError),
+    #[error("Client ID is not valid 53-bit integer")]
+    ClientIDOutOfRange,
+    #[error("LMDB error: {0}")]
+    Lmdb(#[from] heed::Error),
+}
+
+#[repr(transparent)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Ord,
+    PartialOrd,
+    Hash,
+    Default,
+    FromBytes,
+    KnownLayout,
+    Immutable,
+    IntoBytes,
+)]
+pub struct ClientID(U64);
+
+impl ClientID {
+    const MAX_VALUE: Self = ClientID(U64::new((1u64 << 53) - 1));
+
+    pub fn new_random() -> Self {
+        let value: u64 = rand::random_range(..((1u64 << 53) - 1));
+        Self(value.into())
+    }
+
+    pub fn is_valid(self) -> bool {
+        self <= Self::MAX_VALUE
+    }
+
+    pub fn new(id: U64) -> Option<Self> {
+        let id = Self(id.into());
+        if id.is_valid() {
+            Some(id)
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    pub const unsafe fn new_unchecked(id: u64) -> Self {
+        Self(U64::new(id))
+    }
+}
+
+impl std::fmt::Display for ClientID {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:016}", self.0.get())
+    }
+}
+
+impl From<ClientID> for u64 {
+    fn from(value: ClientID) -> Self {
+        value.0.get()
+    }
+}
+
+impl From<ClientID> for U64 {
+    fn from(value: ClientID) -> Self {
+        value.0
+    }
+}
+
+impl From<u32> for ClientID {
+    fn from(value: u32) -> Self {
+        Self(U64::new(value as u64))
+    }
+}
+
+impl TryFrom<U64> for ClientID {
+    type Error = crate::Error;
+
+    fn try_from(value: U64) -> crate::Result<Self> {
+        match Self::new(value) {
+            None => Err(crate::Error::ClientIDOutOfRange),
+            Some(id) => Ok(id),
+        }
+    }
 }

@@ -1,6 +1,7 @@
 use crate::read::ReadExt;
 use crate::write::WriteExt;
-use crate::U64;
+use crate::{ClientID, U64};
+use std::convert::Infallible;
 use std::fmt::{Display, Formatter};
 use std::io::{ErrorKind, Read, Write};
 
@@ -26,6 +27,20 @@ pub trait VarInt: Sized + Copy {
     fn write<W: Write>(&self, w: &mut W) -> std::io::Result<usize>;
     /// Read a number from given reader using variable size integer encoding.
     fn read<R: Read>(r: &mut R) -> std::io::Result<Self>;
+}
+
+impl VarInt for ClientID {
+    fn write<W: Write>(&self, w: &mut W) -> std::io::Result<usize> {
+        write_var_u64((*self).into(), w)
+    }
+
+    fn read<R: Read>(r: &mut R) -> std::io::Result<Self> {
+        let value = read_var_u64(r)?;
+        match ClientID::try_from(U64::new(value)) {
+            Ok(id) => Ok(id),
+            Err(_) => out_of_range(),
+        }
+    }
 }
 
 impl VarInt for U64 {

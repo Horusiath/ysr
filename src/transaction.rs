@@ -1,16 +1,25 @@
-use crate::block_reader::BlockReader;
+use crate::block::ID;
+use crate::block_reader::{BlockRange, BlockReader, Carrier};
 use crate::read::Decoder;
+use crate::write::WriteExt;
 use crate::{StateVector, Store};
-use smallvec::SmallVec;
-use std::io::{Read, Write};
+use bytes::BytesMut;
+use std::fmt::{Display, Formatter};
+use std::io::Write;
+use zerocopy::IntoBytes;
 
 pub(crate) struct TransactionState {
-    origin: Option<Origin>,
+    pub begin_state: StateVector,
+    pub current_state: StateVector,
 }
 
 impl TransactionState {
-    fn new() -> Self {
-        todo!()
+    fn new(begin_state: StateVector) -> Self {
+        let current_state = begin_state.clone();
+        TransactionState {
+            begin_state,
+            current_state,
+        }
     }
 
     fn commit<'db, T: crate::store::Transaction<'db>>(&self, tx: &T) -> crate::Result<()> {
@@ -20,22 +29,33 @@ impl TransactionState {
 
 pub struct Transaction<'db, S: Store + 'db> {
     inner: S::Transaction<'db>,
+    origin: Option<Origin>,
     state: Option<Box<TransactionState>>,
 }
 
 impl<'db, S: Store> Transaction<'db, S> {
-    pub(crate) fn new(inner: S::Transaction<'db>) -> Self {
-        Self { inner, state: None }
+    pub(crate) fn new(inner: S::Transaction<'db>, origin: Option<Origin>) -> Self {
+        Self {
+            inner,
+            origin,
+            state: None,
+        }
+    }
+
+    pub fn origin(&self) -> Option<&Origin> {
+        self.origin.as_ref()
     }
 
     pub fn split_mut(&mut self) -> (&mut S::Transaction<'db>, &mut TransactionState) {
-        let state = self
-            .state
-            .get_or_insert_with(|| Box::new(TransactionState::new()));
+        let state = self.state.get_or_insert_with(|| {
+            use crate::store::Transaction;
+            let begin_state = self.inner.state_vector().unwrap();
+            Box::new(TransactionState::new(begin_state))
+        });
         (&mut self.inner, state)
     }
 
-    pub fn state_vector(&mut self) -> crate::Result<StateVector> {
+    pub fn state_vector(&self) -> crate::Result<StateVector> {
         use crate::store::Transaction;
         self.inner.state_vector()
     }
@@ -45,12 +65,246 @@ impl<'db, S: Store> Transaction<'db, S> {
         since: &StateVector,
         writer: &mut W,
     ) -> crate::Result<()> {
+        // wrote updates
+        let current_state = self.state_vector()?;
+        let diff = current_state.clear_present(since);
+        writer.write_var(diff.len() as u64)?;
+        let mut buf = BytesMut::new();
+        for (&client_id, &clock) in diff.iter().rev() {
+            let up_to = current_state.get(&client_id);
+            let range = BlockRange::new(ID::new(client_id, clock), up_to - clock);
+            /*let mut cursor = self.inner.block_range(range)?;
+            buf.clear();
+            let blocks_count = Self::write_updates(&mut cursor, &mut buf)?;
+            writer.write_var(blocks_count)?;
+            writer.write_var(client_id.get())?;
+            writer.write_var(clock.get())?;
+            writer.write_all(&buf)?;*/
+        }
+
+        // write delete set
         todo!()
     }
 
+    fn write_updates(
+        cursor: &mut impl Iterator<Item = crate::Result<crate::block::BlockMut>>,
+        buf: &mut BytesMut,
+    ) -> crate::Result<usize> {
+        let mut blocks_count = 0;
+        for block in cursor {
+            let block = block?;
+            blocks_count += 1;
+            buf.extend_from_slice(block.as_bytes());
+        }
+        Ok(blocks_count)
+    }
+
     pub fn apply_update<D: Decoder>(&mut self, decoder: &mut D) -> crate::Result<()> {
-        let block_reader = BlockReader::new(decoder)?;
-        todo!()
+        use crate::store::Transaction;
+
+        let mut block_reader = BlockReader::new(decoder)?;
+        let (tx, state) = self.split_mut();
+        let mut missing_sv = StateVector::default();
+        //let mut skip_client = None;
+        while let Some(res) = block_reader.next() {
+            let carrier = res?;
+            match carrier {
+                Carrier::Block(block) => {
+                    if state.current_state.contains(block.id()) {
+                        /*
+
+                        let offset = local_sv.get(&id.client) as i32 - id.clock as i32;
+                        if let Some(dep) = Self::missing(&block, &local_sv) {
+                            stack.push(block);
+                            // get the struct reader that has the missing struct
+                            match self.blocks.clients.get_mut(&dep) {
+                                Some(block_refs) if !block_refs.is_empty() => {
+                                    stack_head = block_refs.pop_front();
+                                    current_target =
+                                        self.blocks.clients.get_mut(&current_client_id);
+                                    continue;
+                                }
+                                _ => {
+                                    // This update message causally depends on another update message that doesn't exist yet
+                                    missing_sv.set_min(dep, local_sv.get(&dep));
+                                    Self::return_stack(stack, &mut self.blocks, &mut remaining);
+                                    current_target =
+                                        self.blocks.clients.get_mut(&current_client_id);
+                                    stack = Vec::new();
+                                }
+                            }
+                        } else if offset == 0 || (offset as u32) < block.len() {
+                            let offset = offset as u32;
+                            let client = id.client;
+                            local_sv.set_max(client, id.clock + block.len());
+                            if let BlockCarrier::Item(item) = &mut block {
+                                item.repair(store)?;
+                            }
+                            let should_delete = block.integrate(txn, offset);
+                            let mut delete_ptr = if should_delete {
+                                let ptr = block.as_item_ptr();
+                                ptr
+                            } else {
+                                None
+                            };
+                            store = txn.store_mut();
+                            match block {
+                                BlockCarrier::Item(item) => {
+                                    if item.parent != TypePtr::Unknown {
+                                        store.blocks.push_block(item)
+                                    } else {
+                                        // parent is not defined. Integrate GC struct instead
+                                        store.blocks.push_gc(BlockRange::new(item.id, item.len));
+                                        delete_ptr = None;
+                                    }
+                                }
+                                BlockCarrier::GC(gc) => store.blocks.push_gc(gc),
+                                BlockCarrier::Skip(_) => { /* do nothing */ }
+                            }
+
+                            if let Some(ptr) = delete_ptr {
+                                txn.delete(ptr);
+                            }
+                            store = txn.store_mut();
+                        }
+                         */
+                    } else {
+                        // update from the same client is missing
+                        let id = block.id();
+                        missing_sv.set_min(id.client, id.clock - 1);
+                        tx.put_block(block)?;
+                        // hid a dead wall, add all items from stack to restSS
+                        /*
+                        stack.push(block);
+                        // hid a dead wall, add all items from stack to restSS
+                        Self::return_stack(stack, &mut self.blocks, &mut remaining);
+                        current_target = self.blocks.clients.get_mut(&current_client_id);
+                        stack = Vec::new();
+                         */
+                    }
+                }
+                Carrier::GC(range) => {}
+                Carrier::Skip(range) => continue,
+            }
+            /*
+                while let Some(mut block) = stack_head {
+                    if !block.is_skip() {
+                        let id = *block.id();
+                        if local_sv.contains(&id) {
+                            let offset = local_sv.get(&id.client) as i32 - id.clock as i32;
+                            if let Some(dep) = Self::missing(&block, &local_sv) {
+                                stack.push(block);
+                                // get the struct reader that has the missing struct
+                                match self.blocks.clients.get_mut(&dep) {
+                                    Some(block_refs) if !block_refs.is_empty() => {
+                                        stack_head = block_refs.pop_front();
+                                        current_target =
+                                            self.blocks.clients.get_mut(&current_client_id);
+                                        continue;
+                                    }
+                                    _ => {
+                                        // This update message causally depends on another update message that doesn't exist yet
+                                        missing_sv.set_min(dep, local_sv.get(&dep));
+                                        Self::return_stack(stack, &mut self.blocks, &mut remaining);
+                                        current_target =
+                                            self.blocks.clients.get_mut(&current_client_id);
+                                        stack = Vec::new();
+                                    }
+                                }
+                            } else if offset == 0 || (offset as u32) < block.len() {
+                                let offset = offset as u32;
+                                let client = id.client;
+                                local_sv.set_max(client, id.clock + block.len());
+                                if let BlockCarrier::Item(item) = &mut block {
+                                    item.repair(store)?;
+                                }
+                                let should_delete = block.integrate(txn, offset);
+                                let mut delete_ptr = if should_delete {
+                                    let ptr = block.as_item_ptr();
+                                    ptr
+                                } else {
+                                    None
+                                };
+                                store = txn.store_mut();
+                                match block {
+                                    BlockCarrier::Item(item) => {
+                                        if item.parent != TypePtr::Unknown {
+                                            store.blocks.push_block(item)
+                                        } else {
+                                            // parent is not defined. Integrate GC struct instead
+                                            store.blocks.push_gc(BlockRange::new(item.id, item.len));
+                                            delete_ptr = None;
+                                        }
+                                    }
+                                    BlockCarrier::GC(gc) => store.blocks.push_gc(gc),
+                                    BlockCarrier::Skip(_) => { /* do nothing */ }
+                                }
+
+                                if let Some(ptr) = delete_ptr {
+                                    txn.delete(ptr);
+                                }
+                                store = txn.store_mut();
+                            }
+                        } else {
+                            // update from the same client is missing
+                            let id = block.id();
+                            missing_sv.set_min(id.client, id.clock - 1);
+                            stack.push(block);
+                            // hid a dead wall, add all items from stack to restSS
+                            Self::return_stack(stack, &mut self.blocks, &mut remaining);
+                            current_target = self.blocks.clients.get_mut(&current_client_id);
+                            stack = Vec::new();
+                        }
+                    }
+
+                    // iterate to next stackHead
+                    if !stack.is_empty() {
+                        stack_head = stack.pop();
+                    } else {
+                        match current_target.take() {
+                            Some(v) if !v.is_empty() => {
+                                stack_head = v.pop_front();
+                                current_target = Some(v);
+                            }
+                            _ => {
+                                if let Some((client_id, target)) =
+                                    Self::next_target(&mut client_block_ref_ids, &mut self.blocks)
+                                {
+                                    stack_head = target.pop_front();
+                                    current_client_id = client_id;
+                                    current_target = Some(target);
+                                } else {
+                                    // we're done
+                                    break;
+                                }
+                            }
+                        };
+                    }
+                }
+
+                if remaining.is_empty() {
+                    None
+                } else {
+                    Some(PendingUpdate {
+                        update: Update {
+                            blocks: remaining,
+                            delete_set: DeleteSet::new(),
+                        },
+                        missing: missing_sv,
+                    })
+                }
+            };
+
+            let remaining_ds = txn.apply_delete(&self.delete_set).map(|ds| {
+                let mut update = Update::new();
+                update.delete_set = ds;
+                update
+            });
+
+            Ok((remaining_blocks, remaining_ds))
+                 */
+        }
+        Ok(())
     }
 
     pub fn commit(mut self) -> crate::Result<()> {
@@ -65,5 +319,43 @@ impl<'db, S: Store> Transaction<'db, S> {
     }
 }
 
+#[repr(transparent)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Origin(SmallVec<[u8; 16]>);
+pub struct Origin(Box<[u8]>);
+
+impl Origin {
+    pub fn new(data: &[u8]) -> Self {
+        Self(data.into())
+    }
+}
+
+impl AsRef<[u8]> for Origin {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl<'a, T> From<&'a T> for Origin
+where
+    T: AsRef<[u8]>,
+{
+    fn from(value: &'a T) -> Self {
+        Origin(value.as_ref().into())
+    }
+}
+
+impl Display for Origin {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match std::str::from_utf8(&self.0) {
+            // for strings try to print them as utf8
+            Ok(s) => write!(f, "{}", s),
+            _ => {
+                // for non-strings print as hex
+                for byte in &self.0 {
+                    write!(f, "{:02x}", byte)?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
