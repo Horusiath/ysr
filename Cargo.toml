@@ -5,14 +5,14 @@ edition = "2021"
 
 [features]
 default = ["lmdb"]
-lmdb = ["dep:heed"]
+lmdb = ["dep:lmdb-rs-m"]
 
 [dependencies]
 thiserror = "2.0"
 bytes = "1.10"
 bitflags = { version = "2.9", features = ["serde"] }
 zerocopy = { version = "0.8", features = ["derive", "simd"] }
-heed = { version = "0.22", features = ["raw_value"], optional = true }
+lmdb-rs-m = { version = "0.8", optional = true }
 smallvec = { version = "1.15", features = ["const_generics", "const_new", "union", "write"] }
 serde = { version = "1.0", features = ["rc", "alloc", "derive"] }
 serde_json = { version = "1.0", features = ["alloc"] }

@@ -185,6 +185,10 @@ impl BlockHeader {
         self.content_type = content_type;
     }
 
+    pub fn clock_len(&self) -> Clock {
+        self.clock_len
+    }
+
     pub fn set_clock_len(&mut self, len: Clock) {
         self.clock_len = len;
     }
@@ -214,6 +218,16 @@ impl<'a> Block<'a> {
 
     pub fn id(&self) -> &ID {
         &self.id
+    }
+
+    pub fn last_id(&self) -> ID {
+        ID::new(self.id.client, self.id.clock + self.clock_len())
+    }
+
+    pub fn contains(&self, id: &ID) -> bool {
+        id.client == self.id.client // same client
+            && id.clock >= self.id.clock // id is larger or equal to block's start clock
+            && id.clock < self.id.clock + self.clock_len() // id is smaller than block's end clock
     }
 
     #[inline]
@@ -312,6 +326,16 @@ impl BlockMut {
 
     pub fn as_ref(&self) -> Block<'_> {
         unsafe { Block::new_unchecked(self.id, &self.body) }
+    }
+
+    pub fn from_block(block: &Block<'_>) -> Self {
+        let mut body = BytesMut::with_capacity(block.data.len());
+        body.extend_from_slice(block.data);
+        Self::parse(*block.id(), body).unwrap()
+    }
+
+    pub fn split_at(&mut self, id: &ID) -> Option<BlockMut> {
+        todo!()
     }
 }
 

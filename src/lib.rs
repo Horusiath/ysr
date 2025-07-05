@@ -37,7 +37,7 @@ pub enum Error {
     ValueOutOfRange,
     #[error("provided key is longer than 255 bytes")]
     KeyTooLong,
-    #[error("failed to map data ")]
+    #[error("failed to map data to {0}")]
     InvalidMapping(&'static str),
     #[error("malformed block: {0}")]
     MalformedBlock(ID),
@@ -54,7 +54,7 @@ pub enum Error {
     #[error("Client ID is not valid 53-bit integer")]
     ClientIDOutOfRange,
     #[error("LMDB error: {0}")]
-    Lmdb(#[from] heed::Error),
+    Lmdb(#[from] lmdb_rs_m::MdbError),
 }
 
 #[repr(transparent)]
