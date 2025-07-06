@@ -1,6 +1,8 @@
 use crate::block::{Block, BlockHeader, BlockMut, ID};
 use crate::block_reader::BlockRange;
+use crate::store::Cursor;
 use crate::{ClientID, Clock, Error, StateVector};
+use lmdb_rs_m::core::MdbResult;
 use lmdb_rs_m::Database;
 use std::collections::BTreeMap;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
@@ -17,6 +19,11 @@ impl<'tx> BlockStore<'tx> {
 }
 
 impl<'tx> BlockStore<'tx> {
+    pub fn cursor(&self) -> crate::Result<BlockCursor<'_>> {
+        let cursor = self.db.new_cursor()?;
+        Ok(BlockCursor::from(cursor))
+    }
+
     /// Inserts a block into the store, updating the state vector as necessary.
     pub fn insert_block(&mut self, block: Block) -> crate::Result<()> {
         let key = BlockKey::new(*block.id());
@@ -55,14 +62,14 @@ impl<'tx> BlockStore<'tx> {
         }
     }
 
-    pub fn split_block(&self, id: ID) -> crate::Result<SplitResult> {
+    pub fn split_block(&self, id: ID) -> crate::Result<Option<SplitResult>> {
         let left = self.block_containing(id, false)?;
         if left.contains(&id) {
             let mut left = BlockMut::from_block(&left);
             let right = left.split_at(&id).unwrap();
-            Ok(SplitResult::Split(left, right))
+            Ok(Some(SplitResult::Split(left, right)))
         } else {
-            Ok(SplitResult::Unchanged(left))
+            Ok(Some(SplitResult::Unchanged(left)))
         }
     }
 
@@ -113,28 +120,68 @@ impl<'tx> BlockStore<'tx> {
     /// If `direct_only` is false, it will search for blocks that contain the ID anywhere within
     /// their range.
     pub fn block_containing(&self, id: ID, direct_only: bool) -> crate::Result<Block> {
-        let key = BlockKey::new(id);
-        let mut cursor = self.db.new_cursor()?;
-        let res = cursor.to_key(&key.as_bytes());
-
-        if let Err(lmdb_rs_m::MdbError::NotFound) = res {
-            if direct_only {
-                return Err(lmdb_rs_m::MdbError::NotFound.into());
+        let mut cursor = self.cursor()?;
+        if !cursor.seek(id)? && !direct_only {
+            // we didn't find the block directly, so we need to check the previous block
+            // if it contains the ID within its range
+            if !cursor.prev()? {
+                return Err(Error::BlockNotFound(id));
             }
-            // If not found directly, we will search for the block indirectly
-            cursor.to_prev_key()?;
         }
+        let block = cursor.block()?;
+        match block {
+            Some(block) if block.contains(&id) => Ok(block),
+            _ => Err(Error::BlockNotFound(id)),
+        }
+    }
+}
 
-        let key: &[u8] = cursor.get_key()?;
-        let value: &[u8] = cursor.get_value()?;
+pub struct BlockCursor<'a> {
+    inner: lmdb_rs_m::Cursor<'a>,
+}
+
+impl<'a> BlockCursor<'a> {
+    pub fn seek(&mut self, id: ID) -> crate::Result<bool> {
+        let key = BlockKey::new(id);
+        match self.inner.to_key(&key.as_bytes()) {
+            Ok(_) => Ok(true),
+            Err(lmdb_rs_m::MdbError::NotFound) => Ok(false),
+            Err(e) => Err(Error::Lmdb(e)),
+        }
+    }
+
+    pub fn next(&mut self) -> crate::Result<bool> {
+        match self.inner.to_next_key() {
+            Ok(_) => Ok(true),
+            Err(lmdb_rs_m::MdbError::NotFound) => Ok(false),
+            Err(e) => Err(Error::Lmdb(e)),
+        }
+    }
+
+    pub fn prev(&mut self) -> crate::Result<bool> {
+        match self.inner.to_prev_key() {
+            Ok(_) => Ok(true),
+            Err(lmdb_rs_m::MdbError::NotFound) => Ok(false),
+            Err(e) => Err(Error::Lmdb(e)),
+        }
+    }
+
+    pub fn block(&mut self) -> crate::Result<Option<Block<'a>>> {
+        let key: &[u8] = self.inner.get_key()?;
+        let value: &[u8] = self.inner.get_value()?;
+        if key[0] != KEY_PREFIX_BLOCK {
+            return Ok(None);
+        }
         let id = ID::ref_from_bytes(&key[1..]).map_err(|_| Error::InvalidMapping("ID"))?;
 
         let block = Block::new(*id, value)?;
-        if block.contains(&id) {
-            Ok(block)
-        } else {
-            Err(lmdb_rs_m::MdbError::NotFound.into())
-        }
+        Ok(Some(block))
+    }
+}
+
+impl<'tx> From<lmdb_rs_m::Cursor<'tx>> for BlockCursor<'tx> {
+    fn from(cursor: lmdb_rs_m::Cursor<'tx>) -> Self {
+        BlockCursor { inner: cursor }
     }
 }
 

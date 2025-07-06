@@ -51,6 +51,8 @@ pub enum Error {
     Lib0(#[from] Box<crate::lib0::Error>),
     #[error("store error: {0}")]
     Store(DynError),
+    #[error("block not found: {0}")]
+    BlockNotFound(ID),
     #[error("Client ID is not valid 53-bit integer")]
     ClientIDOutOfRange,
     #[error("LMDB error: {0}")]
