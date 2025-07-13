@@ -3,9 +3,10 @@ use crate::block::{
     CONTENT_TYPE_EMBED, CONTENT_TYPE_FORMAT, CONTENT_TYPE_GC, CONTENT_TYPE_JSON, CONTENT_TYPE_NODE,
     CONTENT_TYPE_STRING,
 };
+use crate::lib0::{Error, Value};
 use crate::node::NodeHeader;
 use crate::varint::var_u64_from_slice;
-use crate::{lib0, U64};
+use crate::{lib0, Clock, U64};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use std::fmt::{Display, Formatter};
@@ -49,8 +50,8 @@ impl TryFrom<u8> for ContentType {
 #[repr(u8)]
 pub(crate) enum BlockContent<'a> {
     Deleted(U64) = CONTENT_TYPE_DELETED,
-    Json(ContentJson<'a>) = CONTENT_TYPE_JSON,
-    Atom(ContentAtom<'a>) = CONTENT_TYPE_ATOM,
+    Json(ContentRef<'a, JsonEncoding>) = CONTENT_TYPE_JSON,
+    Atom(ContentRef<'a, AtomEncoding>) = CONTENT_TYPE_ATOM,
     Binary(&'a [u8]) = CONTENT_TYPE_BINARY,
     Embed(&'a [u8]) = CONTENT_TYPE_EMBED,
     Text(&'a str) = CONTENT_TYPE_STRING,
@@ -75,6 +76,20 @@ impl<'a> BlockContent<'a> {
             BlockContent::Json(_) => ContentType::Json,
         }
     }
+
+    pub fn body(&self) -> &[u8] {
+        match self {
+            BlockContent::Deleted(_) => &[],
+            BlockContent::Json(jsons) => jsons.inner.body(),
+            BlockContent::Atom(atoms) => atoms.inner.body(),
+            BlockContent::Binary(bin) => bin,
+            BlockContent::Embed(bin) => bin,
+            BlockContent::Text(text) => text.as_bytes(),
+            BlockContent::Node(node) => node.as_bytes(),
+            BlockContent::Format(format) => format.body(),
+            BlockContent::Doc(doc) => doc,
+        }
+    }
 }
 
 impl<'a> Display for BlockContent<'a> {
@@ -93,6 +108,7 @@ impl<'a> Display for BlockContent<'a> {
     }
 }
 
+#[derive(Clone)]
 pub struct ContentIter<'a> {
     data: &'a [u8],
 }
@@ -101,124 +117,166 @@ impl<'a> ContentIter<'a> {
     pub fn new(data: &'a [u8]) -> Self {
         Self { data }
     }
+
+    fn body(&self) -> &'a [u8] {
+        self.data
+    }
+
+    pub fn get(&self, mut index: usize) -> Option<&'a [u8]> {
+        let mut iter = self.clone();
+        while index > 0 {
+            iter.next()?;
+            index -= 1;
+        }
+        iter.next()
+    }
+
+    pub fn slice(&self, mut index: usize) -> Option<&'a [u8]> {
+        let mut iter = self.clone();
+        while index > 0 {
+            iter.next()?;
+            index -= 1;
+        }
+        Some(iter.data)
+    }
 }
 
 impl<'a> Iterator for ContentIter<'a> {
     type Item = &'a [u8];
 
     fn next(&mut self) -> Option<Self::Item> {
-        let (data_len, read) = var_u64_from_slice(self.data);
-        if read == 0 {
-            None
-        } else {
-            self.data = &self.data[..read];
-            Some(&self.data[..data_len as usize])
+        if self.data.is_empty() {
+            return None;
         }
+
+        let len =
+            u32::from_le_bytes([self.data[0], self.data[1], self.data[2], self.data[3]]) as usize;
+        let slice = &self.data[4..4 + len];
+        self.data = &self.data[4 + len..];
+
+        Some(slice)
     }
 }
 
-#[repr(transparent)]
-pub struct ContentJson<'a> {
-    data: &'a [u8],
-}
-
-impl<'a> ContentJson<'a> {
-    pub fn new(data: &'a [u8]) -> Self {
-        Self { data }
-    }
-
-    pub fn iter<D>(&self) -> ContentJsonIter<'a, D>
+pub trait Encoding {
+    fn serialize<W, T>(writer: &mut W, value: &T) -> crate::Result<()>
     where
-        D: Deserialize<'a>,
+        W: std::io::Write,
+        T: serde::Serialize;
+
+    fn deserialize<T>(data: &[u8]) -> crate::Result<T>
+    where
+        T: DeserializeOwned;
+
+    fn fmt(data: &[u8], f: &mut Formatter<'_>) -> std::fmt::Result;
+}
+
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy)]
+pub struct JsonEncoding;
+impl Encoding for JsonEncoding {
+    fn serialize<W, T>(writer: &mut W, value: &T) -> crate::Result<()>
+    where
+        W: std::io::Write,
+        T: serde::Serialize,
     {
-        ContentJsonIter {
-            inner: ContentIter::new(self.data),
-            _marker: PhantomData::default(),
-        }
+        serde_json::to_writer(writer, value).map_err(crate::Error::from)
     }
-}
 
-impl<'a> Display for ContentJson<'a> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let mut i = self.iter::<serde_json::Value>();
-        write!(f, "[")?;
-        if let Some(res) = i.next() {
-            let v = res.map_err(|e| std::fmt::Error)?;
-            write!(f, "{}", v)?;
-        }
-        while let Some(res) = i.next() {
-            let v = res.map_err(|e| std::fmt::Error)?;
-            write!(f, ", {}", v)?;
-        }
-
-        write!(f, "]")
+    fn deserialize<T>(data: &[u8]) -> crate::Result<T>
+    where
+        T: DeserializeOwned,
+    {
+        serde_json::from_slice(data).map_err(crate::Error::from)
     }
-}
 
-pub struct ContentJsonIter<'a, D> {
-    inner: ContentIter<'a>,
-    _marker: PhantomData<D>,
-}
-
-impl<'a, D> Iterator for ContentJsonIter<'a, D>
-where
-    D: Deserialize<'a>,
-{
-    type Item = Result<D, serde_json::Error>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let slice = self.inner.next()?;
-        match serde_json::from_slice(slice) {
-            Ok(data) => Some(Ok(data)),
-            Err(e) => Some(Err(e)),
+    fn fmt(data: &[u8], f: &mut Formatter<'_>) -> std::fmt::Result {
+        match serde_json::from_slice::<serde_json::Value>(data) {
+            Ok(value) => write!(f, "{}", value),
+            Err(_) => Err(std::fmt::Error),
         }
     }
 }
 
 #[repr(transparent)]
-pub struct ContentAtom<'a> {
-    data: &'a [u8],
-}
-
-impl<'a> ContentAtom<'a> {
-    pub fn new(data: &'a [u8]) -> Self {
-        Self { data }
+#[derive(Debug, Clone, Copy)]
+pub struct AtomEncoding;
+impl Encoding for AtomEncoding {
+    fn serialize<W, T>(writer: &mut W, value: &T) -> crate::Result<()>
+    where
+        W: std::io::Write,
+        T: serde::Serialize,
+    {
+        lib0::to_writer(writer, value).map_err(crate::Error::from)
     }
 
-    pub fn iter<D>(&self) -> ContentAtomIter<'a, D>
+    fn deserialize<T>(data: &[u8]) -> crate::Result<T>
+    where
+        T: DeserializeOwned,
+    {
+        let cursor = Cursor::new(data);
+        lib0::from_reader(cursor).map_err(crate::Error::from)
+    }
+
+    fn fmt(data: &[u8], f: &mut Formatter<'_>) -> std::fmt::Result {
+        let cursor = Cursor::new(data);
+        match lib0::from_reader::<_, lib0::Value>(cursor) {
+            Ok(value) => write!(f, "{}", value),
+            Err(_) => Err(std::fmt::Error),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct ContentRef<'a, E> {
+    inner: ContentIter<'a>,
+    _encoding: PhantomData<E>,
+}
+
+impl<'a, E> ContentRef<'a, E> {
+    pub fn new(slice: &'a [u8]) -> Self {
+        let inner = ContentIter::new(slice);
+        Self {
+            inner,
+            _encoding: PhantomData::default(),
+        }
+    }
+
+    pub fn iter<D>(&self) -> Iter<'a, D>
     where
         D: DeserializeOwned,
     {
-        ContentAtomIter {
-            inner: ContentIter::new(self.data),
+        Iter {
+            inner: self.inner.clone(),
             _marker: PhantomData::default(),
         }
     }
 }
 
-impl<'a> Display for ContentAtom<'a> {
+impl<'a, E> Display for ContentRef<'a, E>
+where
+    E: Encoding,
+{
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let mut i = self.iter::<lib0::Value>();
+        let mut i = self.inner.clone().into_iter();
         write!(f, "[")?;
         if let Some(res) = i.next() {
-            let v = res.map_err(|e| std::fmt::Error)?;
-            write!(f, "{}", v)?;
+            E::fmt(res, f)?;
         }
         while let Some(res) = i.next() {
-            let v = res.map_err(|e| std::fmt::Error)?;
-            write!(f, ", {}", v)?;
+            E::fmt(res, f)?;
         }
 
         write!(f, "]")
     }
 }
 
-pub struct ContentAtomIter<'a, D> {
+pub struct Iter<'a, D> {
     inner: ContentIter<'a>,
     _marker: PhantomData<D>,
 }
 
-impl<'a, D> Iterator for ContentAtomIter<'a, D>
+impl<'a, D> Iterator for Iter<'a, D>
 where
     D: DeserializeOwned,
 {
@@ -234,30 +292,43 @@ where
 }
 
 pub struct ContentFormat<'a> {
-    key: &'a str,
-    value: &'a [u8],
+    data: &'a [u8],
 }
 
 impl<'a> ContentFormat<'a> {
     pub fn new(data: &'a [u8]) -> crate::Result<Self> {
-        let mut iter = ContentIter::new(data);
-        let key = iter.next().ok_or(crate::Error::EndOfBuffer)?;
-        let key = std::str::from_utf8(key).map_err(|e| lib0::Error::Utf8(e))?;
-        let value = iter.next().ok_or(crate::Error::EndOfBuffer)?;
-        Ok(Self { key, value })
+        if data.len() < 2 {
+            return Err(crate::Error::EndOfBuffer);
+        }
+        let key_len = u16::from_le_bytes([data[0], data[1]]) as usize;
+        if data.len() < 2 + key_len {
+            return Err(crate::Error::EndOfBuffer);
+        }
+
+        Ok(Self { data })
+    }
+
+    fn body(&self) -> &'a [u8] {
+        self.data
+    }
+
+    fn key_len(&self) -> usize {
+        u16::from_le_bytes([self.data[0], self.data[1]]) as usize
     }
 
     pub fn key(&self) -> &'a str {
-        self.key
+        let key_bytes = &self.data[2..2 + self.key_len()];
+        unsafe { std::str::from_utf8_unchecked(key_bytes) }
     }
 
     pub fn value(&self) -> &'a [u8] {
-        self.value
+        let key_len = self.key_len();
+        &self.data[2 + key_len..]
     }
 }
 
 impl<'a> Display for ContentFormat<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "\"{}\"={:?}", self.key, self.value)
+        write!(f, "\"{}\"={:?}", self.key(), self.value())
     }
 }

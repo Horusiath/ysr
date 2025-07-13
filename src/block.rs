@@ -1,4 +1,4 @@
-use crate::content::{BlockContent, ContentAtom, ContentFormat, ContentJson, ContentType};
+use crate::content::{BlockContent, ContentFormat, ContentIter, ContentRef, ContentType};
 use crate::node::{NodeHeader, NodeID};
 use crate::{ClientID, Clock};
 use crate::{Error, Result};
@@ -61,9 +61,29 @@ pub struct BlockHeader {
     /// ID of the right neighbor block at the point of insertion (if such existed).
     origin_right: ID,
 }
-
 impl BlockHeader {
     pub const SIZE: usize = size_of::<BlockHeader>();
+
+    pub fn init(
+        &mut self,
+        len: Clock,
+        left: Option<&ID>,
+        right: Option<&ID>,
+        origin_left: Option<&ID>,
+        origin_right: Option<&ID>,
+        parent: NodeID,
+    ) {
+        self.set_clock_len(len);
+        self.set_parent(parent);
+        self.set_left(left);
+        self.set_right(right);
+        if let Some(origin_left) = origin_left {
+            self.set_origin_left(*origin_left);
+        }
+        if let Some(origin_right) = origin_right {
+            self.set_origin_right(*origin_right);
+        }
+    }
 
     pub fn parse(data: &[u8]) -> Result<(&BlockHeader, &[u8]), ParseError> {
         let (header, body) = data.split_at(Self::SIZE);
@@ -158,13 +178,17 @@ impl BlockHeader {
         self.parent = parent_id;
     }
 
+    pub fn content_slice<'a>(&self, body: &'a [u8]) -> &'a [u8] {
+        &body[self.key_len as usize..]
+    }
+
     pub fn content<'a>(&self, body: &'a [u8]) -> Result<BlockContent<'a>> {
-        let content_end = body.len() - self.key_len as usize;
-        let content = &body[..content_end];
+        let content = self.content_slice(body);
+        let len = self.clock_len;
         match self.content_type.try_into()? {
             ContentType::Deleted => Ok(BlockContent::Deleted(self.clock_len)),
-            ContentType::Json => Ok(BlockContent::Json(ContentJson::new(content))),
-            ContentType::Atom => Ok(BlockContent::Atom(ContentAtom::new(content))),
+            ContentType::Json => Ok(BlockContent::Json(ContentRef::new(content))),
+            ContentType::Atom => Ok(BlockContent::Atom(ContentRef::new(content))),
             ContentType::Binary => Ok(BlockContent::Binary(content)),
             ContentType::Doc => Ok(BlockContent::Doc(content)),
             ContentType::Embed => Ok(BlockContent::Embed(content)),
@@ -181,14 +205,17 @@ impl BlockHeader {
         }
     }
 
+    #[inline]
     pub fn set_content_type(&mut self, content_type: u8) {
         self.content_type = content_type;
     }
 
+    #[inline]
     pub fn clock_len(&self) -> Clock {
         self.clock_len
     }
 
+    #[inline]
     pub fn set_clock_len(&mut self, len: Clock) {
         self.clock_len = len;
     }
@@ -224,6 +251,7 @@ impl<'a> Block<'a> {
         ID::new(self.id.client, self.id.clock + self.clock_len())
     }
 
+    #[inline]
     pub fn contains(&self, id: &ID) -> bool {
         id.client == self.id.client // same client
             && id.clock >= self.id.clock // id is larger or equal to block's start clock
@@ -275,11 +303,28 @@ pub struct BlockMut {
 }
 
 impl BlockMut {
-    pub fn new(id: ID) -> Self {
+    pub fn new(
+        id: ID,
+        len: Clock,
+        left: Option<&ID>,
+        right: Option<&ID>,
+        origin_left: Option<&ID>,
+        origin_right: Option<&ID>,
+        parent: NodeID,
+        entry_key: Option<&str>,
+    ) -> crate::Result<Self> {
         let header = BlockHeader::default();
         let mut bytes = BytesMut::with_capacity(BlockHeader::SIZE);
         bytes.extend_from_slice(header.as_bytes());
-        BlockMut { id, body: bytes }
+        let mut block = BlockMut { id, body: bytes };
+
+        block.init(len, left, right, origin_left, origin_right, parent);
+
+        if let Some(key) = entry_key {
+            block.init_entry_key(key)?;
+        }
+
+        Ok(block)
     }
 
     pub fn parse(id: ID, body: BytesMut) -> Result<Self> {
@@ -292,6 +337,10 @@ impl BlockMut {
 
     pub fn id(&self) -> &ID {
         &self.id
+    }
+
+    pub fn last_id(&self) -> ID {
+        ID::new(self.id.client, self.id.clock + self.clock_len())
     }
 
     pub fn entry_key(&self) -> Option<&str> {
@@ -320,6 +369,13 @@ impl BlockMut {
         Ok(())
     }
 
+    fn init_content(&mut self, content: BlockContent) -> crate::Result<()> {
+        self.set_content_type(content.content_type() as u8);
+        let body = content.body();
+        self.body.extend_from_slice(body);
+        Ok(())
+    }
+
     pub fn as_writer(&mut self) -> Writer<'_> {
         Writer::new(self)
     }
@@ -334,8 +390,59 @@ impl BlockMut {
         Self::parse(*block.id(), body).unwrap()
     }
 
-    pub fn split_at(&mut self, id: &ID) -> Option<BlockMut> {
-        todo!()
+    pub fn splice(&mut self, offset: Clock) -> crate::Result<Option<Self>> {
+        if offset == 0 {
+            Ok(None)
+        } else {
+            let id = self.id;
+            let client = id.client;
+            let clock = id.clock;
+            let len = self.clock_len();
+
+            let new_id = ID::new(client, clock + offset);
+            let last_id = self.last_id();
+            let mut right = Self::new(
+                new_id,
+                len - offset,
+                Some(&last_id),
+                self.right(),
+                Some(&last_id),
+                self.origin_right(),
+                self.parent,
+                self.entry_key(),
+            )?;
+            self.split(offset, &mut right)?;
+
+            self.set_right(Some(&right.id));
+
+            Ok(Some(right))
+        }
+    }
+
+    fn split(&mut self, offset: Clock, into: &mut BlockMut) -> crate::Result<()> {
+        let (header, body) = BlockHeader::parse_mut(&mut self.body).unwrap();
+        let len = header.clock_len();
+        let content_end = body.len() - header.key_len as usize;
+        let content = &body[..content_end];
+        match header.content_type.try_into()? {
+            ContentType::String => {
+                let offset = offset.get() as usize;
+                let str = unsafe { std::str::from_utf8_unchecked(content) };
+                let remainder = str[offset..].as_bytes();
+                into.body.extend_from_slice(remainder);
+                self.body.truncate(offset);
+            }
+            ContentType::Atom | ContentType::Json => {
+                let content_iter = ContentIter::new(body);
+                let offset = offset.get() as usize;
+                if let Some(slice) = content_iter.slice(offset) {
+                    into.body.extend_from_slice(slice);
+                    self.body.truncate(offset);
+                }
+            }
+            _ => { /* other contents are no op */ }
+        }
+        Ok(())
     }
 }
 
@@ -349,7 +456,7 @@ impl Deref for BlockMut {
 
 impl DerefMut for BlockMut {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        BlockHeader::mut_from_bytes(&mut self.body).unwrap()
+        BlockHeader::mut_from_prefix(&mut self.body).unwrap().0
     }
 }
 
@@ -489,22 +596,25 @@ mod test {
         let origin_right = ID::new(345.into(), 4.into());
         let parent = ID::new(456.into(), 5.into());
 
-        let mut block = BlockMut::new(id);
-        block.set_left(Some(&left));
-        block.set_right(Some(&right));
-        block.set_parent(parent);
-        block.set_origin_left(origin_left);
-        block.set_origin_right(origin_right);
+        let mut block = BlockMut::new(
+            id,
+            2.into(),
+            Some(&left),
+            Some(&right),
+            Some(&origin_left),
+            Some(&origin_right),
+            parent,
+            Some("key"),
+        )
+        .unwrap();
+
+        block.set_content_type(CONTENT_TYPE_DELETED);
 
         assert_eq!(block.left(), Some(&left));
         assert_eq!(block.right(), Some(&right));
         assert_eq!(block.origin_left(), Some(&origin_left));
         assert_eq!(block.origin_right(), Some(&origin_right));
         assert_eq!(block.parent, parent);
-
-        block.set_content_type(CONTENT_TYPE_DELETED);
-        block.set_clock_len(2.into());
-        block.init_entry_key("key").unwrap();
 
         assert_eq!(block.clock_len(), Clock::new(2));
         let content = block.content().unwrap();

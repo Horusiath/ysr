@@ -99,17 +99,12 @@ impl<'a, D: Decoder> BlockReader<'a, D> {
             };
             block.set_parent(parent_id);
         }
-        let entry_key = if cannot_copy_parent_info && (info & HAS_PARENT_SUB) != 0 {
+        if cannot_copy_parent_info && (info & HAS_PARENT_SUB) != 0 {
             let mut entry_key = SmallVec::<[u8; 16]>::new();
             self.decoder.read_string(&mut entry_key)?;
-            entry_key
-        } else {
-            SmallVec::default()
-        };
-        self.init_content(info, &mut block)?;
-        if !entry_key.is_empty() {
             block.init_entry_key(&entry_key)?;
         }
+        self.init_content(info, &mut block)?;
         Ok(block)
     }
 
@@ -196,7 +191,8 @@ fn copy_content<D: Decoder>(decoder: &mut D, block: &mut BlockMut) -> crate::Res
     let mut writer = block.as_writer();
     for _ in 0u64..count.into() {
         decoder.read_bytes(&mut buf)?;
-        writer.write_bytes(&buf)?;
+        writer.write_u32(buf.len() as u32)?;
+        writer.write_all(&buf)?;
     }
     Ok(())
 }

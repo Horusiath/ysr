@@ -65,9 +65,10 @@ impl<'tx> BlockStore<'tx> {
     pub fn split_block(&self, id: ID) -> crate::Result<Option<SplitResult>> {
         let left = self.block_containing(id, false)?;
         if left.contains(&id) {
+            let offset = id.clock - left.id().clock;
             let mut left = BlockMut::from_block(&left);
-            let right = left.split_at(&id).unwrap();
-            Ok(Some(SplitResult::Split(left, right)))
+            let right = left.splice(offset)?;
+            Ok(Some(SplitResult::Split(left, right.unwrap())))
         } else {
             Ok(Some(SplitResult::Unchanged(left)))
         }
@@ -245,8 +246,17 @@ mod test {
         let mut db = BlockStore::new(tx.bind(&h)).unwrap();
 
         let id = ID::new(1.into(), 2.into());
-        let mut block = BlockMut::new(id);
-        block.set_clock_len(1.into());
+        let block = BlockMut::new(
+            id,
+            1.into(),
+            None,
+            None,
+            None,
+            None,
+            ID::new(1.into(), 1.into()),
+            None,
+        )
+        .unwrap();
 
         db.insert_block(block.as_ref()).unwrap();
 
@@ -272,16 +282,34 @@ mod test {
 
         let searched = {
             let id = ID::new(1.into(), 2.into());
-            let mut block = BlockMut::new(id);
-            block.set_clock_len(10.into());
+            let block = BlockMut::new(
+                id,
+                10.into(),
+                None,
+                None,
+                None,
+                None,
+                ID::new(1.into(), 1.into()),
+                None,
+            )
+            .unwrap();
 
             db.insert_block(block.as_ref()).unwrap();
             block
         };
         {
             let id = ID::new(1.into(), 12.into());
-            let mut block = BlockMut::new(id);
-            block.set_clock_len(2.into());
+            let block = BlockMut::new(
+                id,
+                2.into(),
+                None,
+                None,
+                None,
+                None,
+                ID::new(1.into(), 1.into()),
+                None,
+            )
+            .unwrap();
 
             db.insert_block(block.as_ref()).unwrap();
         }
