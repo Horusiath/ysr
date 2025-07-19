@@ -13,7 +13,7 @@ pub trait Encoder: Write {
     fn write_ds_clock(&mut self, clock: Clock) -> crate::Result<usize>;
 
     /// Write a number of client entries used by currently encoded [DeleteSet].
-    fn write_ds_len(&mut self, len: U64) -> crate::Result<usize>;
+    fn write_ds_len(&mut self, len: Clock) -> crate::Result<usize>;
 
     /// Write unique identifier of a currently encoded [Block]'s left origin.
     fn write_left_id(&mut self, id: &ID) -> crate::Result<()>;
@@ -203,7 +203,7 @@ impl<W: Write> Encoder for EncoderV1<W> {
     }
 
     #[inline]
-    fn write_ds_len(&mut self, len: U64) -> crate::Result<usize> {
+    fn write_ds_len(&mut self, len: Clock) -> crate::Result<usize> {
         Ok(self.writer.write_var(len)?)
     }
 

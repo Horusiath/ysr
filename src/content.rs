@@ -17,6 +17,7 @@ use zerocopy::{Immutable, IntoBytes, KnownLayout, TryFromBytes};
 #[repr(u8)]
 #[derive(Debug, PartialEq, Eq, TryFromBytes, KnownLayout, Immutable, IntoBytes)]
 pub(crate) enum ContentType {
+    Gc = CONTENT_TYPE_GC,
     Deleted = CONTENT_TYPE_DELETED,
     Json = CONTENT_TYPE_JSON,
     Binary = CONTENT_TYPE_BINARY,
@@ -33,6 +34,7 @@ impl TryFrom<u8> for ContentType {
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
+            CONTENT_TYPE_GC => Ok(ContentType::Gc),
             CONTENT_TYPE_DELETED => Ok(ContentType::Deleted),
             CONTENT_TYPE_JSON => Ok(ContentType::Json),
             CONTENT_TYPE_BINARY => Ok(ContentType::Binary),
@@ -49,7 +51,7 @@ impl TryFrom<u8> for ContentType {
 
 #[repr(u8)]
 pub(crate) enum BlockContent<'a> {
-    Deleted(U64) = CONTENT_TYPE_DELETED,
+    Deleted(Clock) = CONTENT_TYPE_DELETED,
     Json(ContentRef<'a, JsonEncoding>) = CONTENT_TYPE_JSON,
     Atom(ContentRef<'a, AtomEncoding>) = CONTENT_TYPE_ATOM,
     Binary(&'a [u8]) = CONTENT_TYPE_BINARY,
@@ -242,13 +244,14 @@ impl<'a, E> ContentRef<'a, E> {
         }
     }
 
-    pub fn iter<D>(&self) -> Iter<'a, D>
+    pub fn iter<D>(&self) -> Iter<'a, E, D>
     where
         D: DeserializeOwned,
     {
         Iter {
             inner: self.inner.clone(),
-            _marker: PhantomData::default(),
+            _deserializer: PhantomData::default(),
+            _target_type: PhantomData::default(),
         }
     }
 }
@@ -271,20 +274,23 @@ where
     }
 }
 
-pub struct Iter<'a, D> {
+pub struct Iter<'a, E, D> {
     inner: ContentIter<'a>,
-    _marker: PhantomData<D>,
+    _deserializer: PhantomData<E>,
+    _target_type: PhantomData<D>,
 }
 
-impl<'a, D> Iterator for Iter<'a, D>
+impl<'a, E, D> Iterator for Iter<'a, E, D>
 where
+    E: Encoding,
     D: DeserializeOwned,
 {
-    type Item = Result<D, lib0::Error>;
+    type Item = crate::Result<D>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let slice = self.inner.next()?;
-        match lib0::from_reader(Cursor::new(slice)) {
+
+        match E::deserialize(slice) {
             Ok(data) => Some(Ok(data)),
             Err(e) => Some(Err(e)),
         }
@@ -330,5 +336,29 @@ impl<'a> ContentFormat<'a> {
 impl<'a> Display for ContentFormat<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "\"{}\"={:?}", self.key(), self.value())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::content::{ContentRef, JsonEncoding};
+    use bytes::{BufMut, BytesMut};
+    use serde_json::json;
+
+    #[test]
+    fn iter() {
+        let alice = json!({"name": "Alice"}).to_string();
+        let bob = json!({"name": "Bob"}).to_string();
+        let mut data = BytesMut::new();
+        data.put_u32_le(alice.len() as u32);
+        data.put_slice(alice.as_bytes());
+        data.put_u32_le(bob.len() as u32);
+        data.put_slice(bob.as_bytes());
+
+        let content: ContentRef<'_, JsonEncoding> = ContentRef::new(&data);
+        let mut iter = content.iter::<serde_json::Value>();
+        assert_eq!(iter.next().unwrap().unwrap(), json!({"name": "Alice"}));
+        assert_eq!(iter.next().unwrap().unwrap(), json!({"name": "Bob"}));
+        assert!(iter.next().is_none());
     }
 }

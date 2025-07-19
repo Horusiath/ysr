@@ -67,13 +67,14 @@ impl NodeFlags {}
 
 impl NodeID {
     pub fn from_root(root: &[u8]) -> NodeID {
-        let hash = twox_hash::XxHash64::oneshot(0, root);
+        let hash = twox_hash::XxHash32::oneshot(0, root);
         // we compute hash of root name for the higher part of the node id
         // the upper half of the node id is u64::MAX since client IDs canonically use only 53 bits
         NodeID::new(ClientID::MAX_VALUE, hash.into())
     }
 
-    pub fn from_nested(id: ID) -> NodeID {
+    #[inline]
+    pub const fn from_nested(id: ID) -> NodeID {
         id
     }
 }

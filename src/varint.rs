@@ -1,6 +1,6 @@
 use crate::read::ReadExt;
 use crate::write::WriteExt;
-use crate::{ClientID, U64};
+use crate::{ClientID, U32, U64};
 use std::convert::Infallible;
 use std::fmt::{Display, Formatter};
 use std::io::{ErrorKind, Read, Write};
@@ -31,15 +31,26 @@ pub trait VarInt: Sized + Copy {
 
 impl VarInt for ClientID {
     fn write<W: Write>(&self, w: &mut W) -> std::io::Result<usize> {
-        write_var_u64((*self).into(), w)
+        write_var_u32((*self).into(), w)
     }
 
     fn read<R: Read>(r: &mut R) -> std::io::Result<Self> {
-        let value = read_var_u64(r)?;
-        match ClientID::try_from(U64::new(value)) {
+        let value = read_var_u32(r)?;
+        match ClientID::try_from(U32::new(value)) {
             Ok(id) => Ok(id),
             Err(_) => out_of_range(),
         }
+    }
+}
+
+impl VarInt for U32 {
+    #[inline]
+    fn write<W: Write>(&self, w: &mut W) -> std::io::Result<usize> {
+        write_var_u32(self.get(), w)
+    }
+
+    fn read<R: Read>(r: &mut R) -> std::io::Result<Self> {
+        Ok(read_var_u32(r)?.into())
     }
 }
 

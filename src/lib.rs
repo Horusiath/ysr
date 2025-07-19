@@ -24,7 +24,7 @@ pub type U16 = zerocopy::U16<zerocopy::byteorder::LE>;
 pub type U32 = zerocopy::U32<zerocopy::byteorder::LE>;
 pub type U64 = zerocopy::U64<zerocopy::byteorder::LE>;
 pub type U128 = zerocopy::U128<zerocopy::byteorder::LE>;
-pub type Clock = U64;
+pub type Clock = U32;
 
 pub type DynError = Box<dyn std::error::Error + Send + Sync>;
 #[derive(Debug, thiserror::Error)]
@@ -75,13 +75,13 @@ pub enum Error {
     Immutable,
     IntoBytes,
 )]
-pub struct ClientID(U64);
+pub struct ClientID(U32);
 
 impl ClientID {
-    const MAX_VALUE: Self = ClientID(U64::new((1u64 << 53) - 1));
+    const MAX_VALUE: Self = ClientID(U32::new((1u32 << 31) - 1));
 
     pub fn new_random() -> Self {
-        let value: u64 = rand::random_range(..((1u64 << 53) - 1));
+        let value: u32 = rand::random_range(..((1u32 << 31) - 1));
         Self(value.into())
     }
 
@@ -89,7 +89,7 @@ impl ClientID {
         self <= Self::MAX_VALUE
     }
 
-    pub fn new(id: U64) -> Option<Self> {
+    pub fn new(id: U32) -> Option<Self> {
         let id = Self(id.into());
         if id.is_valid() {
             Some(id)
@@ -99,24 +99,24 @@ impl ClientID {
     }
 
     #[inline]
-    pub const unsafe fn new_unchecked(id: u64) -> Self {
-        Self(U64::new(id))
+    pub const unsafe fn new_unchecked(id: u32) -> Self {
+        Self(U32::new(id))
     }
 }
 
 impl std::fmt::Display for ClientID {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:016}", self.0.get())
+        write!(f, "{:08x}", self.0.get())
     }
 }
 
-impl From<ClientID> for u64 {
+impl From<ClientID> for u32 {
     fn from(value: ClientID) -> Self {
         value.0.get()
     }
 }
 
-impl From<ClientID> for U64 {
+impl From<ClientID> for U32 {
     fn from(value: ClientID) -> Self {
         value.0
     }
@@ -124,14 +124,14 @@ impl From<ClientID> for U64 {
 
 impl From<u32> for ClientID {
     fn from(value: u32) -> Self {
-        Self(U64::new(value as u64))
+        Self(U32::new(value))
     }
 }
 
-impl TryFrom<U64> for ClientID {
+impl TryFrom<U32> for ClientID {
     type Error = crate::Error;
 
-    fn try_from(value: U64) -> crate::Result<Self> {
+    fn try_from(value: U32) -> crate::Result<Self> {
         match Self::new(value) {
             None => Err(crate::Error::ClientIDOutOfRange),
             Some(id) => Ok(id),

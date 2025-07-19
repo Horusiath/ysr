@@ -70,6 +70,24 @@ pub const F64_MIN_SAFE_INTEGER: i64 = -F64_MAX_SAFE_INTEGER;
 pub use copy::copy;
 pub use value::Value;
 
+pub fn to_vec<T>(value: &T) -> Result<Vec<u8>, Error>
+where
+    T: ?Sized + Serialize,
+{
+    let mut buf = Vec::new();
+    let mut serializer = ser::Serializer::new(&mut buf);
+    value.serialize(&mut serializer)?;
+    Ok(buf)
+}
+
+pub fn from_slice<T>(buf: &[u8]) -> Result<T, Error>
+where
+    T: DeserializeOwned,
+{
+    let mut deserializer = de::Deserializer::new(buf);
+    T::deserialize(&mut deserializer)
+}
+
 pub fn to_writer<W, T>(writer: W, value: &T) -> Result<(), Error>
 where
     W: Write,

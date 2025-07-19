@@ -24,7 +24,7 @@ pub trait Decoder: Read {
     fn read_ds_clock(&mut self) -> crate::Result<Clock>;
 
     /// Read the number of clients stored in encoded [DeleteSet].
-    fn read_ds_len(&mut self) -> crate::Result<U64>;
+    fn read_ds_len(&mut self) -> crate::Result<Clock>;
 
     /// Read left origin of a currently decoded [Block].
     fn read_left_id(&mut self) -> crate::Result<ID>;
@@ -45,7 +45,7 @@ pub trait Decoder: Read {
     fn read_type_ref(&mut self) -> crate::Result<u8>;
 
     /// Read length parameter.
-    fn read_len(&mut self) -> crate::Result<U64>;
+    fn read_len(&mut self) -> crate::Result<Clock>;
 
     /// Read key string.
     fn read_key<W: Write>(&mut self, w: &mut W) -> crate::Result<u64>;
@@ -181,7 +181,7 @@ impl<R: Read> Decoder for DecoderV1<R> {
     }
 
     #[inline]
-    fn read_ds_len(&mut self) -> crate::Result<U64> {
+    fn read_ds_len(&mut self) -> crate::Result<Clock> {
         Ok(self.reader.read_var()?)
     }
 
@@ -216,7 +216,7 @@ impl<R: Read> Decoder for DecoderV1<R> {
     }
 
     #[inline]
-    fn read_len(&mut self) -> crate::Result<U64> {
+    fn read_len(&mut self) -> crate::Result<Clock> {
         Ok(self.reader.read_var()?)
     }
 
