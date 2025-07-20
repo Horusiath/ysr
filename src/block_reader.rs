@@ -110,7 +110,7 @@ impl<'a, D: Decoder> BlockReader<'a, D> {
 
     fn init_content(&mut self, info: u8, block: &mut BlockMut) -> crate::Result<()> {
         let content_type = info & CARRIER_INFO;
-        block.set_content_type(content_type);
+        block.set_content_type(content_type.try_into()?);
         match content_type {
             CONTENT_TYPE_GC => Err(crate::Error::UnsupportedContent(CONTENT_TYPE_GC)),
             CONTENT_TYPE_DELETED => {

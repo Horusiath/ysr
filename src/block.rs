@@ -184,7 +184,6 @@ impl BlockHeader {
     pub fn content<'a>(&self, body: &'a [u8]) -> Result<BlockContent<'a>> {
         let content = self.content_slice(body);
         match self.content_type.try_into()? {
-            ContentType::Gc => Ok(BlockContent::Deleted(self.clock_len)),
             ContentType::Deleted => Ok(BlockContent::Deleted(self.clock_len)),
             ContentType::Json => Ok(BlockContent::Json(ContentRef::new(content))),
             ContentType::Atom => Ok(BlockContent::Atom(ContentRef::new(content))),
@@ -205,8 +204,13 @@ impl BlockHeader {
     }
 
     #[inline]
-    pub fn set_content_type(&mut self, content_type: u8) {
-        self.content_type = content_type;
+    pub fn set_content_type(&mut self, content_type: ContentType) {
+        self.content_type = content_type as u8;
+        if content_type.is_countable() {
+            self.flags |= BlockFlags::COUNTABLE;
+        } else {
+            self.flags -= BlockFlags::COUNTABLE;
+        }
     }
 
     #[inline]
@@ -352,7 +356,7 @@ impl BlockMut {
     }
 
     pub fn last_id(&self) -> ID {
-        ID::new(self.id.client, self.id.clock + self.clock_len())
+        ID::new(self.id.client, self.id.clock + self.clock_len() - 1)
     }
 
     pub fn entry_key(&self) -> Option<&str> {
@@ -382,7 +386,7 @@ impl BlockMut {
     }
 
     fn init_content(&mut self, content: BlockContent) -> crate::Result<()> {
-        self.set_content_type(content.content_type() as u8);
+        self.set_content_type(content.content_type());
         let body = content.body();
         self.body.extend_from_slice(body);
         Ok(())
@@ -436,6 +440,11 @@ impl BlockMut {
         let content = &body[key_len..];
         header.clock_len = offset;
         into.content_type = header.content_type;
+        if header.flags.contains(BlockFlags::COUNTABLE) {
+            into.flags |= BlockFlags::COUNTABLE;
+        } else {
+            into.flags -= BlockFlags::COUNTABLE;
+        }
         match header.content_type.try_into()? {
             ContentType::String => {
                 let offset = offset.get() as usize;
@@ -474,7 +483,6 @@ impl BlockMut {
     }
 
     pub fn can_merge(&self, other: &Self) -> bool {
-        println!("origin: {:?} vs {:?}", self.origin_left(), self.last_id());
         self.id.client == other.id.client
             && self.right == other.id
             && self.id.clock + self.clock_len() == other.id.clock
@@ -661,7 +669,7 @@ mod test {
         let o_right = ID::new(CLIENT, 4.into());
 
         let mut block = block(1, 2, 3, 4, 13, 4, Some("key"));
-        block.set_content_type(CONTENT_TYPE_DELETED);
+        block.set_content_type(ContentType::Deleted);
 
         assert_eq!(block.left(), Some(&left));
         assert_eq!(block.right(), Some(&right));
@@ -702,8 +710,6 @@ mod test {
         let expected = b.clone();
 
         let right = b.splice(6.into()).unwrap().unwrap();
-        println!("left: {}", b);
-        println!("right: {}", right);
         assert!(b.merge(&right));
 
         assert_eq!(b, expected);
@@ -726,6 +732,19 @@ mod test {
             .init_content(BlockContent::Deleted(6.into()))
             .unwrap();
         assert_eq!(b, expected_left);
+    }
+
+    #[test]
+    fn block_merge_deleted() {
+        let mut b = block(1, 11, 12, 13, 14, 15, Some("key"));
+        b.init_content(BlockContent::Deleted(11.into())).unwrap();
+
+        let expected = b.clone();
+
+        let right = b.splice(6.into()).unwrap().unwrap();
+        assert!(b.merge(&right));
+
+        assert_eq!(b, expected);
     }
 
     #[test]
@@ -754,6 +773,28 @@ mod test {
             .init_content(BlockContent::Atom(ContentRef::new(&buf[..4 + alice.len()])))
             .unwrap();
         assert_eq!(b, expected_left);
+    }
+
+    #[test]
+    fn block_merge_atom() {
+        let alice = crate::lib0::to_vec(&User::new("Alice")).unwrap();
+        let bob = crate::lib0::to_vec(&User::new("Bob")).unwrap();
+        let mut buf = BytesMut::new();
+        buf.put_u32_le(alice.len() as u32);
+        buf.put_slice(alice.as_bytes());
+        buf.put_u32_le(bob.len() as u32);
+        buf.put_slice(bob.as_bytes());
+
+        let mut b = block(1, 2, 0, 3, 4, 5, Some("aa"));
+        b.init_content(BlockContent::Atom(ContentRef::new(&buf)))
+            .unwrap();
+
+        let expected = b.clone();
+
+        let right = b.splice(1.into()).unwrap().unwrap();
+        assert!(b.merge(&right));
+
+        assert_eq!(b, expected);
     }
 
     #[derive(Debug, Eq, PartialEq, Serialize, Deserialize)]

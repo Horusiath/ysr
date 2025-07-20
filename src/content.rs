@@ -8,16 +8,14 @@ use crate::node::NodeHeader;
 use crate::varint::var_u64_from_slice;
 use crate::{lib0, Clock, U64};
 use serde::de::DeserializeOwned;
-use serde::Deserialize;
 use std::fmt::{Display, Formatter};
 use std::io::Cursor;
 use std::marker::PhantomData;
 use zerocopy::{Immutable, IntoBytes, KnownLayout, TryFromBytes};
 
 #[repr(u8)]
-#[derive(Debug, PartialEq, Eq, TryFromBytes, KnownLayout, Immutable, IntoBytes)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, TryFromBytes, KnownLayout, Immutable, IntoBytes)]
 pub(crate) enum ContentType {
-    Gc = CONTENT_TYPE_GC,
     Deleted = CONTENT_TYPE_DELETED,
     Json = CONTENT_TYPE_JSON,
     Binary = CONTENT_TYPE_BINARY,
@@ -29,12 +27,28 @@ pub(crate) enum ContentType {
     Doc = CONTENT_TYPE_DOC,
 }
 
+impl ContentType {
+    pub fn is_countable(self) -> bool {
+        match self {
+            ContentType::Atom => true,
+            ContentType::Binary => true,
+            ContentType::Doc => true,
+            ContentType::Json => true,
+            ContentType::Embed => true,
+            ContentType::String => true,
+            ContentType::Node => true,
+            ContentType::Deleted => false,
+            ContentType::Format => false,
+            //ContentType::Move => false,
+        }
+    }
+}
+
 impl TryFrom<u8> for ContentType {
     type Error = crate::Error;
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
-            CONTENT_TYPE_GC => Ok(ContentType::Gc),
             CONTENT_TYPE_DELETED => Ok(ContentType::Deleted),
             CONTENT_TYPE_JSON => Ok(ContentType::Json),
             CONTENT_TYPE_BINARY => Ok(ContentType::Binary),
