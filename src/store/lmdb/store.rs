@@ -1,36 +1,34 @@
-use crate::block::{Block, BlockHeader, BlockMut, ID};
+use crate::block::{Block, BlockMut, ID};
 use crate::block_reader::BlockRange;
-use crate::store::Cursor;
 use crate::{ClientID, Clock, Error, StateVector};
-use lmdb_rs_m::core::MdbResult;
 use lmdb_rs_m::Database;
 use std::collections::BTreeMap;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
-pub struct BlockStore<'tx> {
-    db: Database<'tx>,
+pub trait BlockStore<'tx> {
+    fn cursor(&self) -> crate::Result<BlockCursor<'_>>;
+    fn insert_block(&mut self, block: Block) -> crate::Result<()>;
+    fn try_update_clock(&mut self, id: ID) -> crate::Result<Clock>;
+    fn split_block(&self, id: ID) -> crate::Result<Option<SplitResult>>;
+    fn remove(&mut self, id: &BlockRange) -> crate::Result<()>;
+    fn clock(&self, client_id: ClientID) -> crate::Result<Option<Clock>>;
+    fn state_vector(&self) -> crate::Result<StateVector>;
+    fn block_containing(&self, id: ID, direct_only: bool) -> crate::Result<Block>;
 }
 
-impl<'tx> BlockStore<'tx> {
-    pub fn new(db: Database<'tx>) -> crate::Result<Self> {
-        let store = BlockStore { db };
-        Ok(store)
-    }
-}
-
-impl<'tx> BlockStore<'tx> {
-    pub fn cursor(&self) -> crate::Result<BlockCursor<'_>> {
-        let cursor = self.db.new_cursor()?;
+impl<'tx> BlockStore<'tx> for Database<'tx> {
+    fn cursor(&self) -> crate::Result<BlockCursor<'_>> {
+        let cursor = self.new_cursor()?;
         Ok(BlockCursor::from(cursor))
     }
 
     /// Inserts a block into the store, updating the state vector as necessary.
-    pub fn insert_block(&mut self, block: Block) -> crate::Result<()> {
+    fn insert_block(&mut self, block: Block) -> crate::Result<()> {
         let key = BlockKey::new(*block.id());
         let key = key.as_bytes();
         let value = block.bytes();
 
-        self.db.set(&key, &value)?;
+        self.set(&key, &value)?;
         self.try_update_clock(block.last_id())?;
 
         Ok(())
@@ -39,30 +37,30 @@ impl<'tx> BlockStore<'tx> {
     /// Inserts an [ID] into the state vector, updating the clock for the client if necessary.
     /// Returns the updated clock value: if [ID] is greater than the existing clock, its own clock
     /// is returned, otherwise the existing clock is returned.
-    pub fn try_update_clock(&mut self, id: ID) -> crate::Result<Clock> {
+    fn try_update_clock(&mut self, id: ID) -> crate::Result<Clock> {
         let key = StateVectorKey::new(id.client);
         let key = key.as_bytes();
-        match self.db.get(&key) {
+        match self.get(&key) {
             Ok(value) => {
                 let existing =
                     Clock::ref_from_bytes(value).map_err(|_| Error::InvalidMapping("Clock"))?;
 
                 if &id.clock > existing {
-                    self.db.set(&key, &id.clock.as_bytes())?;
+                    self.set(&key, &id.clock.as_bytes())?;
                     Ok(id.clock)
                 } else {
                     Ok(*existing)
                 }
             }
             Err(lmdb_rs_m::MdbError::NotFound) => {
-                self.db.set(&key, &id.clock.as_bytes())?;
+                self.set(&key, &id.clock.as_bytes())?;
                 Ok(id.clock)
             }
             Err(e) => Err(Error::Lmdb(e)),
         }
     }
 
-    pub fn split_block(&self, id: ID) -> crate::Result<Option<SplitResult>> {
+    fn split_block(&self, id: ID) -> crate::Result<Option<SplitResult>> {
         let left = self.block_containing(id, false)?;
         if left.contains(&id) {
             let offset = id.clock - left.id().clock;
@@ -74,14 +72,14 @@ impl<'tx> BlockStore<'tx> {
         }
     }
 
-    pub fn remove(&mut self, id: &BlockRange) -> crate::Result<()> {
+    fn remove(&mut self, id: &BlockRange) -> crate::Result<()> {
         todo!()
     }
 
     /// Returns the state vector clock for a given client ID.
-    pub fn clock(&self, client_id: ClientID) -> crate::Result<Option<Clock>> {
+    fn clock(&self, client_id: ClientID) -> crate::Result<Option<Clock>> {
         let key = StateVectorKey::new(client_id);
-        match self.db.get(&key.as_bytes()) {
+        match self.get(&key.as_bytes()) {
             Ok(value) => {
                 let clock =
                     Clock::ref_from_bytes(value).map_err(|_| Error::InvalidMapping("Clock"))?;
@@ -93,9 +91,9 @@ impl<'tx> BlockStore<'tx> {
     }
 
     /// Returns the state vector for the current document.
-    pub fn state_vector(&self) -> crate::Result<StateVector> {
+    fn state_vector(&self) -> crate::Result<StateVector> {
         let mut state_vector = BTreeMap::new();
-        let mut cursor = self.db.new_cursor()?;
+        let mut cursor = self.new_cursor()?;
         cursor.to_gte_key(&[KEY_PREFIX_STATE_VECTOR].as_slice())?;
 
         loop {
@@ -120,7 +118,7 @@ impl<'tx> BlockStore<'tx> {
     /// If `direct_only` is true, it will only search for blocks that starts with the given ID.
     /// If `direct_only` is false, it will search for blocks that contain the ID anywhere within
     /// their range.
-    pub fn block_containing(&self, id: ID, direct_only: bool) -> crate::Result<Block> {
+    fn block_containing(&self, id: ID, direct_only: bool) -> crate::Result<Block> {
         let mut cursor = self.cursor()?;
         if !cursor.seek(id)? && !direct_only {
             // we didn't find the block directly, so we need to check the previous block
@@ -243,7 +241,7 @@ mod test {
             .unwrap();
         let h = env.create_db("test", DbFlags::DbCreate).unwrap();
         let tx = env.new_transaction().unwrap();
-        let mut db = BlockStore::new(tx.bind(&h)).unwrap();
+        let mut db = tx.bind(&h);
 
         let id = ID::new(1.into(), 2.into());
         let block = BlockMut::new(
@@ -263,7 +261,7 @@ mod test {
         tx.commit().unwrap();
 
         let tx = env.new_transaction().unwrap();
-        let db = BlockStore::new(tx.bind(&h)).unwrap();
+        let mut db = tx.bind(&h);
         let actual = db.block_containing(id, true).unwrap();
 
         assert_eq!(actual.as_bytes(), block.as_ref().as_bytes());
@@ -278,7 +276,7 @@ mod test {
             .unwrap();
         let h = env.create_db("test", DbFlags::DbCreate).unwrap();
         let tx = env.new_transaction().unwrap();
-        let mut db = BlockStore::new(tx.bind(&h)).unwrap();
+        let mut db = tx.bind(&h);
 
         let searched = {
             let id = ID::new(1.into(), 2.into());
@@ -317,7 +315,7 @@ mod test {
         tx.commit().unwrap();
 
         let tx = env.new_transaction().unwrap();
-        let db = BlockStore::new(tx.bind(&h)).unwrap();
+        let mut db = tx.bind(&h);
 
         let id = ID::new(1.into(), 5.into());
         let actual = db.block_containing(id, false).unwrap();

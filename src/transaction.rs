@@ -1,9 +1,11 @@
 use crate::block::ID;
 use crate::block_reader::{BlockRange, BlockReader, Carrier};
 use crate::read::Decoder;
+use crate::store::lmdb::BlockStore;
 use crate::write::WriteExt;
-use crate::{StateVector, Store};
+use crate::StateVector;
 use bytes::BytesMut;
+use lmdb_rs_m::{Database, DbHandle};
 use std::fmt::{Display, Formatter};
 use std::io::Write;
 use zerocopy::IntoBytes;
@@ -11,53 +13,64 @@ use zerocopy::IntoBytes;
 pub(crate) struct TransactionState {
     pub begin_state: StateVector,
     pub current_state: StateVector,
+    pub origin: Option<Origin>,
 }
 
 impl TransactionState {
-    fn new(begin_state: StateVector) -> Self {
+    fn new(begin_state: StateVector, origin: Option<Origin>) -> Self {
         let current_state = begin_state.clone();
         TransactionState {
             begin_state,
             current_state,
+            origin,
         }
     }
 
-    fn commit<'db, T: crate::store::Transaction<'db>>(&self, tx: &T) -> crate::Result<()> {
+    fn precommit<'db>(&self, db: Database<'_>) -> crate::Result<()> {
         todo!()
     }
 }
 
-pub struct Transaction<'db, S: Store + 'db> {
-    inner: S::Transaction<'db>,
-    origin: Option<Origin>,
+pub struct Transaction<T> {
+    txn: T,
+    handle: DbHandle,
     state: Option<Box<TransactionState>>,
 }
 
-impl<'db, S: Store> Transaction<'db, S> {
-    pub(crate) fn new(inner: S::Transaction<'db>, origin: Option<Origin>) -> Self {
-        Self {
-            inner,
-            origin,
-            state: None,
-        }
+impl<'db> Transaction<lmdb_rs_m::Transaction<'db>> {
+    pub(crate) fn new(
+        txn: lmdb_rs_m::Transaction<'db>,
+        handle: DbHandle,
+        origin: Option<Origin>,
+    ) -> Self {
+        let state = origin.map(|o| {
+            let db = txn.bind(&handle);
+            let begin_state = db.state_vector().unwrap();
+            Box::new(TransactionState::new(begin_state, Some(o)))
+        });
+        Self { txn, handle, state }
+    }
+
+    pub fn db(&self) -> Database<'_> {
+        self.txn.bind(&self.handle)
     }
 
     pub fn origin(&self) -> Option<&Origin> {
-        self.origin.as_ref()
+        let state = self.state.as_ref()?;
+        state.origin.as_ref()
     }
 
-    pub fn split_mut(&mut self) -> (&mut S::Transaction<'db>, &mut TransactionState) {
+    pub fn split_mut(&mut self) -> (Database<'_>, &mut TransactionState) {
+        let db = self.txn.bind(&self.handle);
         let state = self.state.get_or_insert_with(|| {
-            use crate::store::Transaction;
-            let begin_state = self.inner.state_vector().unwrap();
-            Box::new(TransactionState::new(begin_state))
+            let begin_state = db.state_vector().unwrap();
+            Box::new(TransactionState::new(begin_state, None))
         });
-        (&mut self.inner, state)
+        (db, state)
     }
 
     pub fn state_vector(&self) -> crate::Result<StateVector> {
-        use crate::store::Transaction;
-        self.inner.state_vector()
+        self.db().state_vector()
     }
 
     pub fn create_update<W: Write>(
@@ -100,10 +113,8 @@ impl<'db, S: Store> Transaction<'db, S> {
     }
 
     pub fn apply_update<D: Decoder>(&mut self, decoder: &mut D) -> crate::Result<()> {
-        use crate::store::Transaction;
-
         let mut block_reader = BlockReader::new(decoder)?;
-        let (tx, state) = self.split_mut();
+        let (mut db, state) = self.split_mut();
         let mut missing_sv = StateVector::default();
         //let mut skip_client = None;
         while let Some(res) = block_reader.next() {
@@ -172,7 +183,7 @@ impl<'db, S: Store> Transaction<'db, S> {
                         // update from the same client is missing
                         let id = block.id();
                         missing_sv.set_min(id.client, id.clock - 1);
-                        tx.put_block(block)?;
+                        db.insert_block(block.as_ref())?;
                         // hid a dead wall, add all items from stack to restSS
                         /*
                         stack.push(block);
@@ -308,14 +319,12 @@ impl<'db, S: Store> Transaction<'db, S> {
     }
 
     pub fn commit(mut self) -> crate::Result<()> {
-        use crate::store::Transaction;
         if let Some(state) = self.state.take() {
             // commit the transaction
-            state.commit(&self.inner)?;
-            self.inner.commit()
-        } else {
-            Ok(()) // readonly or already committed transaction
+            state.precommit(self.db())?;
+            self.txn.commit()?;
         }
+        Ok(())
     }
 }
 

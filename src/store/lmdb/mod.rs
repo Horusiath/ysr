@@ -1,2 +1,3 @@
-mod keys;
-mod store;
+pub mod store;
+
+pub use store::BlockStore;

@@ -15,7 +15,6 @@ mod write;
 use crate::block::ID;
 pub use multi_doc::MultiDoc;
 pub use state_vector::StateVector;
-pub use store::Store;
 pub use transaction::Transaction;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
