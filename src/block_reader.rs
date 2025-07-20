@@ -186,7 +186,6 @@ impl<'a, D: Decoder> Iterator for BlockReader<'a, D> {
 fn copy_content<D: Decoder>(decoder: &mut D, block: &mut BlockMut) -> crate::Result<()> {
     let count = decoder.read_len()?;
     block.set_clock_len(count);
-    println!("({})", count);
     let mut buf = Vec::new();
     let mut writer = block.as_writer();
     for _ in 0u64..count.into() {

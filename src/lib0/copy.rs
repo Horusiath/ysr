@@ -82,7 +82,6 @@ fn copy_array<R: Read, W: Write>(
 ) -> Result<(), super::Error> {
     let len: usize = src.read_var()?;
     *n += dst.write_var(len)?;
-    //println!("\t copy array with {} fields", len);
     for _ in 0..len {
         copy_any(src, dst, n)?;
     }

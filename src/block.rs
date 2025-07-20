@@ -219,6 +219,18 @@ impl BlockHeader {
         self.clock_len = len;
     }
 
+    pub fn is_deleted(&self) -> bool {
+        self.flags.contains(BlockFlags::DELETED)
+    }
+
+    pub fn set_deleted(&mut self) {
+        self.flags |= BlockFlags::DELETED;
+    }
+
+    pub fn is_countable(&self) -> bool {
+        self.flags.contains(BlockFlags::COUNTABLE)
+    }
+
     pub fn display<'a>(&'a self, body: &'a [u8]) -> DisplayBlock<'a> {
         DisplayBlock { header: self, body }
     }
@@ -247,7 +259,7 @@ impl<'a> Block<'a> {
     }
 
     pub fn last_id(&self) -> ID {
-        ID::new(self.id.client, self.id.clock + self.clock_len())
+        ID::new(self.id.client, self.id.clock + self.clock_len() - 1)
     }
 
     #[inline]
@@ -296,6 +308,7 @@ impl Deref for Block<'_> {
     }
 }
 
+#[derive(Clone)]
 pub struct BlockMut {
     id: ID,
     body: BytesMut,
@@ -444,6 +457,36 @@ impl BlockMut {
         }
         Ok(())
     }
+
+    pub fn merge(&mut self, other: &BlockMut) -> bool {
+        if self.can_merge(other) {
+            let (other_header, other_body) = BlockHeader::parse(&other.body).unwrap();
+            let other_content = other_header.content_slice(other_body);
+
+            self.body.extend_from_slice(other_content);
+            self.clock_len += other.clock_len;
+            self.set_right(other.right());
+
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn can_merge(&self, other: &Self) -> bool {
+        println!("origin: {:?} vs {:?}", self.origin_left(), self.last_id());
+        self.id.client == other.id.client
+            && self.right == other.id
+            && self.id.clock + self.clock_len() == other.id.clock
+            && other.origin_left() == Some(&self.last_id())
+            && self.origin_right() == other.origin_right()
+            && self.is_deleted() == other.is_deleted()
+            && self.content_type == other.content_type
+            && (self.content_type == CONTENT_TYPE_DELETED
+                || self.content_type == CONTENT_TYPE_STRING
+                || self.content_type == CONTENT_TYPE_ATOM
+                || self.content_type == CONTENT_TYPE_JSON)
+    }
 }
 
 impl Deref for BlockMut {
@@ -478,11 +521,7 @@ impl PartialEq for BlockMut {
     fn eq(&self, other: &Self) -> bool {
         let (header, body) = BlockHeader::parse(&self.body).unwrap();
         let (other_header, other_body) = BlockHeader::parse(&other.body).unwrap();
-        if header == other_header {
-            body == other_body
-        } else {
-            false
-        }
+        header == other_header && body == other_body
     }
 }
 
@@ -608,7 +647,6 @@ mod test {
     use crate::{ClientID, Clock};
     use bytes::{BufMut, BytesMut};
     use serde::{Deserialize, Serialize};
-    use serde_json::json;
     use zerocopy::IntoBytes;
 
     const CLIENT: ClientID = unsafe { ClientID::new_unchecked(123) };
@@ -652,6 +690,40 @@ mod test {
         let mut expected_left = block(1, 6, 12, 7, 14, 15, Some("key"));
         expected_left
             .init_content(BlockContent::Text("hello "))
+            .unwrap();
+        assert_eq!(b, expected_left);
+    }
+
+    #[test]
+    fn block_merge_text() {
+        let mut b = block(1, 11, 12, 13, 14, 15, Some("key"));
+        b.init_content(BlockContent::Text("hello world")).unwrap();
+
+        let expected = b.clone();
+
+        let right = b.splice(6.into()).unwrap().unwrap();
+        println!("left: {}", b);
+        println!("right: {}", right);
+        assert!(b.merge(&right));
+
+        assert_eq!(b, expected);
+    }
+
+    #[test]
+    fn block_split_deleted() {
+        let mut b = block(1, 11, 12, 13, 14, 15, Some("key"));
+        b.init_content(BlockContent::Deleted(11.into())).unwrap();
+
+        let right = b.splice(6.into()).unwrap().unwrap();
+        let mut expected_right = block(7, 5, 6, 13, 6, 15, Some("key"));
+        expected_right
+            .init_content(BlockContent::Deleted(5.into()))
+            .unwrap();
+        assert_eq!(right, expected_right);
+
+        let mut expected_left = block(1, 6, 12, 7, 14, 15, Some("key"));
+        expected_left
+            .init_content(BlockContent::Deleted(6.into()))
             .unwrap();
         assert_eq!(b, expected_left);
     }
