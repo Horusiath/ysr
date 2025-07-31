@@ -1,9 +1,11 @@
 use crate::content::{BlockContent, ContentFormat, ContentIter, ContentRef, ContentType};
 use crate::node::{NodeHeader, NodeID};
+use crate::transaction::TransactionState;
 use crate::{ClientID, Clock};
 use crate::{Error, Result};
 use bitflags::bitflags;
 use bytes::BytesMut;
+use lmdb_rs_m::Database;
 use std::fmt::{Debug, Display, Formatter};
 use std::io::Write;
 use std::ops::{Deref, DerefMut};
@@ -170,6 +172,10 @@ impl BlockHeader {
             let str = unsafe { std::str::from_utf8_unchecked(&body[..self.key_len as usize]) };
             Some(str)
         }
+    }
+
+    pub fn parent(&self) -> &NodeID {
+        &self.parent
     }
 
     #[inline]
@@ -494,6 +500,15 @@ impl BlockMut {
                 || self.content_type == CONTENT_TYPE_STRING
                 || self.content_type == CONTENT_TYPE_ATOM
                 || self.content_type == CONTENT_TYPE_JSON)
+    }
+
+    pub(crate) fn integrate(
+        &self,
+        db: &mut Database,
+        tx_state: &mut TransactionState,
+        offset: Clock,
+    ) -> crate::Result<()> {
+        todo!()
     }
 }
 

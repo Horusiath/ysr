@@ -1,9 +1,10 @@
-use crate::block::ID;
+use crate::block::{Block, BlockMut, ID};
 use crate::block_reader::{BlockRange, BlockReader, Carrier};
+use crate::node::NodeID;
 use crate::read::Decoder;
 use crate::store::lmdb::BlockStore;
 use crate::write::WriteExt;
-use crate::StateVector;
+use crate::{ClientID, StateVector};
 use bytes::BytesMut;
 use lmdb_rs_m::{Database, DbHandle};
 use std::fmt::{Display, Formatter};
@@ -31,13 +32,13 @@ impl TransactionState {
     }
 }
 
-pub struct Transaction<T> {
-    txn: T,
+pub struct Transaction<'db> {
+    txn: lmdb_rs_m::Transaction<'db>,
     handle: DbHandle,
     state: Option<Box<TransactionState>>,
 }
 
-impl<'db> Transaction<lmdb_rs_m::Transaction<'db>> {
+impl<'db> Transaction<'db> {
     pub(crate) fn new(
         txn: lmdb_rs_m::Transaction<'db>,
         handle: DbHandle,
@@ -120,12 +121,14 @@ impl<'db> Transaction<lmdb_rs_m::Transaction<'db>> {
         while let Some(res) = block_reader.next() {
             let carrier = res?;
             match carrier {
-                Carrier::Block(block) => {
-                    if state.current_state.contains(block.id()) {
-                        /*
+                Carrier::Block(mut block) => {
+                    let id = block.id();
+                    if state.current_state.contains(id) {
+                        let offset = state.current_state.get(&id.client) - id.clock;
+                        if let Some(dep) = Self::missing(&block, &state.current_state) {
+                            // current block is missing a dependency
+                            /*
 
-                        let offset = local_sv.get(&id.client) as i32 - id.clock as i32;
-                        if let Some(dep) = Self::missing(&block, &local_sv) {
                             stack.push(block);
                             // get the struct reader that has the missing struct
                             match self.blocks.clients.get_mut(&dep) {
@@ -144,41 +147,25 @@ impl<'db> Transaction<lmdb_rs_m::Transaction<'db>> {
                                     stack = Vec::new();
                                 }
                             }
-                        } else if offset == 0 || (offset as u32) < block.len() {
-                            let offset = offset as u32;
-                            let client = id.client;
-                            local_sv.set_max(client, id.clock + block.len());
-                            if let BlockCarrier::Item(item) = &mut block {
-                                item.repair(store)?;
+                             */
+                        } else if offset == 0 || offset < block.clock_len() {
+                            state
+                                .current_state
+                                .set_max(id.client, id.clock + block.clock_len());
+
+                            if let Some(&origin) = block.origin_left() {
+                                block.set_origin_left(origin);
+                                db.split_block(origin)?;
                             }
-                            let should_delete = block.integrate(txn, offset);
-                            let mut delete_ptr = if should_delete {
-                                let ptr = block.as_item_ptr();
-                                ptr
-                            } else {
-                                None
-                            };
-                            store = txn.store_mut();
-                            match block {
-                                BlockCarrier::Item(item) => {
-                                    if item.parent != TypePtr::Unknown {
-                                        store.blocks.push_block(item)
-                                    } else {
-                                        // parent is not defined. Integrate GC struct instead
-                                        store.blocks.push_gc(BlockRange::new(item.id, item.len));
-                                        delete_ptr = None;
-                                    }
-                                }
-                                BlockCarrier::GC(gc) => store.blocks.push_gc(gc),
-                                BlockCarrier::Skip(_) => { /* do nothing */ }
+                            if let Some(&origin) = block.origin_right() {
+                                block.set_origin_right(origin);
+                                db.split_block(origin)?;
                             }
 
-                            if let Some(ptr) = delete_ptr {
-                                txn.delete(ptr);
-                            }
-                            store = txn.store_mut();
+                            let last_id = block.last_id();
+                            block.integrate(&mut db, state, offset)?;
+                            state.current_state.set_max(last_id.client, last_id.clock);
                         }
-                         */
                     } else {
                         // update from the same client is missing
                         let id = block.id();
@@ -194,7 +181,15 @@ impl<'db> Transaction<lmdb_rs_m::Transaction<'db>> {
                          */
                     }
                 }
-                Carrier::GC(range) => {}
+                Carrier::GC(range) => {
+                    if state.current_state.contains(range.head()) {
+                        state
+                            .current_state
+                            .set_max(range.head().client, range.end());
+                    } else {
+                        todo!()
+                    }
+                }
                 Carrier::Skip(range) => continue,
             }
             /*
@@ -316,6 +311,70 @@ impl<'db> Transaction<lmdb_rs_m::Transaction<'db>> {
                  */
         }
         Ok(())
+    }
+
+    fn missing(block: &BlockMut, local_sv: &StateVector) -> Option<ClientID> {
+        if let Some(origin) = &block.origin_left() {
+            if origin.client != block.id().client && origin.clock >= local_sv.get(&origin.client) {
+                return Some(origin.client);
+            }
+        }
+
+        if let Some(right_origin) = &block.origin_right() {
+            if right_origin.client != block.id().client
+                && right_origin.clock >= local_sv.get(&right_origin.client)
+            {
+                return Some(right_origin.client);
+            }
+        }
+
+        let parent_id = block.parent();
+        if parent_id.is_nested() {
+            if parent_id.client != block.id().client
+                && parent_id.clock >= local_sv.get(&parent_id.client)
+            {
+                return Some(parent_id.client);
+            }
+        }
+
+        None
+        /*TODO: implement
+        match &block.content() {
+            ItemContent::Move(m) => {
+                if let Some(start) = m.start.id() {
+                    if start.clock >= local_sv.get(&start.client) {
+                        return Some(start.client);
+                    }
+                }
+                if !m.is_collapsed() {
+                    if let Some(end) = m.end.id() {
+                        if end.clock >= local_sv.get(&end.client) {
+                            return Some(end.client);
+                        }
+                    }
+                }
+            }
+            #[cfg(feature = "weak")]
+            ItemContent::Type(branch) => {
+                if let crate::types::TypeRef::WeakLink(source) = &branch.type_ref {
+                    let start = source.quote_start.id();
+                    let end = source.quote_end.id();
+                    if let Some(start) = start {
+                        if start.clock >= local_sv.get(&start.client) {
+                            return Some(start.client);
+                        }
+                    }
+                    if start != end {
+                        if let Some(end) = &source.quote_end.id() {
+                            if end.clock >= local_sv.get(&end.client) {
+                                return Some(end.client);
+                            }
+                        }
+                    }
+                }
+            }
+            _ => { /* do nothing */ }
+        }*/
     }
 
     pub fn commit(mut self) -> crate::Result<()> {

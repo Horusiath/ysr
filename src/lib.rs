@@ -9,6 +9,7 @@ mod read;
 mod state_vector;
 mod store;
 mod transaction;
+mod types;
 mod varint;
 mod write;
 
@@ -16,6 +17,10 @@ use crate::block::ID;
 pub use multi_doc::MultiDoc;
 pub use state_vector::StateVector;
 pub use transaction::Transaction;
+pub use types::list::{List, ListRef};
+pub use types::map::{Map, MapRef};
+pub use types::text::{Text, TextRef};
+pub use types::{Mounted, Unmounted};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -28,6 +33,8 @@ pub type Clock = U32;
 pub type DynError = Box<dyn std::error::Error + Send + Sync>;
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("value under provided index or key was not found")]
+    NotFound,
     #[error("I/O error: {0}")]
     IO(#[from] std::io::Error),
     #[error("expected more data, reached end of buffer")]
@@ -56,6 +63,12 @@ pub enum Error {
     ClientIDOutOfRange,
     #[error("LMDB error: {0}")]
     Lmdb(#[from] lmdb_rs_m::MdbError),
+}
+
+impl Error {
+    pub fn not_found(&self) -> bool {
+        matches!(self, Error::NotFound)
+    }
 }
 
 #[repr(transparent)]

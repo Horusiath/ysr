@@ -15,7 +15,7 @@ impl MultiDoc {
         &self,
         doc_id: &str,
         origin: Option<O>,
-    ) -> crate::Result<Transaction<lmdb_rs_m::Transaction>> {
+    ) -> crate::Result<Transaction<'_>> {
         let handle = self.env.create_db(doc_id, DbFlags::DbCreate)?;
         let tx = self.env.new_transaction()?;
         Ok(Transaction::new(tx, handle, origin.map(Into::into)))

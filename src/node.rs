@@ -77,4 +77,14 @@ impl NodeID {
     pub const fn from_nested(id: ID) -> NodeID {
         id
     }
+
+    #[inline]
+    pub fn is_root(&self) -> bool {
+        self.client == ClientID::MAX_VALUE
+    }
+
+    #[inline]
+    pub fn is_nested(&self) -> bool {
+        !self.is_root()
+    }
 }
