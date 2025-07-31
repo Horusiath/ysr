@@ -1,9 +1,11 @@
 use crate::block::{BlockMut, ID};
+use crate::content::{BlockContent, ContentType};
 use crate::node::{NodeHeader, NodeID, NodeType};
 use crate::store::lmdb::BlockStore;
 use crate::Transaction;
 use std::borrow::BorrowMut;
 use std::marker::PhantomData;
+use zerocopy::IntoBytes;
 
 pub mod list;
 pub mod map;
@@ -64,7 +66,11 @@ where
                 if self.node_id.is_root() {
                     // since root nodes live forever, we can create it if it does not exist
                     let header = NodeHeader::new(Cap::node_type() as u8);
-                    todo!()
+                    let mut block = BlockMut::empty(self.node_id);
+                    block.init_content(BlockContent::Node(&header))?;
+                    let (mut db, _state) = borrowed.split_mut();
+                    db.insert_block(block.as_ref())?;
+                    block
                 } else {
                     // nested nodes are not created automatically, if we didn't find it, we return an error
                     return Err(crate::Error::NotFound);

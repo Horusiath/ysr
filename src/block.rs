@@ -327,7 +327,14 @@ pub struct BlockMut {
 }
 
 impl BlockMut {
-    pub fn new(
+    pub(crate) fn empty(id: ID) -> Self {
+        let header = BlockHeader::default();
+        let mut bytes = BytesMut::with_capacity(BlockHeader::SIZE);
+        bytes.extend_from_slice(header.as_bytes());
+        BlockMut { id, body: bytes }
+    }
+
+    pub(crate) fn new(
         id: ID,
         len: Clock,
         left: Option<&ID>,
@@ -337,11 +344,7 @@ impl BlockMut {
         parent: NodeID,
         entry_key: Option<&str>,
     ) -> crate::Result<Self> {
-        let header = BlockHeader::default();
-        let mut bytes = BytesMut::with_capacity(BlockHeader::SIZE);
-        bytes.extend_from_slice(header.as_bytes());
-        let mut block = BlockMut { id, body: bytes };
-
+        let mut block = Self::empty(id);
         block.init(len, left, right, origin_left, origin_right, parent);
 
         if let Some(key) = entry_key {
@@ -393,7 +396,7 @@ impl BlockMut {
         Ok(())
     }
 
-    fn init_content(&mut self, content: BlockContent) -> crate::Result<()> {
+    pub(crate) fn init_content(&mut self, content: BlockContent) -> crate::Result<()> {
         self.set_content_type(content.content_type());
         let body = content.body();
         self.body.extend_from_slice(body);
