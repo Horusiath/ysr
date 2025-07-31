@@ -1,6 +1,5 @@
 use crate::block::{Block, BlockMut, ID};
 use crate::block_reader::{BlockRange, BlockReader, Carrier};
-use crate::node::NodeID;
 use crate::read::Decoder;
 use crate::store::lmdb::BlockStore;
 use crate::write::WriteExt;
@@ -39,7 +38,7 @@ pub struct Transaction<'db> {
 }
 
 impl<'db> Transaction<'db> {
-    pub(crate) fn new(
+    pub(crate) fn read_write(
         txn: lmdb_rs_m::Transaction<'db>,
         handle: DbHandle,
         origin: Option<Origin>,

@@ -3,7 +3,7 @@ use crate::varint::{Signed, SignedVarInt, VarInt};
 use crate::{lib0, ClientID, Clock, U64};
 use serde::de::DeserializeOwned;
 use std::fmt::{Debug, Display, Formatter};
-use std::io::{Read, Write};
+use std::io::{Cursor, Read, Write};
 use std::ops::Range;
 
 #[derive(Debug, Copy, Clone)]
@@ -146,6 +146,15 @@ impl<R: Read> DecoderV1<R> {
     #[inline]
     pub fn new(reader: R) -> Self {
         DecoderV1 { reader }
+    }
+}
+
+impl<'a> DecoderV1<Cursor<&'a [u8]>> {
+    pub fn from_slice<T>(slice: &'a T) -> Self
+    where
+        T: AsRef<[u8]>,
+    {
+        DecoderV1::new(Cursor::new(slice.as_ref()))
     }
 }
 

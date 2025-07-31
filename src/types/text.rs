@@ -1,3 +1,5 @@
+use crate::node::NodeType;
+use crate::types::Capability;
 use crate::{Mounted, Transaction};
 use std::fmt::{Display, Formatter};
 use std::ops::{Deref, RangeBounds};
@@ -7,9 +9,15 @@ pub type TextRef<Txn> = Mounted<Text, Txn>;
 #[derive(Clone, Debug, Default, Eq, Ord, PartialOrd, PartialEq)]
 pub struct Text;
 
+impl Capability for Text {
+    fn node_type() -> NodeType {
+        NodeType::Text
+    }
+}
+
 impl<'tx, 'db> TextRef<&'tx Transaction<'db>> {
     pub fn len(&self) -> usize {
-        todo!()
+        self.block.clock_len().get() as usize
     }
 }
 

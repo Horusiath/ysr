@@ -1,5 +1,7 @@
 use crate::content::{BlockContent, ContentFormat, ContentIter, ContentRef, ContentType};
 use crate::node::{NodeHeader, NodeID};
+use crate::store::lmdb::store::SplitResult;
+use crate::store::lmdb::BlockStore;
 use crate::transaction::TransactionState;
 use crate::{ClientID, Clock};
 use crate::{Error, Result};
@@ -503,12 +505,320 @@ impl BlockMut {
     }
 
     pub(crate) fn integrate(
-        &self,
+        &mut self,
         db: &mut Database,
         tx_state: &mut TransactionState,
         offset: Clock,
     ) -> crate::Result<()> {
+        if offset > 0 {
+            // offset could be > 0 only in context of Update::integrate,
+            // is such case offset kind in use always means Yjs-compatible offset (utf-16)
+            self.id.clock += offset;
+            let left = match db.split_block(ID::new(self.id.client, self.id.clock - 1))? {
+                SplitResult::Unchanged(left) => left.last_id(),
+                SplitResult::Split(left, _) => left.last_id(),
+            };
+            self.set_left(Some(&left));
+            self.set_origin_left(left);
+        }
         todo!()
+        /*
+        let self_ptr = self.clone();
+        let this = self.deref_mut();
+        let store = txn.doc_mut();
+        let encoding = store.options.offset_kind;
+        if offset > 0 {
+            // offset could be > 0 only in context of Update::integrate,
+            // is such case offset kind in use always means Yjs-compatible offset (utf-16)
+            this.id.clock += offset;
+            this.left = store
+                .blocks
+                .get_item_clean_end(&ID::new(this.id.client, this.id.clock - 1))
+                .map(|slice| store.materialize(slice));
+            this.origin = this.left.as_deref().map(|b: &Item| b.last_id());
+            this.content = this
+                .content
+                .splice(offset as usize, OffsetKind::Utf16)
+                .unwrap();
+            this.len -= offset;
+        }
+
+        let parent = match &this.parent {
+            TypePtr::Branch(branch) => Some(*branch),
+            TypePtr::Named(name) => {
+                let branch = store.get_or_create_type(name.clone(), TypeRef::Undefined);
+                this.parent = TypePtr::Branch(branch);
+                Some(branch)
+            }
+            TypePtr::ID(id) => {
+                if let Some(item) = store.blocks.get_item(id) {
+                    if let Some(branch) = item.as_branch() {
+                        this.parent = TypePtr::Branch(branch);
+                        Some(branch)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            TypePtr::Unknown => return true,
+        };
+
+        let left: Option<&Item> = this.left.as_deref();
+        let right: Option<&Item> = this.right.as_deref();
+
+        let right_is_null_or_has_left = match right {
+            None => true,
+            Some(i) => i.left.is_some(),
+        };
+        let left_has_other_right_than_self = match left {
+            Some(i) => i.right != this.right,
+            _ => false,
+        };
+
+        if let Some(mut parent_ref) = parent {
+            if (left.is_none() && right_is_null_or_has_left) || left_has_other_right_than_self {
+                // set the first conflicting item
+                let mut o = if let Some(left) = left {
+                    left.right
+                } else if let Some(sub) = &this.parent_sub {
+                    let mut o = parent_ref.map.get(sub).cloned();
+                    while let Some(item) = o.as_deref() {
+                        if item.left.is_some() {
+                            o = item.left.clone();
+                            continue;
+                        }
+                        break;
+                    }
+                    o.clone()
+                } else {
+                    parent_ref.start
+                };
+
+                let mut left = this.left.clone();
+                let mut conflicting_items = HashSet::new();
+                let mut items_before_origin = HashSet::new();
+
+                // Let c in conflicting_items, b in items_before_origin
+                // ***{origin}bbbb{this}{c,b}{c,b}{o}***
+                // Note that conflicting_items is a subset of items_before_origin
+                while let Some(item) = o {
+                    if Some(item) == this.right {
+                        break;
+                    }
+
+                    items_before_origin.insert(item);
+                    conflicting_items.insert(item);
+                    if this.origin == item.origin {
+                        // case 1
+                        if item.id.client < this.id.client {
+                            left = Some(item.clone());
+                            conflicting_items.clear();
+                        } else if this.right_origin == item.right_origin {
+                            // `self` and `item` are conflicting and point to the same integration
+                            // points. The id decides which item comes first. Since `self` is to
+                            // the left of `item`, we can break here.
+                            break;
+                        }
+                    } else {
+                        if let Some(origin_ptr) = item
+                            .origin
+                            .as_ref()
+                            .and_then(|id| store.blocks.get_item(id))
+                        {
+                            if items_before_origin.contains(&origin_ptr) {
+                                if !conflicting_items.contains(&origin_ptr) {
+                                    left = Some(item.clone());
+                                    conflicting_items.clear();
+                                }
+                            } else {
+                                break;
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                    o = item.right.clone();
+                }
+                this.left = left;
+            }
+
+            if this.parent_sub.is_none() {
+                if let Some(item) = this.left.as_deref() {
+                    if item.parent_sub.is_some() {
+                        this.parent_sub = item.parent_sub.clone();
+                    } else if let Some(item) = this.right.as_deref() {
+                        this.parent_sub = item.parent_sub.clone();
+                    }
+                }
+            }
+
+            // reconnect left/right
+            if let Some(left) = this.left.as_deref_mut() {
+                this.right = left.right.replace(self_ptr);
+            } else {
+                let r = if let Some(parent_sub) = &this.parent_sub {
+                    // update parent map/start if necessary
+                    let mut r = parent_ref.map.get(parent_sub).cloned();
+                    while let Some(item) = r {
+                        if item.left.is_some() {
+                            r = item.left;
+                        } else {
+                            break;
+                        }
+                    }
+                    r
+                } else {
+                    let start = parent_ref.start.replace(self_ptr);
+                    start
+                };
+                this.right = r;
+            }
+
+            if let Some(right) = this.right.as_deref_mut() {
+                right.left = Some(self_ptr);
+            } else if let Some(parent_sub) = &this.parent_sub {
+                // set as current parent value if right === null and this is parentSub
+                parent_ref.map.insert(parent_sub.clone(), self_ptr);
+                if let Some(mut left) = this.left {
+                    #[cfg(feature = "weak")]
+                    {
+                        if left.info.is_linked() {
+                            // inherit links from the block we're overriding
+                            left.info.clear_linked();
+                            this.info.set_linked();
+                            let all_links = &mut txn.doc_mut().linked_by;
+                            if let Some(linked_by) = all_links.remove(&left) {
+                                all_links.insert(self_ptr, linked_by);
+                                // since left is being deleted, it will remove
+                                // its links from store.linkedBy anyway
+                            }
+                        }
+                    }
+                    // this is the current attribute value of parent. delete right
+                    txn.delete(left);
+                }
+            }
+
+            // adjust length of parent
+            if this.parent_sub.is_none() && !this.is_deleted() {
+                if this.is_countable() {
+                    // adjust length of parent
+                    parent_ref.block_len += this.len;
+                    parent_ref.content_len += this.content_len(encoding);
+                }
+                #[cfg(feature = "weak")]
+                match (this.left, this.right) {
+                    (Some(l), Some(r)) if l.info.is_linked() || r.info.is_linked() => {
+                        crate::types::weak::join_linked_range(self_ptr, txn)
+                    }
+                    _ => {}
+                }
+            }
+
+            // check if this item is in a moved range
+            let left_moved = this.left.and_then(|i| i.moved);
+            let right_moved = this.right.and_then(|i| i.moved);
+            let (doc, state) = txn.split_mut();
+            if left_moved.is_some() || right_moved.is_some() {
+                if left_moved == right_moved {
+                    this.moved = left_moved;
+                } else {
+                    #[inline]
+                    fn try_integrate(
+                        mut item: ItemPtr,
+                        doc: &mut Doc,
+                        state: &mut TransactionState,
+                    ) {
+                        let ptr = item.clone();
+                        if let ItemContent::Move(m) = &mut item.content {
+                            if !m.is_collapsed() {
+                                m.integrate_block(doc, state, ptr);
+                            }
+                        }
+                    }
+
+                    if let Some(ptr) = left_moved {
+                        try_integrate(ptr, doc, state);
+                    }
+
+                    if let Some(ptr) = right_moved {
+                        try_integrate(ptr, doc, state);
+                    }
+                }
+            }
+
+            match &mut this.content {
+                ItemContent::Deleted(len) => {
+                    state.delete_set.insert(this.id, *len);
+                    this.mark_as_deleted();
+                }
+                ItemContent::Move(m) => m.integrate_block(doc, state, self_ptr),
+                ItemContent::Doc(subdoc) => {
+                    let mut borrowed = subdoc.borrow_mut();
+                    doc.subdocs.insert((borrowed.guid(), this.id));
+                    borrowed.subdoc = Some(self_ptr);
+                    let should_load = borrowed.should_load();
+                    drop(borrowed);
+
+                    let subdocs = state.subdocs.get_or_init();
+                    if should_load {
+                        subdocs.loaded.push(SubDocHook::new(subdoc.clone()));
+                    }
+                    subdocs.added.push(SubDocHook::new(subdoc.clone()));
+                }
+                ItemContent::Format(_, _) => {
+                    // @todo searchmarker are currently unsupported for rich text documents
+                    // /** @type {AbstractType<any>} */ (item.parent)._searchMarker = null
+                }
+                #[cfg(feature = "weak")]
+                ItemContent::Type(branch) => {
+                    let ptr = BranchPtr::from(branch);
+                    if let TypeRef::WeakLink(source) = &ptr.type_ref {
+                        source.materialize(doc, ptr);
+                    }
+                }
+                _ => {
+                    // other types don't define integration-specific actions
+                }
+            }
+            state.add_changed_type(parent_ref, this.parent_sub.clone());
+            if this.info.is_linked() {
+                if let Some(links) = doc.linked_by.get(&self_ptr).cloned() {
+                    // notify links about changes
+                    for link in links.iter() {
+                        state.add_changed_type(*link, this.parent_sub.clone());
+                    }
+                }
+            }
+            let parent_deleted = if let TypePtr::Branch(ptr) = &this.parent {
+                if let Some(block) = ptr.item {
+                    block.is_deleted()
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            if parent_deleted || (this.parent_sub.is_some() && this.right.is_some()) {
+                // delete if parent is deleted or if this is not the current attribute value of parent
+                true
+            } else {
+                false
+            }
+        } else {
+            true
+        }
+         */
+    }
+}
+
+impl<'a> From<Block<'a>> for BlockMut {
+    fn from(value: Block<'a>) -> Self {
+        let mut body = BytesMut::with_capacity(value.data.len());
+        body.extend_from_slice(value.data);
+        Self::parse(*value.id(), body).unwrap()
     }
 }
 

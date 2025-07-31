@@ -9,7 +9,7 @@ pub type NodeID = ID;
 #[derive(Debug, TryFromBytes, KnownLayout, Immutable, IntoBytes)]
 pub enum NodeType {
     Unknown = 0,
-    Array = 1,
+    List = 1,
     Map = 2,
     Text = 3,
     XmlFragment = 4,
@@ -23,7 +23,7 @@ impl TryFrom<u8> for NodeType {
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
             0 => Ok(NodeType::Unknown),
-            1 => Ok(NodeType::Array),
+            1 => Ok(NodeType::List),
             2 => Ok(NodeType::Map),
             3 => Ok(NodeType::Text),
             4 => Ok(NodeType::XmlFragment),
@@ -66,8 +66,11 @@ pub(crate) struct NodeFlags(u8);
 impl NodeFlags {}
 
 impl NodeID {
-    pub fn from_root(root: &[u8]) -> NodeID {
-        let hash = twox_hash::XxHash32::oneshot(0, root);
+    pub fn from_root<S>(root: S) -> NodeID
+    where
+        S: AsRef<[u8]>,
+    {
+        let hash = twox_hash::XxHash32::oneshot(0, root.as_ref());
         // we compute hash of root name for the higher part of the node id
         // the upper half of the node id is u64::MAX since client IDs canonically use only 53 bits
         NodeID::new(ClientID::MAX_VALUE, hash.into())

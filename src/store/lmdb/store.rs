@@ -1,7 +1,7 @@
 use crate::block::{Block, BlockMut, ID};
 use crate::block_reader::BlockRange;
 use crate::{ClientID, Clock, Error, StateVector};
-use lmdb_rs_m::Database;
+use lmdb_rs_m::{Database, MdbError};
 use std::collections::BTreeMap;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
@@ -9,7 +9,7 @@ pub trait BlockStore<'tx> {
     fn cursor(&self) -> crate::Result<BlockCursor<'_>>;
     fn insert_block(&mut self, block: Block) -> crate::Result<()>;
     fn try_update_clock(&mut self, id: ID) -> crate::Result<Clock>;
-    fn split_block(&self, id: ID) -> crate::Result<Option<SplitResult>>;
+    fn split_block(&self, id: ID) -> crate::Result<SplitResult>;
     fn remove(&mut self, id: &BlockRange) -> crate::Result<()>;
     fn clock(&self, client_id: ClientID) -> crate::Result<Option<Clock>>;
     fn state_vector(&self) -> crate::Result<StateVector>;
@@ -60,15 +60,15 @@ impl<'tx> BlockStore<'tx> for Database<'tx> {
         }
     }
 
-    fn split_block(&self, id: ID) -> crate::Result<Option<SplitResult>> {
+    fn split_block(&self, id: ID) -> crate::Result<SplitResult> {
         let left = self.block_containing(id, false)?;
         if left.contains(&id) {
             let offset = id.clock - left.id().clock;
             let mut left = BlockMut::from_block(&left);
             let right = left.splice(offset)?;
-            Ok(Some(SplitResult::Split(left, right.unwrap())))
+            Ok(SplitResult::Split(left, right.unwrap()))
         } else {
-            Ok(Some(SplitResult::Unchanged(left)))
+            Ok(SplitResult::Unchanged(left))
         }
     }
 
@@ -94,7 +94,11 @@ impl<'tx> BlockStore<'tx> for Database<'tx> {
     fn state_vector(&self) -> crate::Result<StateVector> {
         let mut state_vector = BTreeMap::new();
         let mut cursor = self.new_cursor()?;
-        cursor.to_gte_key(&[KEY_PREFIX_STATE_VECTOR].as_slice())?;
+        match cursor.to_gte_key(&[KEY_PREFIX_STATE_VECTOR].as_slice()) {
+            Ok(()) => { /* found the first state vector key */ }
+            Err(MdbError::NotFound) => return Ok(StateVector::new(state_vector)),
+            Err(e) => return Err(Error::Lmdb(e)),
+        }
 
         loop {
             cursor.to_next_key()?;

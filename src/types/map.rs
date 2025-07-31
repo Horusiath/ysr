@@ -1,3 +1,5 @@
+use crate::node::NodeType;
+use crate::types::Capability;
 use crate::{Mounted, Transaction};
 use std::ops::Deref;
 
@@ -5,6 +7,12 @@ pub type MapRef<Txn> = Mounted<Map, Txn>;
 
 #[derive(Clone, Debug, Default, Eq, Ord, PartialOrd, PartialEq)]
 pub struct Map;
+
+impl Capability for Map {
+    fn node_type() -> NodeType {
+        NodeType::Map
+    }
+}
 
 impl<'tx, 'db> MapRef<&'tx Transaction<'db>> {
     pub fn get<K, V>(&self, key: K) -> crate::Result<V>
@@ -16,7 +24,7 @@ impl<'tx, 'db> MapRef<&'tx Transaction<'db>> {
     }
 
     pub fn len(&self) -> usize {
-        todo!()
+        self.block.clock_len().get() as usize
     }
 
     pub fn contains_key<K>(&self, key: K) -> bool

@@ -13,6 +13,9 @@ mod types;
 mod varint;
 mod write;
 
+#[cfg(test)]
+mod test_util;
+
 use crate::block::ID;
 pub use multi_doc::MultiDoc;
 pub use state_vector::StateVector;

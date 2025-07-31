@@ -1,3 +1,5 @@
+use crate::node::NodeType;
+use crate::types::Capability;
 use crate::{Mounted, Transaction};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -8,6 +10,12 @@ pub type ListRef<Txn> = Mounted<List, Txn>;
 #[derive(Clone, Debug, Default, Eq, Ord, PartialOrd, PartialEq)]
 pub struct List;
 
+impl Capability for List {
+    fn node_type() -> NodeType {
+        NodeType::List
+    }
+}
+
 impl<'tx, 'db> ListRef<&'tx Transaction<'db>> {
     pub fn get<T>(&self, index: usize) -> crate::Result<T>
     where
@@ -17,7 +25,7 @@ impl<'tx, 'db> ListRef<&'tx Transaction<'db>> {
     }
 
     pub fn len(&self) -> usize {
-        todo!()
+        self.block.clock_len().get() as usize
     }
 
     pub fn iter<T>(&self) -> Iter<T>

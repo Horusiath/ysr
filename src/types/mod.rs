@@ -1,10 +1,17 @@
-use crate::node::NodeID;
+use crate::block::{BlockMut, ID};
+use crate::node::{NodeHeader, NodeID, NodeType};
+use crate::store::lmdb::BlockStore;
 use crate::Transaction;
+use std::borrow::BorrowMut;
 use std::marker::PhantomData;
 
 pub mod list;
 pub mod map;
 pub mod text;
+
+pub trait Capability {
+    fn node_type() -> NodeType;
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Unmounted<Cap> {
@@ -13,9 +20,26 @@ pub struct Unmounted<Cap> {
 }
 
 impl<Cap> Unmounted<Cap> {
-    pub fn new(node_id: NodeID) -> Self {
+    fn new(node_id: NodeID) -> Self {
         Unmounted {
             node_id,
+            _capability: PhantomData,
+        }
+    }
+
+    pub fn root<S>(name: S) -> Self
+    where
+        S: AsRef<[u8]>,
+    {
+        Unmounted {
+            node_id: NodeID::from_root(name),
+            _capability: PhantomData,
+        }
+    }
+
+    pub fn nested(id: ID) -> Self {
+        Unmounted {
+            node_id: NodeID::from_nested(id),
             _capability: PhantomData,
         }
     }
@@ -23,12 +47,32 @@ impl<Cap> Unmounted<Cap> {
     pub fn node_id(&self) -> NodeID {
         self.node_id
     }
+}
 
-    pub fn mount<'db, Txn>(&self, tx: Txn) -> crate::Result<()>
+impl<Cap> Unmounted<Cap>
+where
+    Cap: Capability,
+{
+    pub fn mount<'db, Txn>(self, mut tx: Txn) -> crate::Result<Mounted<Cap, Txn>>
     where
-        Txn: AsRef<Transaction<'db>>,
+        Txn: BorrowMut<Transaction<'db>>,
     {
-        todo!()
+        let borrowed = tx.borrow_mut();
+        let block: BlockMut = match borrowed.db().block_containing(self.node_id, true) {
+            Ok(block) => block.into(),
+            Err(crate::Error::BlockNotFound(_)) => {
+                if self.node_id.is_root() {
+                    // since root nodes live forever, we can create it if it does not exist
+                    let header = NodeHeader::new(Cap::node_type() as u8);
+                    todo!()
+                } else {
+                    // nested nodes are not created automatically, if we didn't find it, we return an error
+                    return Err(crate::Error::NotFound);
+                }
+            }
+            Err(e) => return Err(e),
+        };
+        Ok(Mounted::new(block, tx))
     }
 }
 
@@ -46,20 +90,25 @@ impl<Cap> From<Unmounted<Cap>> for NodeID {
 
 #[derive(Debug)]
 pub struct Mounted<Cap, Txn> {
-    node: Unmounted<Cap>,
+    block: BlockMut,
     tx: Txn,
+    _capability: PhantomData<Cap>,
 }
 
 impl<Cap, Txn> Mounted<Cap, Txn> {
-    pub fn new(node: Unmounted<Cap>, tx: Txn) -> Self {
-        Mounted { node, tx }
+    pub fn new(block: BlockMut, tx: Txn) -> Self {
+        Mounted {
+            block,
+            tx,
+            _capability: PhantomData,
+        }
     }
 
-    pub fn node_id(&self) -> NodeID {
-        self.node.node_id
+    pub fn node_id(&self) -> &NodeID {
+        self.block.id()
     }
 
-    pub fn split(self) -> (Unmounted<Cap>, Txn) {
-        (self.node, self.tx)
+    pub fn split(self) -> (BlockMut, Txn) {
+        (self.block, self.tx)
     }
 }
