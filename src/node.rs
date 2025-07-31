@@ -1,9 +1,55 @@
-use crate::block::ID;
+use crate::block::{BlockHeader, ID};
 use crate::{ClientID, U64};
+use std::borrow::Cow;
 use std::fmt::Display;
 use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes, KnownLayout, TryFromBytes};
 
 pub type NodeID = ID;
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum Node<'a> {
+    Root(Cow<'a, str>),
+    Nested(ID),
+}
+
+impl<'a> Node<'a> {
+    #[inline]
+    pub fn root<S>(name: S) -> Self
+    where
+        S: Into<Cow<'a, str>>,
+    {
+        Node::Root(name.into())
+    }
+    #[inline]
+    pub fn nested(id: ID) -> Self {
+        Node::Nested(id)
+    }
+
+    #[inline]
+    pub fn is_root(&self) -> bool {
+        matches!(self, Node::Root(_))
+    }
+
+    #[inline]
+    pub fn is_nested(&self) -> bool {
+        matches!(self, Node::Nested(_))
+    }
+
+    pub fn as_str(&self) -> Option<&str> {
+        if let Node::Root(name) = self {
+            Some(name)
+        } else {
+            None
+        }
+    }
+
+    pub fn id(&self) -> NodeID {
+        match self {
+            Node::Root(name) => NodeID::from_root(name.as_bytes()),
+            Node::Nested(id) => *id,
+        }
+    }
+}
 
 #[repr(u8)]
 #[derive(Debug, TryFromBytes, KnownLayout, Immutable, IntoBytes)]
@@ -36,19 +82,29 @@ impl TryFrom<u8> for NodeType {
 
 #[repr(C)]
 #[derive(FromBytes, KnownLayout, Immutable, IntoBytes)]
-pub(crate) struct NodeHeader {
+pub struct NodeHeader {
     type_ref: u8,
     flags: NodeFlags,
     start: ID,
 }
 
 impl NodeHeader {
+    pub const SIZE: usize = size_of::<NodeHeader>();
+
     pub fn new(type_ref: u8) -> Self {
         Self {
             type_ref,
             flags: NodeFlags(0),
             start: ID::new_zeroed(),
         }
+    }
+
+    pub fn node_type(&self) -> NodeType {
+        NodeType::try_from(self.type_ref).unwrap_or(NodeType::Unknown)
+    }
+
+    pub fn start(&self) -> ID {
+        self.start
     }
 }
 

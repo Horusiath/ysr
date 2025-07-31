@@ -1,8 +1,11 @@
-use crate::content::{BlockContent, ContentFormat, ContentIter, ContentRef, ContentType};
-use crate::node::{NodeHeader, NodeID};
+use crate::content::{
+    BlockContent, ContentFormat, ContentIter, ContentNode, ContentRef, ContentType,
+};
+use crate::node::{Node, NodeHeader, NodeID, NodeType};
 use crate::store::lmdb::store::SplitResult;
 use crate::store::lmdb::BlockStore;
 use crate::transaction::TransactionState;
+use crate::types::Capability;
 use crate::{ClientID, Clock};
 use crate::{Error, Result};
 use bitflags::bitflags;
@@ -199,11 +202,7 @@ impl BlockHeader {
             ContentType::Doc => Ok(BlockContent::Doc(content)),
             ContentType::Embed => Ok(BlockContent::Embed(content)),
             ContentType::Format => Ok(BlockContent::Format(ContentFormat::new(content)?)),
-            ContentType::Node => {
-                let node: &NodeHeader = NodeHeader::ref_from_bytes(content)
-                    .map_err(|_| crate::Error::InvalidMapping("NodeHeader"))?;
-                Ok(BlockContent::Node(node))
-            }
+            ContentType::Node => Ok(BlockContent::Node(ContentNode::new(content)?)),
             ContentType::String => {
                 let str = unsafe { std::str::from_utf8_unchecked(content) };
                 Ok(BlockContent::Text(str))
@@ -352,6 +351,18 @@ impl BlockMut {
         }
 
         Ok(block)
+    }
+
+    pub(crate) fn new_node(node: Node, kind: NodeType) -> Self {
+        let name = node.as_str().unwrap_or_default();
+        let mut header = BlockHeader::default();
+        header.set_clock_len(1.into());
+        let mut body = BytesMut::with_capacity(BlockHeader::SIZE + NodeHeader::SIZE + name.len());
+        body.extend_from_slice(header.as_bytes());
+        body.extend_from_slice(NodeHeader::new(kind as u8).as_bytes());
+        body.extend_from_slice(name.as_bytes());
+        let id = node.id();
+        Self { id, body }
     }
 
     pub fn parse(id: ID, body: BytesMut) -> Result<Self> {

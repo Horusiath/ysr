@@ -8,10 +8,12 @@ use crate::node::NodeHeader;
 use crate::varint::var_u64_from_slice;
 use crate::{lib0, Clock, U64};
 use serde::de::DeserializeOwned;
+use std::any::Any;
 use std::fmt::{Display, Formatter};
 use std::io::Cursor;
 use std::marker::PhantomData;
-use zerocopy::{Immutable, IntoBytes, KnownLayout, TryFromBytes};
+use std::ops::Deref;
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, TryFromBytes};
 
 #[repr(u8)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq, TryFromBytes, KnownLayout, Immutable, IntoBytes)]
@@ -71,7 +73,7 @@ pub(crate) enum BlockContent<'a> {
     Binary(&'a [u8]) = CONTENT_TYPE_BINARY,
     Embed(&'a [u8]) = CONTENT_TYPE_EMBED,
     Text(&'a str) = CONTENT_TYPE_STRING,
-    Node(&'a NodeHeader) = CONTENT_TYPE_NODE,
+    Node(ContentNode<'a>) = CONTENT_TYPE_NODE,
     Format(ContentFormat<'a>) = CONTENT_TYPE_FORMAT,
     Doc(&'a [u8]) = CONTENT_TYPE_DOC,
     // to be supported..
@@ -307,6 +309,56 @@ where
         match E::deserialize(slice) {
             Ok(data) => Some(Ok(data)),
             Err(e) => Some(Err(e)),
+        }
+    }
+}
+
+pub struct ContentNode<'a> {
+    data: &'a [u8],
+}
+
+impl<'a> ContentNode<'a> {
+    pub fn new(data: &'a [u8]) -> crate::Result<Self> {
+        if NodeHeader::try_ref_from_prefix(data).is_err() {
+            return Err(crate::Error::InvalidMapping("NodeHeader"));
+        }
+
+        Ok(Self { data })
+    }
+
+    pub fn as_bytes(&self) -> &'a [u8] {
+        self.data
+    }
+
+    pub fn header(&self) -> &'a NodeHeader {
+        let (header, _) = NodeHeader::ref_from_prefix(self.data).unwrap();
+        header
+    }
+
+    pub fn name(&self) -> &'a str {
+        let (_, suffix) = NodeHeader::ref_from_prefix(self.data).unwrap();
+        unsafe { std::str::from_utf8_unchecked(suffix) }
+    }
+}
+
+impl<'a> Deref for ContentNode<'a> {
+    type Target = NodeHeader;
+
+    fn deref(&self) -> &Self::Target {
+        self.header()
+    }
+}
+
+impl<'a> Display for ContentNode<'a> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let (header, suffix) = NodeHeader::ref_from_prefix(self.data).unwrap();
+        write!(f, "{:?}", header.node_type())?;
+        if !suffix.is_empty() {
+            write!(f, "::'{}'", unsafe {
+                std::str::from_utf8_unchecked(suffix)
+            })
+        } else {
+            Ok(())
         }
     }
 }
