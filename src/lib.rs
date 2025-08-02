@@ -13,6 +13,7 @@ mod types;
 mod varint;
 mod write;
 
+mod block_cursor;
 #[cfg(test)]
 mod test_util;
 

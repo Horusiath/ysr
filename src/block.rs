@@ -11,6 +11,7 @@ use crate::{Error, Result};
 use bitflags::bitflags;
 use bytes::BytesMut;
 use lmdb_rs_m::Database;
+use std::cmp::Ordering;
 use std::fmt::{Debug, Display, Formatter};
 use std::io::Write;
 use std::ops::{Deref, DerefMut};
@@ -93,14 +94,12 @@ impl BlockHeader {
     }
 
     pub fn parse(data: &[u8]) -> Result<(&BlockHeader, &[u8]), ParseError> {
-        let (header, body) = data.split_at(Self::SIZE);
-        let header = Self::ref_from_bytes(header)?;
+        let (header, body) = Self::ref_from_prefix(data)?;
         Ok((header, body))
     }
 
     pub fn parse_mut(data: &mut [u8]) -> Result<(&mut BlockHeader, &mut [u8]), ParseMutError> {
-        let (header, body) = data.split_at_mut(Self::SIZE);
-        let header = Self::mut_from_bytes(header)?;
+        let (header, body) = Self::mut_from_prefix(data)?;
         Ok((header, body))
     }
 
@@ -407,6 +406,43 @@ impl BlockMut {
         Ok(())
     }
 
+    pub fn set_entry_key(&mut self, key: &[u8]) -> crate::Result<()> {
+        if key.len() > u8::MAX as usize {
+            return Err(Error::KeyTooLong);
+        }
+        let old_key_len = self.key_len as usize;
+        let new_key_len = key.len();
+        match new_key_len.cmp(&old_key_len) {
+            Ordering::Equal => {}
+            Ordering::Less => {
+                let diff = old_key_len - new_key_len;
+                let content = &self.body[BlockHeader::SIZE + old_key_len..];
+                let content_ptr_old = content.as_ptr();
+                unsafe {
+                    let content_ptr_new = content_ptr_old.sub(diff) as *mut u8;
+                    std::ptr::copy(content_ptr_old, content_ptr_new, content.len());
+                }
+                self.body.truncate(self.body.len() - diff);
+            }
+            Ordering::Greater => {
+                let diff = new_key_len - old_key_len;
+                self.body.resize(self.body.len() + diff, 0);
+                let content = &self.body[BlockHeader::SIZE + old_key_len..];
+                let content_ptr_old = content.as_ptr();
+                unsafe {
+                    let content_ptr_new = content_ptr_old.add(diff) as *mut u8;
+                    std::ptr::copy(content_ptr_old, content_ptr_new, content.len());
+                }
+            }
+        }
+        let old_key = &mut self.body[BlockHeader::SIZE..];
+        unsafe {
+            std::ptr::copy_nonoverlapping(key.as_ptr(), old_key.as_mut_ptr(), key.len());
+        }
+        self.key_len = new_key_len as u8;
+        Ok(())
+    }
+
     pub(crate) fn init_content(&mut self, content: BlockContent) -> crate::Result<()> {
         self.set_content_type(content.content_type());
         let body = content.body();
@@ -530,11 +566,32 @@ impl BlockMut {
             self.id.clock += offset;
             let left = match db.split_block(ID::new(self.id.client, self.id.clock - 1))? {
                 SplitResult::Unchanged(left) => left.last_id(),
-                SplitResult::Split(left, _) => left.last_id(),
+                SplitResult::Split(left, _right) => left.last_id(), //TODO: *self = right; ?
             };
             self.set_left(Some(&left));
             self.set_origin_left(left);
         }
+
+        // get or create parent
+
+        // get left and right neighbors
+
+        // detect and resolve conflict
+
+        // check if we need to inherit entry key from its neighbors
+
+        // update left/right linking
+
+        // if it's right-most entry, update Map
+
+        // update parent length
+
+        //TODO: update moved fields
+
+        // content-specific actions
+
+        // check if this block should be deleted
+
         todo!()
         /*
         let self_ptr = self.clone();
@@ -1020,6 +1077,48 @@ mod test {
         let content = block.content().unwrap();
         assert_eq!(content.content_type(), ContentType::Deleted);
         assert_eq!(block.entry_key(), Some("key"));
+    }
+
+    #[test]
+    fn block_set_key_shorter() {
+        let mut block = block(1, 3, 0, 4, 0, 4, Some("test"));
+        block
+            .init_content(BlockContent::Text("hello world"))
+            .unwrap();
+
+        block.set_entry_key("123".as_bytes()).unwrap();
+
+        assert_eq!(block.entry_key(), Some("123"));
+        let content = block.content().unwrap();
+        assert_eq!(content, BlockContent::Text("hello world"));
+    }
+
+    #[test]
+    fn block_set_key_longer() {
+        let mut block = block(1, 3, 0, 4, 0, 4, Some("test"));
+        block
+            .init_content(BlockContent::Text("hello world"))
+            .unwrap();
+
+        block.set_entry_key("test123".as_bytes()).unwrap();
+
+        assert_eq!(block.entry_key(), Some("test123"));
+        let content = block.content().unwrap();
+        assert_eq!(content, BlockContent::Text("hello world"));
+    }
+
+    #[test]
+    fn block_set_key_equal() {
+        let mut block = block(1, 3, 0, 4, 0, 4, Some("test"));
+        block
+            .init_content(BlockContent::Text("hello world"))
+            .unwrap();
+
+        block.set_entry_key("1234".as_bytes()).unwrap();
+
+        assert_eq!(block.entry_key(), Some("1234"));
+        let content = block.content().unwrap();
+        assert_eq!(content, BlockContent::Text("hello world"));
     }
 
     #[test]

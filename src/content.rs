@@ -9,7 +9,7 @@ use crate::varint::var_u64_from_slice;
 use crate::{lib0, Clock, U64};
 use serde::de::DeserializeOwned;
 use std::any::Any;
-use std::fmt::{Display, Formatter};
+use std::fmt::{Debug, Display, Formatter};
 use std::io::Cursor;
 use std::marker::PhantomData;
 use std::ops::Deref;
@@ -66,6 +66,7 @@ impl TryFrom<u8> for ContentType {
 }
 
 #[repr(u8)]
+#[derive(Debug, PartialEq)]
 pub(crate) enum BlockContent<'a> {
     Deleted(Clock) = CONTENT_TYPE_DELETED,
     Json(ContentRef<'a, JsonEncoding>) = CONTENT_TYPE_JSON,
@@ -126,7 +127,7 @@ impl<'a> Display for BlockContent<'a> {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct ContentIter<'a> {
     data: &'a [u8],
 }
@@ -190,7 +191,7 @@ pub trait Encoding {
 }
 
 #[repr(transparent)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct JsonEncoding;
 impl Encoding for JsonEncoding {
     fn serialize<W, T>(writer: &mut W, value: &T) -> crate::Result<()>
@@ -217,7 +218,7 @@ impl Encoding for JsonEncoding {
 }
 
 #[repr(transparent)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct AtomEncoding;
 impl Encoding for AtomEncoding {
     fn serialize<W, T>(writer: &mut W, value: &T) -> crate::Result<()>
@@ -245,7 +246,7 @@ impl Encoding for AtomEncoding {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct ContentRef<'a, E> {
     inner: ContentIter<'a>,
     _encoding: PhantomData<E>,
@@ -269,6 +270,15 @@ impl<'a, E> ContentRef<'a, E> {
             _deserializer: PhantomData::default(),
             _target_type: PhantomData::default(),
         }
+    }
+}
+
+impl<'a, E> Debug for ContentRef<'a, E>
+where
+    E: Encoding,
+{
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self, f)
     }
 }
 
@@ -313,6 +323,7 @@ where
     }
 }
 
+#[derive(PartialEq)]
 pub struct ContentNode<'a> {
     data: &'a [u8],
 }
@@ -349,6 +360,12 @@ impl<'a> Deref for ContentNode<'a> {
     }
 }
 
+impl<'a> Debug for ContentNode<'a> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.header(), f)
+    }
+}
+
 impl<'a> Display for ContentNode<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let (header, suffix) = NodeHeader::ref_from_prefix(self.data).unwrap();
@@ -363,6 +380,7 @@ impl<'a> Display for ContentNode<'a> {
     }
 }
 
+#[derive(PartialEq)]
 pub struct ContentFormat<'a> {
     data: &'a [u8],
 }
@@ -396,6 +414,12 @@ impl<'a> ContentFormat<'a> {
     pub fn value(&self) -> &'a [u8] {
         let key_len = self.key_len();
         &self.data[2 + key_len..]
+    }
+}
+
+impl<'a> Debug for ContentFormat<'a> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self, f)
     }
 }
 
