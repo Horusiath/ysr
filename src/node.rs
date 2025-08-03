@@ -106,6 +106,10 @@ impl NodeHeader {
     pub fn start(&self) -> ID {
         self.start
     }
+
+    pub fn set_start(&mut self, id: Option<&ID>) -> Option<ID> {
+        todo!()
+    }
 }
 
 impl Display for NodeHeader {

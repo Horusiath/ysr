@@ -52,22 +52,9 @@ where
         Txn: BorrowMut<Transaction<'db>>,
     {
         let borrowed = tx.borrow_mut();
-        let block: BlockMut = match borrowed.db().block_containing(self.node_id(), true) {
-            Ok(block) => block.into(),
-            Err(crate::Error::BlockNotFound(_)) => {
-                if self.node.is_root() {
-                    // since root nodes live forever, we can create it if it does not exist
-                    let (mut db, _) = borrowed.split_mut();
-                    let block = BlockMut::new_node(self.node, Cap::node_type());
-                    db.insert_block(block.as_ref())?;
-                    block
-                } else {
-                    // nested nodes are not created automatically, if we didn't find it, we return an error
-                    return Err(crate::Error::NotFound);
-                }
-            }
-            Err(e) => return Err(e),
-        };
+        let block = borrowed
+            .db()
+            .get_or_insert_node(self.node, Cap::node_type())?;
         Ok(Mounted::new(block, tx))
     }
 }

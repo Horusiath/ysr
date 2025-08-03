@@ -1,6 +1,10 @@
 use crate::block::{Block, BlockMut, ID};
 use crate::block_reader::{BlockRange, BlockReader, Carrier};
+use crate::id_set::IDSet;
+use crate::integrate::IntegrationContext;
+use crate::node::{Node, NodeType};
 use crate::read::Decoder;
+use crate::store::lmdb::store::SplitResult;
 use crate::store::lmdb::BlockStore;
 use crate::write::WriteExt;
 use crate::{ClientID, StateVector};
@@ -14,6 +18,7 @@ pub(crate) struct TransactionState {
     pub begin_state: StateVector,
     pub current_state: StateVector,
     pub origin: Option<Origin>,
+    pub delete_set: IDSet,
 }
 
 impl TransactionState {
@@ -23,6 +28,7 @@ impl TransactionState {
             begin_state,
             current_state,
             origin,
+            delete_set: IDSet::default(),
         }
     }
 
@@ -120,7 +126,7 @@ impl<'db> Transaction<'db> {
         while let Some(res) = block_reader.next() {
             let carrier = res?;
             match carrier {
-                Carrier::Block(mut block) => {
+                Carrier::Block(mut block, parent_name) => {
                     let id = block.id();
                     if state.current_state.contains(id) {
                         let offset = state.current_state.get(&id.client) - id.clock;
@@ -148,21 +154,14 @@ impl<'db> Transaction<'db> {
                             }
                              */
                         } else if offset == 0 || offset < block.clock_len() {
-                            state
-                                .current_state
-                                .set_max(id.client, id.clock + block.clock_len());
-
-                            if let Some(&origin) = block.origin_left() {
-                                block.set_origin_left(origin);
-                                db.split_block(origin)?;
-                            }
-                            if let Some(&origin) = block.origin_right() {
-                                block.set_origin_right(origin);
-                                db.split_block(origin)?;
-                            }
-
                             let last_id = block.last_id();
-                            block.integrate(&mut db, state, offset)?;
+                            let mut context = IntegrationContext::create(
+                                &block,
+                                parent_name.as_deref(),
+                                offset,
+                                &mut db,
+                            )?;
+                            block.integrate(&mut db, state, &mut context)?;
                             state.current_state.set_max(last_id.client, last_id.clock);
                         }
                     } else {

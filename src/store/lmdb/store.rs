@@ -1,7 +1,9 @@
 use crate::block::{Block, BlockMut, ID};
 use crate::block_reader::BlockRange;
+use crate::node::{Node, NodeType};
 use crate::{ClientID, Clock, Error, StateVector};
 use lmdb_rs_m::{Database, MdbError};
+use smallvec::{smallvec, SmallVec};
 use std::collections::BTreeMap;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
@@ -14,6 +16,31 @@ pub trait BlockStore<'tx> {
     fn clock(&self, client_id: ClientID) -> crate::Result<Option<Clock>>;
     fn state_vector(&self) -> crate::Result<StateVector>;
     fn block_containing(&self, id: ID, direct_only: bool) -> crate::Result<Block>;
+
+    fn entry(&self, map: &ID, entry_key: &str) -> crate::Result<ID>;
+    fn set_entry(&mut self, map: &ID, entry_key: &str, value: &ID) -> crate::Result<()>;
+
+    fn get_or_insert_node(
+        &mut self,
+        node: Node<'_>,
+        node_type: NodeType,
+    ) -> crate::Result<BlockMut> {
+        match self.block_containing(node.id(), true) {
+            Ok(block) => Ok(block.into()),
+            Err(crate::Error::BlockNotFound(_)) => {
+                if node.is_root() {
+                    // since root nodes live forever, we can create it if it does not exist
+                    let block = BlockMut::new_node(node, node_type);
+                    self.insert_block(block.as_ref())?;
+                    Ok(block)
+                } else {
+                    // nested nodes are not created automatically, if we didn't find it, we return an error
+                    Err(crate::Error::NotFound)
+                }
+            }
+            Err(e) => Err(e),
+        }
+    }
 }
 
 impl<'tx> BlockStore<'tx> for Database<'tx> {
@@ -137,6 +164,23 @@ impl<'tx> BlockStore<'tx> for Database<'tx> {
             _ => Err(Error::BlockNotFound(id)),
         }
     }
+
+    fn entry(&self, map: &ID, entry_key: &str) -> crate::Result<ID> {
+        let key = map_entry_key(map, entry_key);
+        let value: &[u8] = match self.get(&key.as_slice()) {
+            Ok(value) => value,
+            Err(MdbError::NotFound) => return Err(crate::Error::NotFound),
+            Err(e) => return Err(Error::Lmdb(e)),
+        };
+        let block_id = ID::ref_from_bytes(value).map_err(|_| Error::InvalidMapping("ID"))?;
+        Ok(*block_id)
+    }
+
+    fn set_entry(&mut self, map: &ID, entry_key: &str, value: &ID) -> crate::Result<()> {
+        let key = map_entry_key(map, entry_key);
+        self.set(&key.as_slice(), &value.as_bytes())?;
+        Ok(())
+    }
 }
 
 pub struct BlockCursor<'a> {
@@ -196,6 +240,7 @@ pub enum SplitResult<'a> {
 const KEY_PREFIX_META: u8 = 0x00;
 const KEY_PREFIX_STATE_VECTOR: u8 = 0x01;
 const KEY_PREFIX_BLOCK: u8 = 0x02;
+const KEY_PREFIX_MAP: u8 = 0x03;
 
 #[repr(C, packed)]
 #[derive(FromBytes, IntoBytes, Immutable, KnownLayout, Clone, Copy, Debug, PartialEq, Eq)]
@@ -227,6 +272,13 @@ impl StateVectorKey {
             client_id,
         }
     }
+}
+
+fn map_entry_key(map: &ID, key: &str) -> SmallVec<[u8; 16]> {
+    let mut buf = smallvec![KEY_PREFIX_MAP];
+    buf.extend_from_slice(map.as_bytes());
+    buf.extend_from_slice(key.as_bytes());
+    buf
 }
 
 #[cfg(test)]

@@ -14,6 +14,7 @@ mod varint;
 mod write;
 
 mod block_cursor;
+mod integrate;
 #[cfg(test)]
 mod test_util;
 
@@ -72,6 +73,23 @@ pub enum Error {
 impl Error {
     pub fn not_found(&self) -> bool {
         matches!(self, Error::NotFound)
+    }
+}
+
+trait Optional {
+    type Return;
+    fn optional(self) -> Self::Return;
+}
+
+impl<T> Optional for Result<T, Error> {
+    type Return = Result<Option<T>, Error>;
+
+    fn optional(self) -> Self::Return {
+        match self {
+            Ok(value) => Ok(Some(value)),
+            Err(Error::NotFound) => Ok(None),
+            Err(err) => Err(err),
+        }
     }
 }
 

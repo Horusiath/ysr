@@ -69,16 +69,17 @@ impl<'a, D: Decoder> BlockReader<'a, D> {
             }
             _ => {
                 let block_id = ID::new(self.current_client, self.current_clock);
-                let block = self.read_block(block_id, info)?;
+                let (block, parent_name) = self.read_block(block_id, info)?;
                 self.remaining_blocks -= 1;
                 self.current_clock += block.clock_len();
-                Ok(Some(Carrier::Block(block)))
+                Ok(Some(Carrier::Block(block, parent_name)))
             }
         }
     }
 
-    fn read_block(&mut self, id: ID, info: u8) -> crate::Result<BlockMut> {
+    fn read_block(&mut self, id: ID, info: u8) -> crate::Result<(BlockMut, Option<String>)> {
         let mut block = BlockMut::parse(id, BytesMut::zeroed(BlockHeader::SIZE))?;
+        let mut parent_name = None;
         let cannot_copy_parent_info = info & (HAS_RIGHT_ID | HAS_LEFT_ID) == 0;
         if info & HAS_LEFT_ID != 0 {
             let left_id = self.decoder.read_left_id()?;
@@ -90,9 +91,12 @@ impl<'a, D: Decoder> BlockReader<'a, D> {
         }
         if cannot_copy_parent_info {
             let parent_id = if self.decoder.read_parent_info()? {
-                let mut root_parent_name = SmallVec::<[u8; 16]>::new();
-                self.decoder.read_string(&mut root_parent_name)?;
-                NodeID::from_root(&root_parent_name)
+                let mut root_parent_name = String::new();
+                let buf = unsafe { root_parent_name.as_mut_vec() };
+                self.decoder.read_string(buf)?;
+                let node = NodeID::from_root(&root_parent_name);
+                parent_name = Some(root_parent_name);
+                node
             } else {
                 let nested_parent_id = self.decoder.read_left_id()?;
                 NodeID::from_nested(nested_parent_id)
@@ -105,7 +109,7 @@ impl<'a, D: Decoder> BlockReader<'a, D> {
             block.init_entry_key(&entry_key)?;
         }
         self.init_content(info, &mut block)?;
-        Ok(block)
+        Ok((block, parent_name))
     }
 
     fn init_content(&mut self, info: u8, block: &mut BlockMut) -> crate::Result<()> {
@@ -205,7 +209,7 @@ const HAS_PARENT_SUB: u8 = 0b0010_0000;
 pub enum Carrier {
     GC(BlockRange) = 0,
     Skip(BlockRange) = 10,
-    Block(BlockMut),
+    Block(BlockMut, Option<String>),
 }
 
 impl Display for Carrier {
@@ -213,7 +217,7 @@ impl Display for Carrier {
         match self {
             Carrier::GC(range) => write!(f, "gc({})", range),
             Carrier::Skip(range) => write!(f, "skip({})", range),
-            Carrier::Block(block) => write!(f, "{}", block),
+            Carrier::Block(block, parent_name) => write!(f, "{}", block),
         }
     }
 }
@@ -272,7 +276,7 @@ mod test {
         let mut reader = BlockReader::new(&mut decoder).unwrap();
         const CLIENT: ClientID = unsafe { ClientID::new_unchecked(1490905955) };
         // index: 0
-        let Carrier::Block(n) = reader.next().unwrap().unwrap() else {
+        let Carrier::Block(n, _) = reader.next().unwrap().unwrap() else {
             unreachable!()
         };
         assert_eq!(n.id(), &ID::new(CLIENT, 0.into()));
@@ -284,7 +288,7 @@ mod test {
         assert_eq!(text, "0");
 
         // index: 1
-        let Carrier::Block(n) = reader.next().unwrap().unwrap() else {
+        let Carrier::Block(n, _) = reader.next().unwrap().unwrap() else {
             unreachable!()
         };
         assert_eq!(n.id(), &ID::new(CLIENT, 1.into()));
@@ -295,7 +299,7 @@ mod test {
         assert_eq!(text, "1");
 
         // index: 2
-        let Carrier::Block(n) = reader.next().unwrap().unwrap() else {
+        let Carrier::Block(n, _) = reader.next().unwrap().unwrap() else {
             unreachable!()
         };
         assert_eq!(n.id(), &ID::new(CLIENT, 2.into()));
