@@ -1,5 +1,5 @@
 use crate::block::{
-    BlockHeader, BlockMut, CONTENT_TYPE_ATOM, CONTENT_TYPE_BINARY, CONTENT_TYPE_DELETED,
+    BlockBuilder, BlockHeader, CONTENT_TYPE_ATOM, CONTENT_TYPE_BINARY, CONTENT_TYPE_DELETED,
     CONTENT_TYPE_DOC, CONTENT_TYPE_EMBED, CONTENT_TYPE_FORMAT, CONTENT_TYPE_GC, CONTENT_TYPE_JSON,
     CONTENT_TYPE_NODE, CONTENT_TYPE_SKIP, CONTENT_TYPE_STRING, ID,
 };
@@ -77,8 +77,8 @@ impl<'a, D: Decoder> BlockReader<'a, D> {
         }
     }
 
-    fn read_block(&mut self, id: ID, info: u8) -> crate::Result<(BlockMut, Option<String>)> {
-        let mut block = BlockMut::parse(id, BytesMut::zeroed(BlockHeader::SIZE))?;
+    fn read_block(&mut self, id: ID, info: u8) -> crate::Result<(BlockBuilder, Option<String>)> {
+        let mut block = BlockBuilder::parse(id, BytesMut::zeroed(BlockHeader::SIZE))?;
         let mut parent_name = None;
         let cannot_copy_parent_info = info & (HAS_RIGHT_ID | HAS_LEFT_ID) == 0;
         if info & HAS_LEFT_ID != 0 {
@@ -112,7 +112,7 @@ impl<'a, D: Decoder> BlockReader<'a, D> {
         Ok((block, parent_name))
     }
 
-    fn init_content(&mut self, info: u8, block: &mut BlockMut) -> crate::Result<()> {
+    fn init_content(&mut self, info: u8, block: &mut BlockBuilder) -> crate::Result<()> {
         let content_type = info & CARRIER_INFO;
         block.set_content_type(content_type.try_into()?);
         match content_type {
@@ -187,7 +187,7 @@ impl<'a, D: Decoder> Iterator for BlockReader<'a, D> {
     }
 }
 
-fn copy_content<D: Decoder>(decoder: &mut D, block: &mut BlockMut) -> crate::Result<()> {
+fn copy_content<D: Decoder>(decoder: &mut D, block: &mut BlockBuilder) -> crate::Result<()> {
     let count = decoder.read_len()?;
     block.set_clock_len(count);
     let mut buf = Vec::new();
@@ -209,7 +209,7 @@ const HAS_PARENT_SUB: u8 = 0b0010_0000;
 pub enum Carrier {
     GC(BlockRange) = 0,
     Skip(BlockRange) = 10,
-    Block(BlockMut, Option<String>),
+    Block(BlockBuilder, Option<String>),
 }
 
 impl Display for Carrier {

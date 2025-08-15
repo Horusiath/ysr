@@ -1,4 +1,4 @@
-use crate::block::{BlockMut, ID};
+use crate::block::{BlockBuilder, ID};
 use crate::content::{BlockContent, ContentNode};
 use crate::node::{Node, NodeHeader, NodeID, NodeType};
 use crate::store::lmdb::BlockStore;
@@ -73,13 +73,13 @@ impl<Cap> From<Unmounted<Cap>> for NodeID {
 
 #[derive(Debug)]
 pub struct Mounted<Cap, Txn> {
-    block: BlockMut,
+    block: BlockBuilder,
     tx: Txn,
     _capability: PhantomData<Cap>,
 }
 
 impl<Cap, Txn> Mounted<Cap, Txn> {
-    pub fn new(block: BlockMut, tx: Txn) -> Self {
+    pub fn new(block: BlockBuilder, tx: Txn) -> Self {
         Mounted {
             block,
             tx,
@@ -91,7 +91,7 @@ impl<Cap, Txn> Mounted<Cap, Txn> {
         self.block.id()
     }
 
-    pub fn split(self) -> (BlockMut, Txn) {
+    pub fn split(self) -> (BlockBuilder, Txn) {
         (self.block, self.tx)
     }
 }

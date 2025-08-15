@@ -1,4 +1,4 @@
-use crate::block::{Block, BlockMut, ID};
+use crate::block::{Block, BlockBuilder, ID};
 use crate::block_reader::BlockRange;
 use crate::node::{Node, NodeType};
 use crate::{ClientID, Clock, Error, StateVector};
@@ -24,13 +24,13 @@ pub trait BlockStore<'tx> {
         &mut self,
         node: Node<'_>,
         node_type: NodeType,
-    ) -> crate::Result<BlockMut> {
+    ) -> crate::Result<BlockBuilder> {
         match self.block_containing(node.id(), true) {
             Ok(block) => Ok(block.into()),
             Err(crate::Error::BlockNotFound(_)) => {
                 if node.is_root() {
                     // since root nodes live forever, we can create it if it does not exist
-                    let block = BlockMut::new_node(node, node_type);
+                    let block = BlockBuilder::new_node(node, node_type);
                     self.insert_block(block.as_ref())?;
                     Ok(block)
                 } else {
@@ -91,7 +91,7 @@ impl<'tx> BlockStore<'tx> for Database<'tx> {
         let left = self.block_containing(id, false)?;
         if left.contains(&id) {
             let offset = id.clock - left.id().clock;
-            let mut left = BlockMut::from_block(&left);
+            let mut left = BlockBuilder::from_block(&left);
             let right = left.splice(offset)?;
             Ok(SplitResult::Split(left, right.unwrap()))
         } else {
@@ -151,7 +151,10 @@ impl<'tx> BlockStore<'tx> for Database<'tx> {
     /// their range.
     fn block_containing(&self, id: ID, direct_only: bool) -> crate::Result<Block> {
         let mut cursor = self.cursor()?;
-        if !cursor.seek(id)? && !direct_only {
+        if !cursor.seek(id)? {
+            if direct_only {
+                return Err(Error::BlockNotFound(id));
+            }
             // we didn't find the block directly, so we need to check the previous block
             // if it contains the ID within its range
             if !cursor.prev()? {
@@ -190,7 +193,7 @@ pub struct BlockCursor<'a> {
 impl<'a> BlockCursor<'a> {
     pub fn seek(&mut self, id: ID) -> crate::Result<bool> {
         let key = BlockKey::new(id);
-        match self.inner.to_key(&key.as_bytes()) {
+        match self.inner.to_gte_key(&key.as_bytes()) {
             Ok(_) => Ok(true),
             Err(lmdb_rs_m::MdbError::NotFound) => Ok(false),
             Err(e) => Err(Error::Lmdb(e)),
@@ -234,7 +237,7 @@ impl<'tx> From<lmdb_rs_m::Cursor<'tx>> for BlockCursor<'tx> {
 
 pub enum SplitResult<'a> {
     Unchanged(Block<'a>),
-    Split(BlockMut, BlockMut),
+    Split(BlockBuilder, BlockBuilder),
 }
 
 const KEY_PREFIX_META: u8 = 0x00;
@@ -283,7 +286,7 @@ fn map_entry_key(map: &ID, key: &str) -> SmallVec<[u8; 16]> {
 
 #[cfg(test)]
 mod test {
-    use crate::block::{BlockMut, ID};
+    use crate::block::{BlockBuilder, ID};
     use crate::store::lmdb::store::BlockStore;
     use lmdb_rs_m::DbFlags;
     use zerocopy::IntoBytes;
@@ -300,7 +303,7 @@ mod test {
         let mut db = tx.bind(&h);
 
         let id = ID::new(1.into(), 2.into());
-        let block = BlockMut::new(
+        let block = BlockBuilder::new(
             id,
             1.into(),
             None,
@@ -336,7 +339,7 @@ mod test {
 
         let searched = {
             let id = ID::new(1.into(), 2.into());
-            let block = BlockMut::new(
+            let block = BlockBuilder::new(
                 id,
                 10.into(),
                 None,
@@ -353,7 +356,7 @@ mod test {
         };
         {
             let id = ID::new(1.into(), 12.into());
-            let block = BlockMut::new(
+            let block = BlockBuilder::new(
                 id,
                 2.into(),
                 None,

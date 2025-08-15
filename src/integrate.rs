@@ -1,20 +1,21 @@
-use crate::block::BlockMut;
+use crate::block::BlockBuilder;
 use crate::node::{Node, NodeType};
 use crate::store::lmdb::store::SplitResult;
 use crate::store::lmdb::BlockStore;
 use crate::Clock;
 use lmdb_rs_m::Database;
+use std::collections::HashSet;
 
 pub(crate) struct IntegrationContext {
-    pub left: Option<BlockMut>,
-    pub right: Option<BlockMut>,
-    pub parent: Option<BlockMut>,
+    pub left: Option<BlockBuilder>,
+    pub right: Option<BlockBuilder>,
+    pub parent: Option<BlockBuilder>,
     pub offset: Clock,
 }
 
 impl IntegrationContext {
     pub fn create(
-        target: &BlockMut,
+        target: &BlockBuilder,
         parent_name: Option<&str>,
         offset: Clock,
         db: &mut Database,
@@ -53,7 +54,7 @@ impl IntegrationContext {
         })
     }
 
-    pub fn detect_conflict(&self, target: &BlockMut) -> bool {
+    pub fn detect_conflict(&self, target: &BlockBuilder) -> bool {
         // original code: ((!target.left && (!target.right || target.right.left !== null)) || (target.left && target.left.right !== target.right))
         match (&self.left, &self.right) {
             (None, None) => true,                          // !target.left && !target.right
@@ -63,9 +64,33 @@ impl IntegrationContext {
         }
     }
 
-    pub fn resolve_conflict(&mut self, target: &mut BlockMut) {
-        /*
+    pub fn resolve_conflict(&mut self, target: &mut BlockBuilder) {
+        let mut o = if let Some(left) = self.left {
+            left.right
+        } else if let Some(sub) = &target.entry_key() {
+            let mut o = self.parent.map.get(sub).cloned();
+            while let Some(item) = o.as_deref() {
+                if item.left.is_some() {
+                    o = item.left.clone();
+                    continue;
+                }
+                break;
+            }
+            o.clone()
+        } else {
+            self.parent.start
+        };
 
+        let mut left = target.left();
+        let mut conflicting_items = HashSet::new();
+        let mut items_before_origin = HashSet::new();
+
+        // Let c in conflicting_items, b in items_before_origin
+        // ***{origin}bbbb{this}{c,b}{c,b}{o}***
+        // Note that conflicting_items is a subset of items_before_origin
+        while let Some(item) = o {}
+
+        /*
                // set the first conflicting item
                let mut o = if let Some(left) = left {
                    left.right

@@ -1,4 +1,4 @@
-use crate::block::{Block, BlockMut, ID};
+use crate::block::{Block, BlockBuilder, ID};
 use crate::block_reader::{BlockRange, BlockReader, Carrier};
 use crate::id_set::IDSet;
 use crate::integrate::IntegrationContext;
@@ -106,7 +106,7 @@ impl<'db> Transaction<'db> {
     }
 
     fn write_updates(
-        cursor: &mut impl Iterator<Item = crate::Result<crate::block::BlockMut>>,
+        cursor: &mut impl Iterator<Item = crate::Result<crate::block::BlockBuilder>>,
         buf: &mut BytesMut,
     ) -> crate::Result<usize> {
         let mut blocks_count = 0;
@@ -311,7 +311,7 @@ impl<'db> Transaction<'db> {
         Ok(())
     }
 
-    fn missing(block: &BlockMut, local_sv: &StateVector) -> Option<ClientID> {
+    fn missing(block: &BlockBuilder, local_sv: &StateVector) -> Option<ClientID> {
         if let Some(origin) = &block.origin_left() {
             if origin.client != block.id().client && origin.clock >= local_sv.get(&origin.client) {
                 return Some(origin.client);

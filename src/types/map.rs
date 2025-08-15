@@ -34,7 +34,7 @@ impl<'tx, 'db> MapRef<&'tx Transaction<'db>> {
         todo!()
     }
 
-    pub fn iter(&self) -> Iter {
+    pub fn iter(&self) -> Iter<'_> {
         todo!()
     }
 }

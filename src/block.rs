@@ -1,13 +1,13 @@
 use crate::block_cursor::BlockCursor;
 use crate::content::{
-    BlockContent, ContentFormat, ContentIter, ContentNode, ContentRef, ContentType,
+    BlockContent, BlockContentMut, ContentFormat, ContentIter, ContentNode, ContentNodeMut,
+    ContentRef, ContentType,
 };
 use crate::integrate::IntegrationContext;
 use crate::node::{Node, NodeHeader, NodeID, NodeType};
 use crate::store::lmdb::store::SplitResult;
 use crate::store::lmdb::BlockStore;
 use crate::transaction::TransactionState;
-use crate::types::Capability;
 use crate::{ClientID, Clock, Optional};
 use crate::{Error, Result};
 use bitflags::bitflags;
@@ -93,6 +93,12 @@ impl BlockHeader {
         if let Some(origin_right) = origin_right {
             self.set_origin_right(*origin_right);
         }
+    }
+
+    pub fn contains(&self, id: &ID) -> bool {
+        id.client == self.left.client // same client
+            && id.clock >= self.left.clock // id is larger or equal to block's start clock
+            && id.clock < self.left.clock + self.clock_len // id is smaller than block's end clock
     }
 
     pub fn parse(data: &[u8]) -> Result<(&BlockHeader, &[u8]), ParseError> {
@@ -193,6 +199,10 @@ impl BlockHeader {
         &body[self.key_len as usize..]
     }
 
+    pub fn content_slice_mut<'a>(&self, body: &'a mut [u8]) -> &'a mut [u8] {
+        &mut body[self.key_len as usize..]
+    }
+
     pub fn content<'a>(&self, body: &'a [u8]) -> Result<BlockContent<'a>> {
         let content = self.content_slice(body);
         match self.content_type.try_into()? {
@@ -207,6 +217,24 @@ impl BlockHeader {
             ContentType::String => {
                 let str = unsafe { std::str::from_utf8_unchecked(content) };
                 Ok(BlockContent::Text(str))
+            }
+        }
+    }
+
+    pub fn content_mut<'a>(&self, body: &'a mut [u8]) -> Result<BlockContentMut<'a>> {
+        let content = self.content_slice_mut(body);
+        match self.content_type.try_into()? {
+            ContentType::Deleted => Ok(BlockContentMut::Deleted(self.clock_len)),
+            ContentType::Json => Ok(BlockContentMut::Json(ContentRef::new(content))),
+            ContentType::Atom => Ok(BlockContentMut::Atom(ContentRef::new(content))),
+            ContentType::Binary => Ok(BlockContentMut::Binary(content)),
+            ContentType::Doc => Ok(BlockContentMut::Doc(content)),
+            ContentType::Embed => Ok(BlockContentMut::Embed(content)),
+            ContentType::Format => Ok(BlockContentMut::Format(ContentFormat::new(content)?)),
+            ContentType::Node => Ok(BlockContentMut::Node(ContentNodeMut::new(content)?)),
+            ContentType::String => {
+                let str = unsafe { std::str::from_utf8_unchecked(content) };
+                Ok(BlockContentMut::Text(str))
             }
         }
     }
@@ -283,7 +311,7 @@ impl<'a> Block<'a> {
 
     #[inline]
     pub fn header(&self) -> &BlockHeader {
-        BlockHeader::ref_from_bytes(self.data).unwrap()
+        BlockHeader::ref_from_bytes(&self.data[..BlockHeader::SIZE]).unwrap()
     }
 
     pub fn entry_key(&self) -> Option<&str> {
@@ -291,12 +319,12 @@ impl<'a> Block<'a> {
         header.entry_key(body)
     }
 
-    pub fn content(&self) -> Result<BlockContent<'a>> {
+    pub fn content(&self) -> Result<BlockContent<'_>> {
         let (header, body) = BlockHeader::parse(self.data).unwrap();
         header.content(body)
     }
 
-    pub fn display(&self) -> DisplayBlock<'a> {
+    pub fn display(&self) -> DisplayBlock<'_> {
         let (header, body) = BlockHeader::parse(self.data).unwrap();
         header.display(body)
     }
@@ -305,10 +333,10 @@ impl<'a> Block<'a> {
         self.data
     }
 
-    pub fn to_owned(&self) -> BlockMut {
+    pub fn to_owned(&self) -> BlockBuilder {
         let mut body = BytesMut::with_capacity(self.data.len());
         body.extend_from_slice(self.data);
-        BlockMut::parse(self.id, body).unwrap()
+        BlockBuilder::parse(self.id, body).unwrap()
     }
 }
 
@@ -320,18 +348,105 @@ impl Deref for Block<'_> {
     }
 }
 
+pub struct BlockMut<'a> {
+    id: ID,
+    data: &'a mut [u8],
+}
+
+impl<'a> BlockMut<'a> {
+    pub fn new(id: ID, data: &'a mut [u8]) -> Result<Self> {
+        if BlockHeader::parse(data).is_err() {
+            Err(Error::MalformedBlock(id))
+        } else {
+            Ok(Self { id, data })
+        }
+    }
+
+    pub unsafe fn new_unchecked(id: ID, data: &'a mut [u8]) -> Self {
+        Self { id, data }
+    }
+
+    pub fn id(&self) -> &ID {
+        &self.id
+    }
+
+    pub fn last_id(&self) -> ID {
+        ID::new(self.id.client, self.id.clock + self.clock_len() - 1)
+    }
+
+    #[inline]
+    pub fn contains(&self, id: &ID) -> bool {
+        id.client == self.id.client // same client
+          && id.clock >= self.id.clock // id is larger or equal to block's start clock
+          && id.clock < self.id.clock + self.clock_len() // id is smaller than block's end clock
+    }
+
+    #[inline]
+    pub fn header(&self) -> &BlockHeader {
+        BlockHeader::ref_from_bytes(&self.data[..BlockHeader::SIZE]).unwrap()
+    }
+
+    #[inline]
+    pub fn header_mut(&mut self) -> &mut BlockHeader {
+        BlockHeader::mut_from_bytes(&mut self.data[..BlockHeader::SIZE]).unwrap()
+    }
+
+    pub fn entry_key(&self) -> Option<&str> {
+        let (header, body) = BlockHeader::parse(&self.data).unwrap();
+        header.entry_key(body)
+    }
+
+    pub fn content(&self) -> Result<BlockContent<'_>> {
+        let (header, body) = BlockHeader::parse(self.data).unwrap();
+        header.content(body)
+    }
+
+    pub fn display(&self) -> DisplayBlock<'_> {
+        let (header, body) = BlockHeader::parse(self.data).unwrap();
+        header.display(body)
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        self.data
+    }
+
+    pub fn bytes_mut(&mut self) -> &mut [u8] {
+        self.data
+    }
+
+    pub fn to_owned(&self) -> BlockBuilder {
+        let mut body = BytesMut::with_capacity(self.data.len());
+        body.extend_from_slice(self.data);
+        BlockBuilder::parse(self.id, body).unwrap()
+    }
+}
+
+impl Deref for BlockMut<'_> {
+    type Target = BlockHeader;
+
+    fn deref(&self) -> &Self::Target {
+        self.header()
+    }
+}
+
+impl DerefMut for BlockMut<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.header_mut()
+    }
+}
+
 #[derive(Clone)]
-pub struct BlockMut {
+pub struct BlockBuilder {
     id: ID,
     body: BytesMut,
 }
 
-impl BlockMut {
+impl BlockBuilder {
     pub(crate) fn empty(id: ID) -> Self {
         let header = BlockHeader::default();
         let mut bytes = BytesMut::with_capacity(BlockHeader::SIZE);
         bytes.extend_from_slice(header.as_bytes());
-        BlockMut { id, body: bytes }
+        BlockBuilder { id, body: bytes }
     }
 
     pub(crate) fn new(
@@ -390,6 +505,11 @@ impl BlockMut {
     pub fn content(&self) -> Result<BlockContent> {
         let (header, body) = BlockHeader::parse(&self.body).unwrap();
         header.content(body)
+    }
+
+    pub fn content_mut(&mut self) -> Result<BlockContentMut<'_>> {
+        let (header, body) = BlockHeader::parse_mut(&mut self.body).unwrap();
+        header.content_mut(body)
     }
 
     pub(crate) fn clock_len(&self) -> Clock {
@@ -494,7 +614,7 @@ impl BlockMut {
         }
     }
 
-    fn split(&mut self, offset: Clock, into: &mut BlockMut) -> crate::Result<()> {
+    fn split(&mut self, offset: Clock, into: &mut BlockBuilder) -> crate::Result<()> {
         let (header, body) = BlockHeader::parse_mut(&mut self.body).unwrap();
         let key_len = header.key_len as usize;
         let content = &body[key_len..];
@@ -527,7 +647,7 @@ impl BlockMut {
         Ok(())
     }
 
-    pub fn merge(&mut self, other: &BlockMut) -> bool {
+    pub fn merge(&mut self, other: &BlockBuilder) -> bool {
         if self.can_merge(other) {
             let (other_header, other_body) = BlockHeader::parse(&other.body).unwrap();
             let other_content = other_header.content_slice(other_body);
@@ -596,19 +716,19 @@ impl BlockMut {
             let entry_key = context
                 .left
                 .as_ref()
-                .and_then(BlockMut::entry_key)
-                .or_else(|| context.right.as_ref().and_then(BlockMut::entry_key));
+                .and_then(BlockBuilder::entry_key)
+                .or_else(|| context.right.as_ref().and_then(BlockBuilder::entry_key));
 
             if let Some(key) = entry_key {
                 self.set_entry_key(key.as_bytes())?;
             }
         }
 
-        let parent_node = match &mut context.parent {
+        let mut parent_node = match &mut context.parent {
             None => todo!("delete current block"),
             Some(parent_block) => {
-                if let BlockContent::Node(node) = parent_block.content()? {
-                    node.header()
+                if let BlockContentMut::Node(node) = parent_block.content_mut()? {
+                    node
                 } else {
                     return Err(crate::Error::MalformedBlock(parent_block.id));
                 }
@@ -630,19 +750,19 @@ impl BlockMut {
                         right = block.id;
                     }
                 }
-                right
+                Some(right)
             } else {
                 // current block is new head of the list
                 parent_node.set_start(Some(self.id()))
             };
-            self.set_right(Some(&right));
+            self.set_right(right.as_ref());
         }
 
         if let Some(right) = self.right() {
             if context
                 .right
                 .as_ref()
-                .and_then(|r| !r.contains(right))
+                .map(|r| !r.contains(right))
                 .unwrap_or(true)
             {
                 let right = db.block_containing(*right, true)?;
@@ -784,7 +904,7 @@ impl BlockMut {
     }
 }
 
-impl<'a> From<Block<'a>> for BlockMut {
+impl<'a> From<Block<'a>> for BlockBuilder {
     fn from(value: Block<'a>) -> Self {
         let mut body = BytesMut::with_capacity(value.data.len());
         body.extend_from_slice(value.data);
@@ -792,7 +912,7 @@ impl<'a> From<Block<'a>> for BlockMut {
     }
 }
 
-impl Deref for BlockMut {
+impl Deref for BlockBuilder {
     type Target = BlockHeader;
 
     fn deref(&self) -> &Self::Target {
@@ -800,27 +920,27 @@ impl Deref for BlockMut {
     }
 }
 
-impl DerefMut for BlockMut {
+impl DerefMut for BlockBuilder {
     fn deref_mut(&mut self) -> &mut Self::Target {
         BlockHeader::mut_from_bytes(&mut self.body[..BlockHeader::SIZE]).unwrap()
     }
 }
 
-impl Display for BlockMut {
+impl Display for BlockBuilder {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let (header, body) = BlockHeader::parse(&self.body).unwrap();
         write!(f, "{}, {}", self.id, header.display(body))
     }
 }
 
-impl Debug for BlockMut {
+impl Debug for BlockBuilder {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         Display::fmt(self, f)
     }
 }
 
-impl Eq for BlockMut {}
-impl PartialEq for BlockMut {
+impl Eq for BlockBuilder {}
+impl PartialEq for BlockBuilder {
     fn eq(&self, other: &Self) -> bool {
         let (header, body) = BlockHeader::parse(&self.body).unwrap();
         let (other_header, other_body) = BlockHeader::parse(&other.body).unwrap();
@@ -829,11 +949,11 @@ impl PartialEq for BlockMut {
 }
 
 pub struct Writer<'a> {
-    block: &'a mut BlockMut,
+    block: &'a mut BlockBuilder,
 }
 
 impl<'a> Writer<'a> {
-    fn new(block: &'a mut BlockMut) -> Self {
+    fn new(block: &'a mut BlockBuilder) -> Self {
         Self { block }
     }
 }
@@ -944,7 +1064,7 @@ impl<'a> Display for DisplayBlock<'a> {
 
 #[cfg(test)]
 mod test {
-    use crate::block::{BlockMut, CONTENT_TYPE_DELETED, ID};
+    use crate::block::{BlockBuilder, ID};
     use crate::content::{BlockContent, ContentRef, ContentType};
     use crate::node::NodeID;
     use crate::{ClientID, Clock};
@@ -1155,8 +1275,8 @@ mod test {
         origin_left: u32,
         origin_right: u32,
         entry: Option<&str>,
-    ) -> BlockMut {
-        BlockMut::new(
+    ) -> BlockBuilder {
+        BlockBuilder::new(
             ID::new(CLIENT, id.into()),
             len.into(),
             Some(&ID::new(CLIENT, left.into())),
