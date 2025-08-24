@@ -1,8 +1,10 @@
-use crate::block::BlockBuilder;
+use crate::block::{BlockBuilder, BlockFlags};
+use crate::content::BlockContentMut;
 use crate::node::{Node, NodeType};
 use crate::store::lmdb::store::SplitResult;
 use crate::store::lmdb::BlockStore;
-use crate::Clock;
+use crate::{Clock, Optional};
+use bitflags::Flags;
 use lmdb_rs_m::Database;
 use std::collections::HashSet;
 
@@ -15,21 +17,11 @@ pub(crate) struct IntegrationContext {
 
 impl IntegrationContext {
     pub fn create(
-        target: &BlockBuilder,
+        target: &mut BlockBuilder,
         parent_name: Option<&str>,
         offset: Clock,
         db: &mut Database,
     ) -> crate::Result<Self> {
-        let node = match parent_name {
-            None => Node::nested(*target.parent()),
-            Some(parent_name) => Node::root(parent_name),
-        };
-        let parent = match db.get_or_insert_node(node, NodeType::Unknown) {
-            Ok(block) => Some(block),
-            Err(crate::Error::NotFound) => None,
-            Err(e) => return Err(e),
-        };
-
         let left = if let Some(&origin) = target.origin_left() {
             Some(match db.split_block(origin)? {
                 SplitResult::Unchanged(left) => left.into(),
@@ -45,6 +37,28 @@ impl IntegrationContext {
             })
         } else {
             None
+        };
+
+        if !target.flags().contains(BlockFlags::HAS_PARENT) {
+            let parent = match &left {
+                Some(left) => Some(*left.parent()),
+                None => match &right {
+                    None => None,
+                    Some(right) => Some(*right.parent()),
+                },
+            };
+            if let Some(parent) = parent {
+                target.set_parent(parent);
+            }
+        }
+        let node = match parent_name {
+            None => Node::nested(*target.parent()),
+            Some(parent_name) => Node::root(parent_name),
+        };
+        let parent = match db.get_or_insert_node(node, NodeType::Unknown) {
+            Ok(block) => Some(block),
+            Err(crate::Error::NotFound) => None,
+            Err(e) => return Err(e),
         };
         Ok(IntegrationContext {
             left,
@@ -64,96 +78,81 @@ impl IntegrationContext {
         }
     }
 
-    pub fn resolve_conflict(&mut self, target: &mut BlockBuilder) {
-        let mut o = if let Some(left) = self.left {
-            left.right
+    pub fn resolve_conflict(
+        &mut self,
+        target: &mut BlockBuilder,
+        db: &Database,
+    ) -> crate::Result<()> {
+        let parent = self.parent.as_mut().unwrap();
+        let BlockContentMut::Node(parent_node) = parent.content_mut()? else {
+            unreachable!()
+        };
+        let mut o = if let Some(left) = &self.left {
+            left.right().cloned()
         } else if let Some(sub) = &target.entry_key() {
-            let mut o = self.parent.map.get(sub).cloned();
-            while let Some(item) = o.as_deref() {
-                if item.left.is_some() {
-                    o = item.left.clone();
+            let mut o = db.entry(parent.id(), sub).optional()?;
+            while let Some(id) = o {
+                let item = db.block_containing(id, true)?;
+                if let Some(left) = item.left() {
+                    o = Some(*left);
                     continue;
                 }
                 break;
             }
             o.clone()
         } else {
-            self.parent.start
+            parent_node.header().start().cloned()
         };
 
-        let mut left = target.left();
+        let mut left = target.left().cloned();
         let mut conflicting_items = HashSet::new();
         let mut items_before_origin = HashSet::new();
 
         // Let c in conflicting_items, b in items_before_origin
         // ***{origin}bbbb{this}{c,b}{c,b}{o}***
         // Note that conflicting_items is a subset of items_before_origin
-        while let Some(item) = o {}
+        while let Some(item) = o {
+            if Some(&item) == target.right() {
+                break;
+            }
+            items_before_origin.insert(item.clone());
+            conflicting_items.insert(item.clone());
 
-        /*
-               // set the first conflicting item
-               let mut o = if let Some(left) = left {
-                   left.right
-               } else if let Some(sub) = &this.parent_sub {
-                   let mut o = parent_ref.map.get(sub).cloned();
-                   while let Some(item) = o.as_deref() {
-                       if item.left.is_some() {
-                           o = item.left.clone();
-                           continue;
-                       }
-                       break;
-                   }
-                   o.clone()
-               } else {
-                   parent_ref.start
-               };
+            let item = db.block_containing(item, true)?;
+            if target.origin_left() == item.origin_left() {
+                // case 1
+                let item_id = item.id();
+                if item_id.client < target.id().client {
+                    left = Some(item_id.clone());
+                    conflicting_items.clear();
+                } else if target.origin_right() == item.origin_right() {
+                    // `self` and `item` are conflicting and point to the same integration
+                    // points. The id decides which item comes first. Since `self` is to
+                    // the left of `item`, we can break here.
+                    break;
+                }
+            } else {
+                if let Some(origin_left) = item
+                    .origin_left()
+                    .and_then(|&id| db.block_containing(id, true).ok())
+                {
+                    if items_before_origin.contains(&origin_left.id()) {
+                        if !conflicting_items.contains(&origin_left.id()) {
+                            left = Some(origin_left.id().clone());
+                            conflicting_items.clear();
+                        }
+                    } else {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+                o = item.right().cloned();
+            }
 
-               let mut left = this.left.clone();
-               let mut conflicting_items = HashSet::new();
-               let mut items_before_origin = HashSet::new();
+            target.set_left(left.as_ref());
+        }
 
-               // Let c in conflicting_items, b in items_before_origin
-               // ***{origin}bbbb{this}{c,b}{c,b}{o}***
-               // Note that conflicting_items is a subset of items_before_origin
-               while let Some(item) = o {
-                   if Some(item) == this.right {
-                       break;
-                   }
-
-                   items_before_origin.insert(item);
-                   conflicting_items.insert(item);
-                   if this.origin == item.origin {
-                       // case 1
-                       if item.id.client < this.id.client {
-                           left = Some(item.clone());
-                           conflicting_items.clear();
-                       } else if this.right_origin == item.right_origin {
-                           // `self` and `item` are conflicting and point to the same integration
-                           // points. The id decides which item comes first. Since `self` is to
-                           // the left of `item`, we can break here.
-                           break;
-                       }
-                   } else {
-                       if let Some(origin_ptr) = item
-                           .origin
-                           .as_ref()
-                           .and_then(|id| store.blocks.get_item(id))
-                       {
-                           if items_before_origin.contains(&origin_ptr) {
-                               if !conflicting_items.contains(&origin_ptr) {
-                                   left = Some(item.clone());
-                                   conflicting_items.clear();
-                               }
-                           } else {
-                               break;
-                           }
-                       } else {
-                           break;
-                       }
-                   }
-                   o = item.right.clone();
-               }
-               this.left = left;
-        */
+        Ok(())
     }
 }

@@ -1,5 +1,6 @@
 use crate::block::{BlockHeader, ID};
 use crate::{ClientID, U64};
+use bitflags::bitflags;
 use std::borrow::Cow;
 use std::fmt::Display;
 use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes, KnownLayout, TryFromBytes};
@@ -94,7 +95,7 @@ impl NodeHeader {
     pub fn new(type_ref: u8) -> Self {
         Self {
             type_ref,
-            flags: NodeFlags(0),
+            flags: NodeFlags::default(),
             start: ID::new_zeroed(),
         }
     }
@@ -103,12 +104,22 @@ impl NodeHeader {
         NodeType::try_from(self.type_ref).unwrap_or(NodeType::Unknown)
     }
 
-    pub fn start(&self) -> ID {
-        self.start
+    pub fn start(&self) -> Option<&ID> {
+        if self.flags.contains(NodeFlags::HAS_START) {
+            Some(&self.start)
+        } else {
+            None
+        }
     }
 
-    pub fn set_start(&mut self, id: Option<&ID>) -> Option<ID> {
-        todo!()
+    pub fn set_start(&mut self, id: Option<&ID>) {
+        match id {
+            None => self.flags -= NodeFlags::HAS_START,
+            Some(id) => {
+                self.flags |= NodeFlags::HAS_START;
+                self.start = *id;
+            }
+        }
     }
 }
 
@@ -120,10 +131,14 @@ impl Display for NodeHeader {
 }
 
 #[repr(transparent)]
-#[derive(FromBytes, KnownLayout, Immutable, IntoBytes)]
+#[derive(FromBytes, KnownLayout, Immutable, IntoBytes, Default)]
 pub(crate) struct NodeFlags(u8);
 
-impl NodeFlags {}
+bitflags! {
+    impl NodeFlags : u8 {
+        const HAS_START = 0b0000_0001;
+    }
+}
 
 impl NodeID {
     pub fn from_root<S>(root: S) -> NodeID

@@ -20,7 +20,9 @@ use std::ops::{Deref, DerefMut};
 use zerocopy::{CastError, FromBytes, Immutable, IntoBytes, KnownLayout};
 
 #[repr(C)]
-#[derive(PartialEq, Eq, Copy, Clone, FromBytes, KnownLayout, Immutable, IntoBytes, Default)]
+#[derive(
+    PartialEq, Eq, Hash, Copy, Clone, FromBytes, KnownLayout, Immutable, IntoBytes, Default,
+)]
 pub struct ID {
     pub client: ClientID,
     pub clock: Clock,
@@ -93,6 +95,10 @@ impl BlockHeader {
         if let Some(origin_right) = origin_right {
             self.set_origin_right(*origin_right);
         }
+    }
+
+    pub fn flags(&self) -> BlockFlags {
+        self.flags
     }
 
     pub fn contains(&self, id: &ID) -> bool {
@@ -192,6 +198,7 @@ impl BlockHeader {
 
     #[inline]
     pub fn set_parent(&mut self, parent_id: NodeID) {
+        self.flags |= BlockFlags::HAS_PARENT;
         self.parent = parent_id;
     }
 
@@ -473,6 +480,7 @@ impl BlockBuilder {
         let name = node.as_str().unwrap_or_default();
         let mut header = BlockHeader::default();
         header.set_clock_len(1.into());
+        header.set_content_type(ContentType::Node);
         let mut body = BytesMut::with_capacity(BlockHeader::SIZE + NodeHeader::SIZE + name.len());
         body.extend_from_slice(header.as_bytes());
         body.extend_from_slice(NodeHeader::new(kind as u8).as_bytes());
@@ -708,7 +716,7 @@ impl BlockBuilder {
         }
 
         if context.detect_conflict(self) {
-            context.resolve_conflict(self);
+            context.resolve_conflict(self, db)?;
         }
 
         if self.entry_key().is_none() {
@@ -735,7 +743,7 @@ impl BlockBuilder {
             }
         };
 
-        // reconnect left/right
+        // reconnect left/right + update parent map/start if necessary
         if let Some(left) = &mut context.left {
             self.set_right(left.right());
             left.set_right(Some(self.id()));
@@ -753,7 +761,9 @@ impl BlockBuilder {
                 Some(right)
             } else {
                 // current block is new head of the list
-                parent_node.set_start(Some(self.id()))
+                let old = parent_node.start().cloned();
+                parent_node.set_start(Some(self.id()));
+                old
             };
             self.set_right(right.as_ref());
         }
@@ -869,7 +879,6 @@ impl BlockBuilder {
             _ => { /* do nothing */ }
         }
 
-        todo!()
         /*
         if let Some(mut parent_ref) = parent {
 
@@ -901,6 +910,24 @@ impl BlockBuilder {
             true
         }
          */
+
+        db.insert_block(self.as_ref())?;
+        if let Some(right) = context.right.as_mut() {
+            db.insert_block(right.as_ref())?;
+        }
+        if let Some(left) = context.left.as_mut() {
+            db.insert_block(left.as_ref())?;
+        }
+        if let Some(parent_block) = context.parent.as_mut() {
+            db.insert_block(parent_block.as_ref())?;
+        }
+
+        Ok(())
+    }
+
+    pub fn display(&self) -> DisplayBlock<'_> {
+        let (header, body) = BlockHeader::parse(&self.body).unwrap();
+        header.display(body)
     }
 }
 
@@ -981,13 +1008,13 @@ pub type ParseError<'a> = CastError<&'a [u8], BlockHeader>;
 pub type ParseMutError<'a> = CastError<&'a mut [u8], BlockHeader>;
 
 #[repr(transparent)]
-#[derive(PartialEq, Eq, FromBytes, IntoBytes, KnownLayout, Immutable, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, FromBytes, IntoBytes, KnownLayout, Immutable, Default)]
 pub struct BlockFlags(u8);
 
 bitflags! {
     impl BlockFlags : u8 {
-        /// Bit flag (1st bit) used for an item which should be kept - not used atm.
-        const KEEP = 0b0000_0001;
+        /// Only used at decoding phase.
+        const HAS_PARENT = 0b0000_0001;
         /// Bit flag (2nd bit) for an item, which contents are considered countable.
         const COUNTABLE = 0b0000_0010;
         /// Bit flag (3rd bit) for a tombstoned (deleted) item.
@@ -1047,6 +1074,7 @@ impl<'a> Display for DisplayBlock<'a> {
         if self.header.flags.contains(BlockFlags::ORIGIN_RIGHT) {
             write!(f, ", origin-r: {}", self.header.origin_right)?;
         }
+        write!(f, ",")?;
         let deleted = self.header.flags.contains(BlockFlags::DELETED);
         if deleted {
             write!(f, " ~~")?;

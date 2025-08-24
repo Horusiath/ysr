@@ -89,7 +89,8 @@ impl<'tx> BlockStore<'tx> for Database<'tx> {
 
     fn split_block(&self, id: ID) -> crate::Result<SplitResult> {
         let left = self.block_containing(id, false)?;
-        if left.contains(&id) {
+        let clock = left.id().clock;
+        if id.clock > clock && id.clock < clock + left.clock_len() {
             let offset = id.clock - left.id().clock;
             let mut left = BlockBuilder::from_block(&left);
             let right = left.splice(offset)?;

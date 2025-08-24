@@ -1,4 +1,6 @@
+use crate::content::BlockContent;
 use crate::node::NodeType;
+use crate::store::lmdb::BlockStore;
 use crate::types::Capability;
 use crate::{Mounted, Transaction};
 use std::fmt::{Display, Formatter};
@@ -23,7 +25,25 @@ impl<'tx, 'db> TextRef<&'tx Transaction<'db>> {
 
 impl<'tx, 'db> Display for TextRef<&'tx Transaction<'db>> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        todo!()
+        let Ok(BlockContent::Node(node)) = self.block.content() else {
+            return Err(std::fmt::Error);
+        };
+        let mut next = node.header().start().cloned();
+        let db = self.tx.db();
+        while let Some(id) = next {
+            let Ok(block) = db.block_containing(id, false) else {
+                return Err(std::fmt::Error);
+            };
+            if block.is_countable() && !block.is_deleted() {
+                let Ok(BlockContent::Text(chunk)) = block.content() else {
+                    return Err(std::fmt::Error);
+                };
+                write!(f, "{}", chunk)?;
+            }
+            next = block.right().cloned();
+        }
+
+        Ok(())
     }
 }
 

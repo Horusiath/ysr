@@ -1,4 +1,4 @@
-use crate::block::{Block, BlockBuilder, ID};
+use crate::block::{Block, BlockBuilder, BlockFlags, ID};
 use crate::block_reader::{BlockRange, BlockReader, Carrier};
 use crate::id_set::IDSet;
 use crate::integrate::IntegrationContext;
@@ -127,8 +127,8 @@ impl<'db> Transaction<'db> {
             let carrier = res?;
             match carrier {
                 Carrier::Block(mut block, parent_name) => {
-                    let id = block.id();
-                    if state.current_state.contains(id) {
+                    let id = *block.id();
+                    if state.current_state.contains(&id) {
                         let offset = state.current_state.get(&id.client) - id.clock;
                         if let Some(dep) = Self::missing(&block, &state.current_state) {
                             // current block is missing a dependency
@@ -154,15 +154,16 @@ impl<'db> Transaction<'db> {
                             }
                              */
                         } else if offset == 0 || offset < block.clock_len() {
-                            let last_id = block.last_id();
                             let mut context = IntegrationContext::create(
-                                &block,
+                                &mut block,
                                 parent_name.as_deref(),
                                 offset,
                                 &mut db,
                             )?;
+                            state
+                                .current_state
+                                .set_max(id.client, id.clock + block.clock_len());
                             block.integrate(&mut db, state, &mut context)?;
-                            state.current_state.set_max(last_id.client, last_id.clock);
                         }
                     } else {
                         // update from the same client is missing
@@ -326,12 +327,14 @@ impl<'db> Transaction<'db> {
             }
         }
 
-        let parent_id = block.parent();
-        if parent_id.is_nested() {
-            if parent_id.client != block.id().client
-                && parent_id.clock >= local_sv.get(&parent_id.client)
-            {
-                return Some(parent_id.client);
+        if block.flags().contains(BlockFlags::HAS_PARENT) {
+            let parent_id = block.parent();
+            if parent_id.is_nested() {
+                if parent_id.client != block.id().client
+                    && parent_id.clock >= local_sv.get(&parent_id.client)
+                {
+                    return Some(parent_id.client);
+                }
             }
         }
 

@@ -28,7 +28,7 @@ impl<'tx, 'db> ListRef<&'tx Transaction<'db>> {
         self.block.clock_len().get() as usize
     }
 
-    pub fn iter<T>(&self) -> Iter<T>
+    pub fn iter<T>(&self) -> Iter<'_, T>
     where
         T: DeserializeOwned,
     {
