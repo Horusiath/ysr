@@ -1,4 +1,5 @@
 use crate::lib0::Value;
+use bytes::Bytes;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
@@ -64,7 +65,7 @@ fn serialize_value() {
     roundtrip(&Value::Float(14.5));
     roundtrip(&Value::Int(123));
     roundtrip(&Value::String("hello".into()));
-    roundtrip(&Value::ByteArray(b"deadbeef".into()));
+    roundtrip(&Value::ByteArray(Bytes::copy_from_slice(b"deadbeef")));
     roundtrip(&Value::Array(vec![
         Value::Int(123),
         Value::String("hello".into()),

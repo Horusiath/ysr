@@ -70,7 +70,7 @@ mod test {
         let mut decoder = DecoderV1::from_slice(update);
         tx.apply_update(&mut decoder).unwrap();
 
-        let txt: TextRef<_> = txt.mount(&mut tx).unwrap();
+        let txt: TextRef<_> = txt.mount_mut(&mut tx).unwrap();
         let actual = txt.to_string();
         assert_eq!(actual, "210");
     }

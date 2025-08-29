@@ -14,7 +14,59 @@ pub enum Value {
     String(String),
     Object(HashMap<String, Value>),
     Array(Vec<Value>),
-    ByteArray(Vec<u8>),
+    ByteArray(Bytes),
+}
+
+impl Value {
+    pub fn is_undefined(&self) -> bool {
+        matches!(self, Value::Undefined)
+    }
+
+    pub fn is_null(&self) -> bool {
+        matches!(self, Value::Null)
+    }
+
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Value::String(value) => Some(value.as_str()),
+            _ => None,
+        }
+    }
+
+    pub fn as_string_mut(&mut self) -> Option<&mut String> {
+        match self {
+            Value::String(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub fn as_slice(&self) -> Option<&[Self]> {
+        match self {
+            Value::Array(value) => Some(value.as_ref()),
+            _ => None,
+        }
+    }
+
+    pub fn as_vec_mut(&mut self) -> Option<&mut Vec<Self>> {
+        match self {
+            Value::Array(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub fn as_object(&self) -> Option<&HashMap<String, Value>> {
+        match self {
+            Value::Object(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub fn as_object_mut(&mut self) -> Option<&mut HashMap<String, Value>> {
+        match self {
+            Value::Object(value) => Some(value),
+            _ => None,
+        }
+    }
 }
 
 impl Serialize for Value {
@@ -102,7 +154,7 @@ impl<'de> Deserialize<'de> for Value {
             where
                 E: Error,
             {
-                Ok(Value::ByteArray(v))
+                Ok(Value::from(v))
             }
 
             #[inline]
@@ -110,7 +162,7 @@ impl<'de> Deserialize<'de> for Value {
             where
                 E: Error,
             {
-                Ok(Value::ByteArray(v.into()))
+                Ok(Value::from(v))
             }
 
             #[inline]

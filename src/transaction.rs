@@ -2,14 +2,16 @@ use crate::block::{Block, BlockBuilder, BlockFlags, ID};
 use crate::block_reader::{BlockRange, BlockReader, Carrier};
 use crate::id_set::IDSet;
 use crate::integrate::IntegrationContext;
-use crate::node::{Node, NodeType};
+use crate::node::{Node, NodeID, NodeType};
 use crate::read::Decoder;
 use crate::store::lmdb::store::SplitResult;
 use crate::store::lmdb::BlockStore;
 use crate::write::WriteExt;
 use crate::{ClientID, StateVector};
-use bytes::BytesMut;
+use bitflags::bitflags;
+use bytes::{Bytes, BytesMut};
 use lmdb_rs_m::{Database, DbHandle};
+use std::collections::HashSet;
 use std::fmt::{Display, Formatter};
 use std::io::Write;
 use zerocopy::IntoBytes;
@@ -32,7 +34,11 @@ impl TransactionState {
         }
     }
 
-    fn precommit<'db>(&self, db: Database<'_>) -> crate::Result<()> {
+    fn precommit<'db>(
+        &self,
+        db: Database<'_>,
+        summary: Option<&mut CommitSummary>,
+    ) -> crate::Result<()> {
         todo!()
     }
 }
@@ -79,7 +85,13 @@ impl<'db> Transaction<'db> {
         self.db().state_vector()
     }
 
-    pub fn create_update<W: Write>(
+    pub fn create_update(&self, since: &StateVector) -> crate::Result<Vec<u8>> {
+        let mut buf = Vec::new();
+        self.create_update_with(since, &mut buf)?;
+        Ok(buf)
+    }
+
+    pub fn create_update_with<W: Write>(
         &self,
         since: &StateVector,
         writer: &mut W,
@@ -378,13 +390,59 @@ impl<'db> Transaction<'db> {
         }*/
     }
 
-    pub fn commit(mut self) -> crate::Result<()> {
+    pub fn commit(mut self, summary: Option<&mut CommitSummary>) -> crate::Result<()> {
         if let Some(state) = self.state.take() {
             // commit the transaction
-            state.precommit(self.db())?;
+            state.precommit(self.db(), summary)?;
             self.txn.commit()?;
         }
         Ok(())
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct CommitSummary {
+    flags: CommitFlags,
+    update: BytesMut,
+    changed_nodes: HashSet<NodeID>,
+}
+
+impl CommitSummary {
+    pub fn new(flags: CommitFlags) -> Self {
+        Self {
+            flags,
+            update: BytesMut::default(),
+            changed_nodes: HashSet::new(),
+        }
+    }
+
+    #[inline]
+    pub fn flags(&self) -> CommitFlags {
+        self.flags
+    }
+
+    pub fn clear(&mut self) {
+        self.update.clear();
+        self.changed_nodes.clear();
+    }
+}
+
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CommitFlags(u8);
+
+bitflags! {
+    impl CommitFlags : u8 {
+        const NONE = 0b0000_0000;
+        const UPDATE_V1 = 0b0000_0001;
+        const UPDATE_V2 = 0b0000_0010;
+        const OBSERVE_NODES = 0b0000_0100;
+    }
+}
+
+impl Default for CommitFlags {
+    fn default() -> Self {
+        CommitFlags::NONE
     }
 }
 

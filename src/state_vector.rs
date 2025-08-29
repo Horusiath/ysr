@@ -128,7 +128,7 @@ impl FromIterator<(ClientID, Clock)> for StateVector {
 }
 
 impl Decode for StateVector {
-    fn decode<D: Decoder>(decoder: &mut D) -> crate::Result<Self> {
+    fn decode_with<D: Decoder>(decoder: &mut D) -> crate::Result<Self> {
         let len = decoder.read_var::<u32>()? as usize;
         let mut sv = BTreeMap::new();
         let mut i = 0;
@@ -143,7 +143,7 @@ impl Decode for StateVector {
 }
 
 impl Encode for StateVector {
-    fn encode<E: Encoder>(&self, encoder: &mut E) -> crate::Result<()> {
+    fn encode_with<E: Encoder>(&self, encoder: &mut E) -> crate::Result<()> {
         encoder.write_var(self.len())?;
         for (&client, &clock) in self.iter() {
             encoder.write_var(client)?;
@@ -242,16 +242,16 @@ impl Snapshot {
 }
 
 impl Encode for Snapshot {
-    fn encode<E: Encoder>(&self, encoder: &mut E) -> crate::Result<()> {
-        self.delete_set.encode(encoder)?;
-        self.state_map.encode(encoder)
+    fn encode_with<E: Encoder>(&self, encoder: &mut E) -> crate::Result<()> {
+        self.delete_set.encode_with(encoder)?;
+        self.state_map.encode_with(encoder)
     }
 }
 
 impl Decode for Snapshot {
-    fn decode<D: Decoder>(decoder: &mut D) -> crate::Result<Self> {
-        let ds = IDSet::decode(decoder)?;
-        let sm = StateVector::decode(decoder)?;
+    fn decode_with<D: Decoder>(decoder: &mut D) -> crate::Result<Self> {
+        let ds = IDSet::decode_with(decoder)?;
+        let sm = StateVector::decode_with(decoder)?;
         Ok(Snapshot::new(sm, ds))
     }
 }

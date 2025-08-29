@@ -6,6 +6,7 @@ use std::str::Utf8Error;
 
 mod copy;
 mod de;
+mod macros;
 mod ser;
 #[cfg(test)]
 mod test;

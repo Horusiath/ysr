@@ -51,11 +51,17 @@ pub trait Encoder: Write {
 }
 
 pub trait Encode {
-    fn encode<E: Encoder>(&self, encoder: &mut E) -> crate::Result<()>;
+    fn encode(&self) -> crate::Result<Vec<u8>> {
+        let mut encoder = EncoderV1::new(Vec::new());
+        self.encode_with(&mut encoder)?;
+        Ok(encoder.writer)
+    }
+
+    fn encode_with<E: Encoder>(&self, encoder: &mut E) -> crate::Result<()>;
 }
 
 impl Encode for Range<Clock> {
-    fn encode<E: Encoder>(&self, encoder: &mut E) -> crate::Result<()> {
+    fn encode_with<E: Encoder>(&self, encoder: &mut E) -> crate::Result<()> {
         encoder.write_ds_clock(self.start)?;
         encoder.write_ds_len(self.end - self.start)?;
         Ok(())

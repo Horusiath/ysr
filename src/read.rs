@@ -1,6 +1,6 @@
 use crate::block::ID;
 use crate::varint::{Signed, SignedVarInt, VarInt};
-use crate::{lib0, ClientID, Clock, U64};
+use crate::{lib0, ClientID, Clock};
 use serde::de::DeserializeOwned;
 use std::fmt::{Debug, Display, Formatter};
 use std::io::{Cursor, Read, Write};
@@ -60,11 +60,16 @@ pub trait Decoder: Read {
 }
 
 pub trait Decode: Sized {
-    fn decode<D: Decoder>(decoder: &mut D) -> crate::Result<Self>;
+    fn decode_with<D: Decoder>(decoder: &mut D) -> crate::Result<Self>;
+
+    fn decode(data: &[u8]) -> crate::Result<Self> {
+        let mut decoder = crate::read::DecoderV1::from_slice(data);
+        Self::decode_with(&mut decoder)
+    }
 }
 
 impl Decode for Range<Clock> {
-    fn decode<D: Decoder>(decoder: &mut D) -> crate::Result<Self> {
+    fn decode_with<D: Decoder>(decoder: &mut D) -> crate::Result<Self> {
         let clock = decoder.read_ds_clock()?;
         let len = decoder.read_ds_len()?;
         Ok(clock..(clock + len))
@@ -152,7 +157,7 @@ impl<R: Read> DecoderV1<R> {
 impl<'a> DecoderV1<Cursor<&'a [u8]>> {
     pub fn from_slice<T>(slice: &'a T) -> Self
     where
-        T: AsRef<[u8]>,
+        T: AsRef<[u8]> + ?Sized,
     {
         DecoderV1::new(Cursor::new(slice.as_ref()))
     }

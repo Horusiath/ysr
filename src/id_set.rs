@@ -83,26 +83,26 @@ impl IDSet {
 }
 
 impl Encode for IDSet {
-    fn encode<E: Encoder>(&self, encoder: &mut E) -> crate::Result<()> {
+    fn encode_with<E: Encoder>(&self, encoder: &mut E) -> crate::Result<()> {
         encoder.write_var(self.0.len() as u32)?;
         for (&client_id, block) in self.0.iter() {
             encoder.reset_ds_cur_val();
             encoder.write_var(client_id)?;
-            block.encode(encoder)?;
+            block.encode_with(encoder)?;
         }
         Ok(())
     }
 }
 
 impl Decode for IDSet {
-    fn decode<D: Decoder>(decoder: &mut D) -> crate::Result<Self> {
+    fn decode_with<D: Decoder>(decoder: &mut D) -> crate::Result<Self> {
         let mut set = Self::default();
         let client_len: u32 = decoder.read_var()?;
         let mut i = 0;
         while i < client_len {
             decoder.reset_ds_cur_val();
             let client: ClientID = decoder.read_var()?;
-            let range = IDRange::decode(decoder)?;
+            let range = IDRange::decode_with(decoder)?;
             set.0.insert(client, range);
             i += 1;
         }
@@ -301,12 +301,12 @@ impl IDRange {
         match self {
             IDRange::Continuous(range) => {
                 encoder.write_var(1u32)?;
-                range.encode(encoder)
+                range.encode_with(encoder)
             }
             IDRange::Fragmented(ranges) => {
                 encoder.write_var(ranges.len() as u64)?;
                 for range in ranges.iter() {
-                    range.encode(encoder)?;
+                    range.encode_with(encoder)?;
                 }
                 Ok(())
             }
@@ -337,7 +337,7 @@ impl Default for IDRange {
 }
 
 impl Encode for IDRange {
-    fn encode<E: Encoder>(&self, encoder: &mut E) -> crate::Result<()> {
+    fn encode_with<E: Encoder>(&self, encoder: &mut E) -> crate::Result<()> {
         if self.is_squashed() {
             self.encode_raw(encoder)?;
         } else {
@@ -350,17 +350,17 @@ impl Encode for IDRange {
 }
 
 impl Decode for IDRange {
-    fn decode<D: Decoder>(decoder: &mut D) -> crate::Result<Self> {
+    fn decode_with<D: Decoder>(decoder: &mut D) -> crate::Result<Self> {
         match decoder.read_var::<u32>()? {
             1 => {
-                let range = Range::decode(decoder)?;
+                let range = Range::decode_with(decoder)?;
                 Ok(IDRange::Continuous(range))
             }
             len => {
                 let mut ranges = Vec::with_capacity(len as usize);
                 let mut i = 0;
                 while i < len {
-                    ranges.push(Range::decode(decoder)?);
+                    ranges.push(Range::decode_with(decoder)?);
                     i += 1;
                 }
                 Ok(IDRange::Fragmented(ranges))

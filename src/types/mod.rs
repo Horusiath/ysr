@@ -3,7 +3,7 @@ use crate::content::{BlockContent, ContentNode};
 use crate::node::{Node, NodeHeader, NodeID, NodeType};
 use crate::store::lmdb::BlockStore;
 use crate::Transaction;
-use std::borrow::{BorrowMut, Cow};
+use std::borrow::{Borrow, BorrowMut, Cow};
 use std::marker::PhantomData;
 
 pub mod list;
@@ -47,14 +47,23 @@ impl<Cap> Unmounted<Cap>
 where
     Cap: Capability,
 {
-    pub fn mount<'db, Txn>(self, mut tx: Txn) -> crate::Result<Mounted<Cap, Txn>>
+    pub fn mount_mut<'db, Txn>(&self, mut tx: Txn) -> crate::Result<Mounted<Cap, Txn>>
     where
         Txn: BorrowMut<Transaction<'db>>,
     {
         let borrowed = tx.borrow_mut();
         let block = borrowed
             .db()
-            .get_or_insert_node(self.node, Cap::node_type())?;
+            .get_or_insert_node(self.node.clone(), Cap::node_type())?;
+        Ok(Mounted::new(block, tx))
+    }
+
+    pub fn mount<'db, Txn>(&self, tx: Txn) -> crate::Result<Mounted<Cap, Txn>>
+    where
+        Txn: Borrow<Transaction<'db>>,
+    {
+        let borrowed = tx.borrow();
+        let block: BlockBuilder = borrowed.db().block_containing(self.node_id(), true)?.into();
         Ok(Mounted::new(block, tx))
     }
 }
