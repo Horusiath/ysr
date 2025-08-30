@@ -13,6 +13,7 @@ use crate::{Error, Result};
 use bitflags::bitflags;
 use bytes::BytesMut;
 use lmdb_rs_m::Database;
+use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::fmt::{Debug, Display, Formatter};
 use std::io::Write;

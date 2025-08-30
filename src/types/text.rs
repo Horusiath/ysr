@@ -1,8 +1,11 @@
 use crate::content::BlockContent;
+use crate::lib0::Value;
 use crate::node::NodeType;
 use crate::store::lmdb::BlockStore;
 use crate::types::Capability;
-use crate::{Mounted, Transaction};
+use crate::{In, Mounted, Out, Transaction};
+use serde::Serialize;
+use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 use std::ops::{Deref, RangeBounds};
 
@@ -20,6 +23,10 @@ impl Capability for Text {
 impl<'tx, 'db> TextRef<&'tx Transaction<'db>> {
     pub fn len(&self) -> usize {
         self.block.clock_len().get() as usize
+    }
+
+    pub fn chunks(&self) -> impl Iterator<Item = crate::Result<(Value, Option<Box<Attrs>>)>> {
+        todo!()
     }
 }
 
@@ -55,6 +62,39 @@ impl<'tx, 'db> TextRef<&'tx mut Transaction<'db>> {
         todo!()
     }
 
+    pub fn insert_with<S1, S2, A, V>(
+        &mut self,
+        index: usize,
+        chunk: S1,
+        attrs: A,
+    ) -> crate::Result<()>
+    where
+        S1: AsRef<str>,
+        S2: AsRef<str>,
+        V: Serialize,
+        A: IntoIterator<Item = (S2, V)>,
+    {
+        todo!()
+    }
+
+    pub fn insert_embed<V>(&mut self, index: usize, value: V) -> crate::Result<()> {
+        todo!()
+    }
+
+    pub fn insert_embed_with<S, A, V1, V2>(
+        &mut self,
+        index: usize,
+        chunk: S,
+        attrs: A,
+    ) -> crate::Result<()>
+    where
+        S: AsRef<str>,
+        V2: Serialize,
+        A: IntoIterator<Item = (S, V2)>,
+    {
+        todo!()
+    }
+
     pub fn push<S>(&mut self, chunk: S) -> crate::Result<()>
     where
         S: AsRef<str>,
@@ -65,6 +105,22 @@ impl<'tx, 'db> TextRef<&'tx mut Transaction<'db>> {
     pub fn remove_range<R>(&mut self, range: R) -> crate::Result<()>
     where
         R: RangeBounds<usize>,
+    {
+        todo!()
+    }
+
+    pub fn format<A, S, V>(&mut self, start: usize, end: usize, attrs: A) -> crate::Result<()>
+    where
+        S: AsRef<str>,
+        V: Serialize,
+        A: IntoIterator<Item = (S, V)>,
+    {
+        todo!()
+    }
+
+    pub fn apply_delta<I>(&mut self, delta: I) -> crate::Result<()>
+    where
+        I: IntoIterator<Item = Delta<In>>,
     {
         todo!()
     }
@@ -80,12 +136,63 @@ impl<'tx, 'db> Deref for TextRef<&'tx mut Transaction<'db>> {
     }
 }
 
+pub type Attrs = BTreeMap<String, Value>;
+
+/// A single change done over a text-like types: [Text] or [XmlText].
+#[derive(Debug, Clone, PartialEq)]
+pub enum Delta<T = Out> {
+    /// Determines a change that resulted in insertion of a piece of text, which optionally could
+    /// have been formatted with provided set of attributes.
+    Inserted(T, Option<Box<Attrs>>),
+
+    /// Determines a change that resulted in removing a consecutive range of characters.
+    Deleted(u32),
+
+    /// Determines a number of consecutive unchanged characters. Used to recognize non-edited spaces
+    /// between [Delta::Inserted] and/or [Delta::Deleted] chunks. Can contain an optional set of
+    /// attributes, which have been used to format an existing piece of text.
+    Retain(u32, Option<Box<Attrs>>),
+}
+
+impl<T> Delta<T> {
+    pub fn map<U, F>(self, f: F) -> Delta<U>
+    where
+        F: FnOnce(T) -> U,
+    {
+        match self {
+            Delta::Inserted(value, attrs) => Delta::Inserted(f(value), attrs),
+            Delta::Deleted(len) => Delta::Deleted(len),
+            Delta::Retain(len, attrs) => Delta::Retain(len, attrs),
+        }
+    }
+}
+
+impl Delta<In> {
+    pub fn retain(len: u32) -> Self {
+        Delta::Retain(len, None)
+    }
+
+    pub fn insert<T: Into<In>>(value: T) -> Self {
+        Delta::Inserted(value.into(), None)
+    }
+
+    pub fn insert_with<T: Into<In>>(value: T, attrs: Attrs) -> Self {
+        Delta::Inserted(value.into(), Some(Box::new(attrs)))
+    }
+
+    pub fn delete(len: u32) -> Self {
+        Delta::Deleted(len)
+    }
+}
+
 #[cfg(test)]
 mod test {
+    use crate::lib0::Value;
     use crate::read::{Decode, DecoderV1};
-    use crate::test_util::multi_doc;
+    use crate::test_util::{multi_doc, sync};
+    use crate::types::text::{Attrs, Delta};
     use crate::write::Encode;
-    use crate::{lib0, StateVector, Text, Unmounted};
+    use crate::{lib0, ListPrelim, MapPrelim, StateVector, Text, Unmounted};
 
     #[test]
     fn insert_empty_string() {
@@ -558,7 +665,7 @@ mod test {
         // step 1
         {
             let mut txn = d1.transact_mut();
-            txt1.insert_with_attributes(&mut txn, 0, "abc", a.clone());
+            txt1.insert_with(0, "abc", a.clone()).unwrap();
             let update = txn.encode_update_v1();
             drop(txn);
 
@@ -567,7 +674,7 @@ mod test {
                 Some(Box::new(a.clone())),
             )]));
 
-            assert_eq!(txt1.get_string(&d1.transact()), "abc".to_string());
+            assert_eq!(txt1.to_string(), "abc".to_string());
             assert_eq!(
                 txt1.diff(&d1.transact(), YChange::identity),
                 vec![Diff::new("abc".into(), Some(Box::new(a.clone())))]
@@ -611,7 +718,7 @@ mod test {
         // step 3
         {
             let mut txn = d1.transact_mut();
-            txt1.remove_range(&mut txn, 1, 1);
+            txt1.remove_range(1..2).unwrap();
             let update = txn.encode_update_v1();
             drop(txn);
 
@@ -636,7 +743,7 @@ mod test {
         // step 4
         {
             let mut txn = d1.transact_mut();
-            txt1.insert_with_attributes(&mut txn, 0, "z", a.clone());
+            txt1.insert_with(&mut txn, 0, "z", a.clone());
             let update = txn.encode_update_v1();
             drop(txn);
 
@@ -702,7 +809,7 @@ mod test {
                 Delta::Retain(1, Some(Box::new(b))),
             ]));
 
-            assert_eq!(txt1.get_string(&d1.transact()), "yzb".to_string());
+            assert_eq!(txt1.to_string(), "yzb");
             assert_eq!(
                 txt1.diff(&mut d1.transact_mut(), YChange::identity),
                 vec![
@@ -724,8 +831,11 @@ mod test {
 
     #[test]
     fn embed_with_attributes() {
-        let mut d1 = Doc::with_client_id(1);
-        let txt1 = d1.get_or_insert_text("text");
+        let txt: Unmounted<Text> = Unmounted::root("type");
+
+        let (d1, _) = multi_doc(1);
+        let mut t1 = d1.transact_mut("test").unwrap();
+        let mut txt1 = txt.mount_mut(&mut t1).unwrap();
 
         let delta1 = Arc::new(ArcSwapOption::default());
         let delta_clone = delta1.clone();
@@ -740,7 +850,7 @@ mod test {
 
         let (update_v1, update_v2) = {
             let mut txn = d1.transact_mut();
-            txt1.insert_with_attributes(&mut txn, 0, "ab", a1.clone());
+            txt1.insert_with(&mut txn, 0, "ab", a1.clone());
 
             let a2: Attrs = HashMap::from([("width".into(), Any::Number(100.0))]);
 
@@ -765,8 +875,8 @@ mod test {
             let mut txn = d1.transact_mut();
             assert_eq!(txt1.diff(&mut txn, YChange::identity), expected);
 
-            let update_v1 = txn.encode_state_as_update_v1(&StateVector::default());
-            let update_v2 = txn.encode_state_as_update_v2(&StateVector::default());
+            let update_v1 = txn.create_update(&StateVector::default()).unwrap();
+            let update_v2 = txn.create_update(&StateVector::default()).unwrap();
             (update_v1, update_v2)
         };
 
@@ -804,8 +914,12 @@ mod test {
 
     #[test]
     fn issue_101() {
-        let mut d1 = Doc::with_client_id(1);
-        let txt1 = d1.get_or_insert_text("text");
+        let txt: Unmounted<Text> = Unmounted::root("type");
+
+        let (d1, _) = multi_doc(1);
+        let mut t1 = d1.transact_mut("test").unwrap();
+        let mut txt1 = txt.mount_mut(&mut t1).unwrap();
+
         let delta = Arc::new(ArcSwapOption::default());
         let delta_copy = delta.clone();
 
@@ -878,13 +992,19 @@ mod test {
 
     #[test]
     fn text_diff_adjacent() {
-        let mut doc = Doc::with_client_id(1);
-        let txt = doc.get_or_insert_text("text");
-        let mut txn = doc.transact_mut();
-        let attrs1 = Attrs::from([("a".into(), "a".into())]);
-        txt.insert_with_attributes(&mut txn, 0, "abc", attrs1.clone());
-        let attrs2 = Attrs::from([("a".into(), "a".into()), ("b".into(), "b".into())]);
-        txt.insert_with_attributes(&mut txn, 3, "def", attrs2.clone());
+        let txt: Unmounted<Text> = Unmounted::root("text");
+
+        let (mdoc, _) = multi_doc(1);
+        let mut txn = mdoc.transact_mut("test").unwrap();
+        let mut txt = txt.mount_mut(&mut txn).unwrap();
+
+        let attrs1 = [("a".to_string(), Value::from("a"))];
+        txt.insert_with(0, "abc", attrs1.clone()).unwrap();
+        let attrs2 = [
+            ("a".to_string(), Value::from("a")),
+            ("b".into(), "b".into()),
+        ];
+        txt.insert_with(3, "def", attrs2.clone()).unwrap();
 
         let diff = txt.diff(&mut txn, YChange::identity);
         let expected = vec![
@@ -892,193 +1012,242 @@ mod test {
             Diff::new("def".into(), Some(Box::new(attrs2))),
         ];
         assert_eq!(diff, expected);
+
+        txn.commit(None).unwrap();
     }
 
     #[test]
     fn text_remove_4_byte_range() {
-        let mut d1 = Doc::new();
-        let txt = d1.get_or_insert_text("test");
+        let txt: Unmounted<Text> = Unmounted::root("text");
 
-        txt.insert(&mut d1.transact_mut(), 0, "😭😊");
+        let (d1, _) = multi_doc(1);
+        let (d2, _) = multi_doc(2);
 
-        let mut d2 = Doc::new();
-        exchange_updates([&mut d1, &mut d2]);
+        let mut t1 = d1.transact_mut("test").unwrap();
+        let mut t2 = d2.transact_mut("test").unwrap();
 
-        txt.remove_range(&mut d1.transact_mut(), 0, "😭".len() as u32);
-        assert_eq!(txt.get_string(&d1.transact()).as_str(), "😊");
+        let mut txt1 = txt.mount_mut(&mut t1).unwrap();
 
-        exchange_updates([&mut d1, &mut d2]);
-        let txt = d2.get_or_insert_text("test");
-        assert_eq!(txt.get_string(&d2.transact()).as_str(), "😊");
+        txt1.insert(0, "😭😊").unwrap();
+
+        sync([&mut t1, &mut t2]);
+
+        let mut txt1 = txt.mount_mut(&mut t1).unwrap();
+        txt1.remove_range(0.."😭".len()).unwrap();
+        assert_eq!(txt1.to_string(), "😊");
+
+        sync([&mut t1, &mut t2]);
+        let mut txt2 = txt.mount_mut(&mut t2).unwrap();
+        assert_eq!(txt2.to_string(), "😊");
+
+        t1.commit(None).unwrap();
+        t2.commit(None).unwrap();
     }
 
     #[test]
     fn text_remove_3_byte_range() {
-        let mut d1 = Doc::new();
-        let txt = d1.get_or_insert_text("test");
+        let txt: Unmounted<Text> = Unmounted::root("text");
 
-        txt.insert(&mut d1.transact_mut(), 0, "⏰⏳");
+        let (d1, _) = multi_doc(1);
+        let (d2, _) = multi_doc(2);
 
-        let mut d2 = Doc::new();
-        exchange_updates([&mut d1, &mut d2]);
+        let mut t1 = d1.transact_mut("test").unwrap();
+        let mut t2 = d2.transact_mut("test").unwrap();
 
-        txt.remove_range(&mut d1.transact_mut(), 0, "⏰".len() as u32);
-        assert_eq!(txt.get_string(&d1.transact()).as_str(), "⏳");
+        let mut txt1 = txt.mount_mut(&mut t1).unwrap();
+        txt1.insert(0, "⏰⏳").unwrap();
 
-        exchange_updates([&mut d1, &mut d2]);
-        let txt = d2.get_or_insert_text("test");
-        assert_eq!(txt.get_string(&d2.transact()).as_str(), "⏳");
+        sync([&mut t1, &mut t2]);
+
+        let mut txt1 = txt.mount_mut(&mut t1).unwrap();
+        txt1.remove_range(0.."⏰".len()).unwrap();
+        assert_eq!(txt1.to_string(), "⏳");
+
+        sync([&mut t1, &mut t2]);
+        let txt2 = txt.mount(&t1).unwrap();
+        assert_eq!(txt2.to_string(), "⏳");
+
+        t1.commit(None).unwrap();
+        t2.commit(None).unwrap();
     }
+
     #[test]
     fn delete_4_byte_character_from_middle() {
-        let mut doc = Doc::new();
-        let txt = doc.get_or_insert_text("test");
-        let mut txn = doc.transact_mut();
+        let txt: Unmounted<Text> = Unmounted::root("text");
 
-        txt.insert(&mut txn, 0, "😊😭");
+        let (mdoc, _) = multi_doc(1);
+        let mut txn = mdoc.transact_mut("test").unwrap();
+        let mut txt = txt.mount_mut(&mut txn).unwrap();
+
+        txt.insert(0, "😊😭").unwrap();
         // uncomment the following line will pass the test
         // txt.format(&mut txn, 0, "😊".len() as u32, HashMap::new());
-        txt.remove_range(&mut txn, "😊".len() as u32, "😭".len() as u32);
+        let start = "😊".len();
+        let end = start + "😭".len();
+        txt.remove_range(start..end).unwrap();
 
-        assert_eq!(txt.get_string(&txn).as_str(), "😊");
+        assert_eq!(txt.to_string(), "😊");
+
+        txn.commit(None).unwrap();
     }
 
     #[test]
     fn delete_3_byte_character_from_middle_1() {
-        let mut doc = Doc::new();
-        let txt = doc.get_or_insert_text("test");
-        let mut txn = doc.transact_mut();
+        let txt: Unmounted<Text> = Unmounted::root("text");
 
-        txt.insert(&mut txn, 0, "⏰⏳");
+        let (mdoc, _) = multi_doc(1);
+        let mut txn = mdoc.transact_mut("test").unwrap();
+        let mut txt = txt.mount_mut(&mut txn).unwrap();
+
+        txt.insert(0, "⏰⏳").unwrap();
         // uncomment the following line will pass the test
         // txt.format(&mut txn, 0, "⏰".len() as u32, HashMap::new());
-        txt.remove_range(&mut txn, "⏰".len() as u32, "⏳".len() as u32);
+        let start = "⏰".len();
+        let end = start + "⏳".len();
+        txt.remove_range(start..end).unwrap();
 
-        assert_eq!(txt.get_string(&txn).as_str(), "⏰");
+        assert_eq!(txt.to_string(), "⏰");
+
+        txn.commit(None).unwrap();
     }
 
     #[test]
     fn delete_3_byte_character_from_middle_2() {
-        let mut doc = Doc::new();
-        let txt = doc.get_or_insert_text("test");
-        let mut txn = doc.transact_mut();
+        let txt: Unmounted<Text> = Unmounted::root("text");
 
-        txt.insert(&mut txn, 0, "👯🙇‍♀️🙇‍♀️⏰👩‍❤️‍💋‍👨");
+        let (mdoc, _) = multi_doc(1);
+        let mut txn = mdoc.transact_mut("test").unwrap();
+        let mut txt = txt.mount_mut(&mut txn).unwrap();
 
-        txt.format(
-            &mut txn,
-            "👯".len() as u32,
-            "🙇‍♀️🙇‍♀️".len() as u32,
-            HashMap::new(),
-        );
-        txt.remove_range(&mut txn, "👯🙇‍♀️🙇‍♀️".len() as u32, "⏰".len() as u32); // will delete ⏰ and 👩‍❤️‍💋‍👨
+        txt.insert(0, "👯🙇‍♀️🙇‍♀️⏰👩‍❤️‍💋‍👨").unwrap();
 
-        assert_eq!(txt.get_string(&txn).as_str(), "👯🙇‍♀️🙇‍♀️👩‍❤️‍💋‍👨");
+        let start = "👯".len();
+        let end = start + "🙇‍♀️🙇‍♀️".len();
+        txt.format(start, end, []).unwrap();
+        let start = "👯🙇‍♀️🙇‍♀️".len();
+        let end = start + "⏰".len();
+        txt.remove_range(start..end).unwrap(); // will delete ⏰ and 👩‍❤️‍💋‍👨
+
+        assert_eq!(txt.to_string(), "👯🙇‍♀️🙇‍♀️👩‍❤️‍💋‍👨");
+
+        txn.commit(None).unwrap();
     }
 
     #[test]
     fn delete_3_byte_character_from_middle_after_insert_and_format() {
-        let mut doc = Doc::new();
-        let txt = doc.get_or_insert_text("test");
-        let mut txn = doc.transact_mut();
+        let txt: Unmounted<Text> = Unmounted::root("text");
 
-        txt.insert(&mut txn, 0, "🙇‍♀️🙇‍♀️⏰👩‍❤️‍💋‍👨");
-        txt.insert(&mut txn, 0, "👯");
-        txt.format(
-            &mut txn,
-            "👯".len() as u32,
-            "🙇‍♀️🙇‍♀️".len() as u32,
-            HashMap::new(),
-        );
+        let (mdoc, _) = multi_doc(1);
+        let mut txn = mdoc.transact_mut("test").unwrap();
+        let mut txt = txt.mount_mut(&mut txn).unwrap();
+
+        txt.insert(0, "🙇‍♀️🙇‍♀️⏰👩‍❤️‍💋‍👨").unwrap();
+        txt.insert(0, "👯").unwrap();
+        let start = "👯".len();
+        let end = start + "🙇‍♀️🙇‍♀️".len();
+        txt.format(start, end, []).unwrap();
 
         // will delete ⏰ and 👩‍❤️‍💋‍👨
-        txt.remove_range(&mut txn, "👯🙇‍♀️🙇‍♀️".len() as u32, "⏰".len() as u32); // will delete ⏰ and 👩‍❤️‍💋‍👨
+        let start = "👯🙇‍♀️🙇‍♀️".len();
+        let end = start + "⏰".len();
+        txt.remove_range(start..end).unwrap(); // will delete ⏰ and 👩‍❤️‍💋‍👨
 
-        assert_eq!(&txt.get_string(&txn), "👯🙇‍♀️🙇‍♀️👩‍❤️‍💋‍👨");
+        assert_eq!(&txt.to_string(), "👯🙇‍♀️🙇‍♀️👩‍❤️‍💋‍👨");
+
+        txn.commit(None).unwrap();
     }
 
     #[test]
     fn delete_multi_byte_character_from_middle_after_insert_and_format() {
-        let mut doc = Doc::with_client_id(1);
-        let txt = doc.get_or_insert_text("test");
-        let mut txn = doc.transact_mut();
+        let txt: Unmounted<Text> = Unmounted::root("text");
 
-        txt.insert(&mut txn, 0, "❤️❤️🙇‍♀️🙇‍♀️⏰👩‍❤️‍💋‍👨👩‍❤️‍💋‍👨");
-        txt.insert(&mut txn, 0, "👯");
-        txt.format(
-            &mut txn,
-            "👯".len() as u32,
-            "❤️❤️🙇‍♀️🙇‍♀️⏰".len() as u32,
-            HashMap::new(),
-        );
-        txt.insert(&mut txn, "👯❤️❤️🙇‍♀️🙇‍♀️⏰".len() as u32, "⏰");
-        txt.format(
-            &mut txn,
-            "👯❤️❤️🙇‍♀️🙇‍♀️⏰⏰".len() as u32,
-            "👩‍❤️‍💋‍👨".len() as u32,
-            HashMap::new(),
-        );
-        txt.remove_range(&mut txn, "👯❤️❤️🙇‍♀️🙇‍♀️⏰⏰👩‍❤️‍💋‍👩".len() as u32, "👩‍❤️‍💋‍👨".len() as u32);
-        assert_eq!(txt.get_string(&txn).as_str(), "👯❤️❤️🙇‍♀️🙇‍♀️⏰⏰👩‍❤️‍💋‍👨");
+        let (mdoc, _) = multi_doc(1);
+        let mut txn = mdoc.transact_mut("test").unwrap();
+        let mut txt = txt.mount_mut(&mut txn).unwrap();
+
+        txt.insert(0, "❤️❤️🙇‍♀️🙇‍♀️⏰👩‍❤️‍💋‍👨👩‍❤️‍💋‍👨").unwrap();
+        txt.insert(0, "👯").unwrap();
+        let start = "👯".len();
+        let end = start + "❤️❤️🙇‍♀️🙇‍♀️⏰".len();
+        txt.format(start, end, Attrs::new()).unwrap();
+        txt.insert("👯❤️❤️🙇‍♀️🙇‍♀️⏰".len(), "⏰").unwrap();
+        let start = "👯❤️❤️🙇‍♀️🙇‍♀️⏰⏰".len();
+        let end = start + "👩‍❤️‍💋‍👨".len();
+        txt.format(start, end, Attrs::new()).unwrap();
+        let start = "👯❤️❤️🙇‍♀️🙇‍♀️⏰⏰👩‍❤️‍💋‍👩".len();
+        let end = start + "👩‍❤️‍💋‍👨".len();
+        txt.remove_range(start..end).unwrap();
+        assert_eq!(txt.to_string(), "👯❤️❤️🙇‍♀️🙇‍♀️⏰⏰👩‍❤️‍💋‍👨");
+
+        txn.commit(None).unwrap();
     }
 
     #[test]
     fn insert_string_with_no_attribute() {
-        let mut doc = Doc::new();
-        let txt = doc.get_or_insert_text("test");
-        let mut txn = doc.transact_mut();
+        let txt: Unmounted<Text> = Unmounted::root("text");
+
+        let (mdoc, _) = multi_doc(1);
+        let mut txn = mdoc.transact_mut("test").unwrap();
+        let mut txt = txt.mount_mut(&mut txn).unwrap();
 
         let attrs = Attrs::from([("a".into(), "a".into())]);
-        txt.insert_with_attributes(&mut txn, 0, "ac", attrs.clone());
-        txt.insert_with_attributes(&mut txn, 1, "b", Attrs::new());
+        txt.insert_with(0, "ac", attrs.clone()).unwrap();
+        txt.insert_with(1, "b", Attrs::new()).unwrap();
 
-        let expect = vec![
-            Diff::new("a".into(), Some(Box::new(attrs.clone()))),
-            Diff::new("b".into(), None),
-            Diff::new("c".into(), Some(Box::new(attrs.clone()))),
+        let expect: Vec<(Value, Option<Box<Attrs>>)> = vec![
+            ("a".into(), Some(Box::new(attrs.clone()))),
+            ("b".into(), None),
+            ("c".into(), Some(Box::new(attrs.clone()))),
         ];
 
-        assert!(txt.diff(&mut txn, YChange::identity).eq(&expect))
+        let actual: Vec<_> = txt.chunks().map(Result::unwrap).collect();
+        assert_eq!(actual, expect);
+        txn.commit(None).unwrap();
     }
 
     #[test]
     fn insert_empty_string_with_attributes() {
-        let mut doc = Doc::new();
-        let txt = doc.get_or_insert_text("test");
-        let mut txn = doc.transact_mut();
+        let root: Unmounted<Text> = Unmounted::root("text");
 
-        let attrs = Attrs::from([("a".into(), "a".into())]);
-        txt.insert(&mut txn, 0, "abc");
-        txt.insert(&mut txn, 1, ""); // nothing changes
-        txt.insert_with_attributes(&mut txn, 1, "", attrs); // nothing changes
+        let (mdoc, _) = multi_doc(1);
+        let mut txn = mdoc.transact_mut("test").unwrap();
+        let mut txt = root.mount_mut(&mut txn).unwrap();
 
-        assert_eq!(txt.get_string(&txn).as_str(), "abc");
+        let attrs = [("a".to_string(), Value::from("a"))];
+        txt.insert(0, "abc").unwrap();
+        txt.insert(1, "").unwrap(); // nothing changes
+        txt.insert_with(1, "", attrs).unwrap(); // nothing changes
 
-        let bin = txn.encode_state_as_update_v1(&StateVector::default());
+        assert_eq!(txt.to_string(), "abc");
 
-        let mut doc = Doc::new();
-        let txt = doc.get_or_insert_text("test");
-        let mut txn = doc.transact_mut();
-        let update = Update::decode_slice(bin.as_slice()).unwrap();
-        txn.apply_update(update).unwrap();
+        let bin = txn.create_update(&StateVector::default()).unwrap();
 
-        assert_eq!(txt.get_string(&txn).as_str(), "abc");
+        txn.commit(None).unwrap();
+
+        let (mdoc, _) = multi_doc(1);
+        let mut txn = mdoc.transact_mut("test").unwrap();
+
+        txn.apply_update(&mut DecoderV1::from_slice(&bin)).unwrap();
+
+        let txt = root.mount(&txn).unwrap();
+        assert_eq!(txt.to_string(), "abc");
+
+        txn.commit(None).unwrap();
     }
 
     #[test]
     fn snapshots() {
-        let mut doc = Doc::with_client_id(1);
-        let text = doc.get_or_insert_text("text");
-        text.insert(&mut doc.transact_mut(), 0, "hello");
+        let txt: Unmounted<Text> = Unmounted::root("text");
+
+        let (mdoc, _) = multi_doc(1);
+        let mut txn = mdoc.transact_mut("test").unwrap();
+        let mut text = txt.mount_mut(&mut txn).unwrap();
+
+        text.insert(0, "hello").unwrap();
         let prev = doc.transact_mut().snapshot();
         text.insert(&mut doc.transact_mut(), 5, " world");
         let next = doc.transact_mut().snapshot();
-        let diff = text.diff_range(
-            &mut doc.transact_mut(),
-            Some(&next),
-            Some(&prev),
-            YChange::identity,
-        );
+        let diff = text.diff_range(Some(&next), Some(&prev), YChange::identity);
 
         assert_eq!(
             diff,
@@ -1090,26 +1259,29 @@ mod test {
                     Some(YChange::new(ChangeKind::Added, ID::new(1, 5)))
                 )
             ]
-        )
+        );
+        txn.commit(None).unwrap();
     }
 
     #[test]
     fn diff_with_embedded_items() {
-        let mut doc = Doc::new();
-        let text = doc.get_or_insert_text("article");
-        let mut txn = doc.transact_mut();
+        let txt: Unmounted<Text> = Unmounted::root("article");
 
-        let bold = Attrs::from([("b".into(), true.into())]);
-        let italic = Attrs::from([("i".into(), true.into())]);
+        let (mdoc, _) = multi_doc(1);
+        let mut txn = mdoc.transact_mut("test").unwrap();
+        let mut text = txt.mount_mut(&mut txn).unwrap();
 
-        text.insert_with_attributes(&mut txn, 0, "hello world", italic.clone()); // "<i>hello world</i>"
-        text.format(&mut txn, 6, 5, bold.clone()); // "<i>hello <b>world</b></i>"
+        let bold = [("b", true)];
+        let italic = [("i", true)];
+
+        text.insert_with(0, "hello world", italic.clone()).unwrap(); // "<i>hello world</i>"
+        text.format(6, 11, bold.clone()).unwrap(); // "<i>hello <b>world</b></i>"
         let image = vec![0, 0, 0, 0];
-        text.insert_embed(&mut txn, 5, image.clone()); // insert binary after "hello"
-        let array = text.insert_embed(&mut txn, 5, ArrayPrelim::default()); // insert array ref after "hello"
+        text.insert_embed(5, image.clone()).unwrap(); // insert binary after "hello"
+        let array = text.insert_embed(5, ListPrelim::default()).unwrap(); // insert array ref after "hello"
 
         let italic_and_bold = Attrs::from([("b".into(), true.into()), ("i".into(), true.into())]);
-        let chunks = text.diff(&txn, YChange::identity);
+        let chunks = text.chunks();
         assert_eq!(
             chunks,
             vec![
@@ -1122,102 +1294,67 @@ mod test {
         );
     }
 
-    #[cfg(feature = "sync")]
-    #[test]
-    fn multi_threading() {
-        use std::sync::{Arc, RwLock};
-        use std::thread::{sleep, spawn};
-        use std::time::Duration;
-
-        let doc = Arc::new(RwLock::new(Doc::with_client_id(1)));
-
-        let d2 = doc.clone();
-        let h2 = spawn(move || {
-            for _ in 0..10 {
-                let millis = fastrand::u64(1..20);
-                sleep(Duration::from_millis(millis));
-
-                let mut doc = d2.write().unwrap();
-                let txt = doc.get_or_insert_text("test");
-                let mut txn = doc.transact_mut();
-                txt.push(&mut txn, "a");
-            }
-        });
-
-        let d3 = doc.clone();
-        let h3 = spawn(move || {
-            for _ in 0..10 {
-                let millis = fastrand::u64(1..20);
-                sleep(Duration::from_millis(millis));
-
-                let mut doc = d3.write().unwrap();
-                let txt = doc.get_or_insert_text("test");
-                let mut txn = doc.transact_mut();
-                txt.push(&mut txn, "b");
-            }
-        });
-
-        h3.join().unwrap();
-        h2.join().unwrap();
-
-        let doc = doc.read().unwrap();
-        let txt: crate::TextRef = doc.get("test").unwrap();
-        let len = txt.len(&doc.transact());
-        assert_eq!(len, 20);
-    }
-
     #[test]
     fn multiline_format() {
-        let mut doc = Doc::with_client_id(1);
-        let mut txn = doc.transact_mut();
-        let txt = txn.get_or_insert_text("text");
-        let bold: Option<Box<Attrs>> = Some(Box::new(Attrs::from([("bold".into(), true.into())])));
-        txt.insert(&mut txn, 0, "Test\nMulti-line\nFormatting");
-        txt.apply_delta(
-            &mut txn,
-            [
-                Delta::Retain(4, bold.clone()),
-                Delta::retain(1), // newline character
-                Delta::Retain(10, bold.clone()),
-                Delta::retain(1), // newline character
-                Delta::Retain(10, bold.clone()),
-            ],
-        );
-        let delta = txt.diff(&txn, YChange::identity);
+        let root: Unmounted<Text> = Unmounted::root("text");
+
+        let (mdoc, _) = multi_doc(1);
+        let mut txn = mdoc.transact_mut("test").unwrap();
+        let mut txt = root.mount_mut(&mut txn).unwrap();
+
+        let bold = [("bold", true)];
+        txt.insert(0, "Test\nMulti-line\nFormatting").unwrap();
+        txt.apply_delta([
+            Delta::Retain(4, bold.clone()),
+            Delta::retain(1), // newline character
+            Delta::Retain(10, bold.clone()),
+            Delta::retain(1), // newline character
+            Delta::Retain(10, bold.clone()),
+        ])
+        .unwrap();
+        let delta: Vec<_> = txt.chunks().map(Result::unwrap).collect();
         assert_eq!(
             delta,
             vec![
-                Diff::new("Test".into(), bold.clone()),
-                Diff::new("\n".into(), None),
-                Diff::new("Multi-line".into(), bold.clone()),
-                Diff::new("\n".into(), None),
-                Diff::new("Formatting".into(), bold),
+                ("Test".into(), bold.clone()),
+                ("\n".into(), None),
+                ("Multi-line".into(), bold.clone()),
+                ("\n".into(), None),
+                ("Formatting".into(), bold),
             ]
         );
+
+        txn.commit(None).unwrap();
     }
 
     #[test]
     fn delta_with_embeds() {
-        let mut doc = Doc::with_client_id(1);
-        let mut txn = doc.transact_mut();
-        let txt = txn.get_or_insert_text("text");
+        let root: Unmounted<Text> = Unmounted::root("text");
+
+        let (mdoc, _) = multi_doc(1);
+        let mut txn = mdoc.transact_mut("test").unwrap();
+        let mut txt = root.mount_mut(&mut txn).unwrap();
+
         let linebreak = lib0!({
             "linebreak": "s"
         });
-        txt.apply_delta(&mut txn, [Delta::insert(linebreak.clone())]);
-        let delta = txt.diff(&txn, YChange::identity);
-        assert_eq!(delta, vec![Diff::new(linebreak.into(), None)]);
+        txt.apply_delta([Delta::insert(linebreak.clone())]).unwrap();
+        let delta: Vec<_> = txt.chunks().map(Result::unwrap).collect();
+        assert_eq!(delta, vec![(linebreak.into(), None)]);
     }
 
     #[test]
     fn delta_with_shared_ref() {
-        let mut d1 = Doc::with_client_id(1);
-        let mut txn1 = d1.transact_mut();
-        let txt1 = txn1.get_or_insert_text("text");
-        txt1.apply_delta(
-            &mut txn1,
-            [Delta::insert(MapPrelim::from([("key", "val")]))],
-        );
+        let root: Unmounted<Text> = Unmounted::root("text");
+
+        let (d1, _) = multi_doc(1);
+        let (d2, _) = multi_doc(2);
+
+        let mut t1 = d1.transact_mut("test").unwrap();
+        let mut t2 = d2.transact_mut("test").unwrap();
+        let mut txt1 = root.mount_mut(&mut t1).unwrap();
+
+        txt1.apply_delta([Delta::insert(MapPrelim::from_iter([("key", "val")]))]);
         let delta = txt1.diff(&txn1, YChange::identity);
         let d: MapRef = delta[0].insert.clone().cast(&txn1).unwrap();
         assert_eq!(d.get::<Out>(&txn1, "key").unwrap(), Out::Any("val".into()));
@@ -1236,9 +1373,6 @@ mod test {
             })
         };
 
-        let mut d2 = Doc::with_client_id(2);
-        let mut txn2 = d2.transact_mut();
-        let txt2 = txn2.get_or_insert_text("text");
         let update = Update::decode_slice(&txn1.encode_update_v1()).unwrap();
         txn2.apply_update(update).unwrap();
         drop(txn1);
@@ -1247,37 +1381,35 @@ mod test {
         assert!(triggered.load(Ordering::Relaxed), "fired event");
 
         let txn = d2.transact();
-        let delta = txt2.diff(&txn, YChange::identity);
+        let delta = txt2.chunks();
         assert_eq!(delta.len(), 1);
         let d: MapRef = delta[0].insert.clone().cast(&txn).unwrap();
         assert_eq!(d.get::<Out>(&txn, "key").unwrap(), Out::Any("val".into()));
+
+        t1.commit(None).unwrap();
+        t2.commit(None).unwrap();
     }
 
     #[test]
     fn delta_snapshots() {
-        let mut doc = Doc::with_options(Options {
-            client_id: 1,
-            skip_gc: true,
-            ..Default::default()
-        });
-        let mut txn = doc.transact_mut();
-        let txt = txn.get_or_insert_text("text");
+        let root: Unmounted<Text> = Unmounted::root("text");
+
+        let (mdoc, _) = multi_doc(1);
+        let mut txn = mdoc.transact_mut("test").unwrap();
+        let mut txt = root.mount_mut(&mut txn).unwrap();
+
         txt.apply_delta(&mut txn, [Delta::insert("abcd")]);
         let snapshot1 = txn.snapshot(); // 'abcd'
-        txt.apply_delta(
-            &mut txn,
-            [Delta::retain(1), Delta::insert("x"), Delta::delete(1)],
-        );
+        txt.apply_delta([Delta::retain(1), Delta::insert("x"), Delta::delete(1)])
+            .unwrap();
         let snapshot2 = txn.snapshot(); // 'axcd'
-        txt.apply_delta(
-            &mut txn,
-            [
-                Delta::retain(2),   // ax^cd
-                Delta::delete(1),   // ax^d
-                Delta::insert("x"), // axx^d
-                Delta::delete(1),   // axx^
-            ],
-        );
+        txt.apply_delta([
+            Delta::retain(2),   // ax^cd
+            Delta::delete(1),   // ax^d
+            Delta::insert("x"), // axx^d
+            Delta::delete(1),   // axx^
+        ])
+        .unwrap();
         let state1 = txt.diff_range(&mut txn, Some(&snapshot1), None, YChange::identity);
         assert_eq!(state1, vec![Diff::new("abcd".into(), None)]);
         let state2 = txt.diff_range(&mut txn, Some(&snapshot2), None, YChange::identity);
@@ -1329,49 +1461,50 @@ mod test {
 
     #[test]
     fn snapshot_delete_after() {
-        let mut doc = Doc::with_options(Options {
-            client_id: 1,
-            skip_gc: true,
-            ..Default::default()
-        });
-        let mut txn = doc.transact_mut();
-        let txt = txn.get_or_insert_text("text");
-        txt.apply_delta(&mut txn, [Delta::insert("abcd")]);
+        let root: Unmounted<Text> = Unmounted::root("text");
+
+        let (mdoc, _) = multi_doc(1);
+        let mut txn = mdoc.transact_mut("test").unwrap();
+        let mut txt = root.mount_mut(&mut txn).unwrap();
+
+        txt.apply_delta([Delta::insert("abcd")]).unwrap();
         let snapshot1 = txn.snapshot();
-        txt.apply_delta(&mut txn, [Delta::retain(4), Delta::insert("e")]);
+        txt.apply_delta([Delta::retain(4), Delta::insert("e")])
+            .unwrap();
         let state1 = txt.diff_range(&mut txn, Some(&snapshot1), None, YChange::identity);
         assert_eq!(state1, vec![Diff::new("abcd".into(), None)]);
     }
 
     #[test]
     fn empty_delta_chunks() {
-        let mut doc = Doc::with_client_id(1);
-        let mut txn = doc.transact_mut();
-        let txt = txn.get_or_insert_text("text");
+        let root: Unmounted<Text> = Unmounted::root("text");
+
+        let (mdoc, _) = multi_doc(1);
+        let mut txn = mdoc.transact_mut("test").unwrap();
+        let mut txt = root.mount_mut(&mut txn).unwrap();
 
         let delta = vec![
             Delta::insert("a"),
             Delta::Inserted(
                 "".into(),
-                Some(Box::new(Attrs::from([(
-                    Arc::from("bold"),
-                    Any::from(true),
-                )]))),
+                Some(Box::new(Attrs::from([("bold".into(), true.into())]))),
             ),
             Delta::insert("b"),
         ];
 
-        txt.apply_delta(&mut txn, delta);
-        assert_eq!(txt.get_string(&txn), "ab");
+        txt.apply_delta(delta).unwrap();
+        assert_eq!(txt.to_string(), "ab");
 
-        let bin = txn.encode_state_as_update_v1(&StateVector::default());
+        let bin = txn.create_update(&StateVector::default()).unwrap();
 
-        let mut doc2 = Doc::with_client_id(2);
-        let mut txn = doc2.transact_mut();
-        let txt = txn.get_or_insert_text("text");
+        txn.commit(None).unwrap();
 
-        let update = Update::decode_slice(bin.as_slice()).unwrap();
-        txn.apply_update(update).unwrap();
-        assert_eq!(txt.get_string(&txn), "ab");
+        let (mdoc, _) = multi_doc(2);
+        let mut txn = mdoc.transact_mut("test").unwrap();
+
+        txn.apply_update(&mut DecoderV1::from_slice(&bin)).unwrap();
+
+        let txt = root.mount(&txn).unwrap();
+        assert_eq!(txt.to_string(), "ab");
     }
 }

@@ -14,16 +14,21 @@ mod varint;
 mod write;
 
 mod block_cursor;
+mod input;
 mod integrate;
+mod output;
 #[cfg(test)]
 mod test_util;
 
 use crate::block::ID;
+pub use input::In;
 pub use multi_doc::MultiDoc;
+pub use output::Out;
+use serde::{Deserialize, Serialize};
 pub use state_vector::StateVector;
 pub use transaction::Transaction;
-pub use types::list::{List, ListRef};
-pub use types::map::{Map, MapRef};
+pub use types::list::{List, ListPrelim, ListRef};
+pub use types::map::{Map, MapPrelim, MapRef};
 pub use types::text::{Text, TextRef};
 pub use types::{Mounted, Unmounted};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
