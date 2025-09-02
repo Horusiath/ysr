@@ -4,6 +4,7 @@ use crate::id_set::IDSet;
 use crate::integrate::IntegrationContext;
 use crate::node::{Node, NodeID, NodeType};
 use crate::read::Decoder;
+use crate::state_vector::Snapshot;
 use crate::store::lmdb::store::SplitResult;
 use crate::store::lmdb::BlockStore;
 use crate::write::WriteExt;
@@ -397,6 +398,10 @@ impl<'db> Transaction<'db> {
             self.txn.commit()?;
         }
         Ok(())
+    }
+
+    pub fn snapshot(&self) -> crate::Result<Snapshot> {
+        todo!()
     }
 }
 
