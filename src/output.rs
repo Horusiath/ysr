@@ -1,5 +1,6 @@
 use crate::lib0::Value;
 use crate::node::NodeID;
+use crate::Unmounted;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -45,5 +46,11 @@ where
     #[inline]
     fn from(value: T) -> Self {
         Out::Value(value.into())
+    }
+}
+
+impl<T> From<Unmounted<T>> for Out {
+    fn from(value: Unmounted<T>) -> Self {
+        Self::Node(value.node_id())
     }
 }

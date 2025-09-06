@@ -1,7 +1,8 @@
 use crate::lib0::Value;
 use crate::node::NodeType;
+use crate::prelim::Prelim;
 use crate::types::Capability;
-use crate::{In, Mounted, Transaction};
+use crate::{In, Mounted, Transaction, Unmounted};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::ops::{Deref, DerefMut, RangeBounds};
@@ -116,6 +117,10 @@ where
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct ListPrelim(Vec<In>);
 
+impl Prelim for ListPrelim {
+    type Return = Unmounted<List>;
+}
+
 impl Deref for ListPrelim {
     type Target = Vec<In>;
 
@@ -211,7 +216,7 @@ mod test {
         let mut a1 = arr.mount_mut(&mut t1).unwrap();
 
         a1.insert(0, "Hi").unwrap();
-        let update = t1.create_update(&StateVector::default()).unwrap();
+        let update = t1.diff_update(&StateVector::default()).unwrap();
 
         t1.commit(None).unwrap();
 
@@ -592,7 +597,7 @@ mod test {
         let actual: Vec<_> = array.iter::<Value>().map(Result::unwrap).collect();
         assert_eq!(actual, vec![1.into(), 2.into()]);
 
-        let data = tx.create_update(&StateVector::default()).unwrap();
+        let data = tx.diff_update(&StateVector::default()).unwrap();
 
         tx.commit(None).unwrap();
 

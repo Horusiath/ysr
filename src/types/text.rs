@@ -1,11 +1,13 @@
+use crate::block::ID;
 use crate::content::BlockContent;
 use crate::lib0::Value;
 use crate::node::NodeType;
+use crate::prelim::Prelim;
 use crate::state_vector::Snapshot;
 use crate::store::lmdb::BlockStore;
 use crate::types::Capability;
 use crate::{In, Mounted, Out, Transaction};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 use std::ops::{Deref, RangeBounds};
@@ -29,11 +31,11 @@ impl<'tx, 'db> TextRef<&'tx Transaction<'db>> {
     /// Returns an iterator over uncommitted changes (deltas) made to this text type
     /// within its current transaction scope.
     pub fn uncommitted(&self) -> impl Iterator<Item = crate::Result<Delta>> {
-        todo!()
+        yield Ok(Chunk::new(""));
     }
 
     /// Returns an iterator over all text and embedded chunks grouped by their applied attributes.
-    pub fn chunks(&self) -> impl Iterator<Item = crate::Result<(Out, Option<Box<Attrs>>)>> {
+    pub fn chunks(&self) -> impl Iterator<Item = crate::Result<Chunk>> {
         todo!()
     }
 
@@ -43,8 +45,38 @@ impl<'tx, 'db> TextRef<&'tx Transaction<'db>> {
         &self,
         from: Option<&Snapshot>,
         to: Option<&Snapshot>,
-    ) -> impl Iterator<Item = crate::Result<(Out, Option<Box<Attrs>>)>> {
+    ) -> impl Iterator<Item = crate::Result<Chunk>> {
         todo!()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Chunk {
+    pub insert: Out,
+    pub attributes: Option<Box<Attrs>>,
+    pub id: Option<ID>,
+}
+
+impl Chunk {
+    pub fn new<O: Into<Out>>(insert: O) -> Self {
+        Self {
+            insert: insert.into(),
+            attributes: None,
+            id: None,
+        }
+    }
+
+    pub fn with_attrs(self, attrs: Attrs) -> Self {
+        Self {
+            id: self.id,
+            insert: self.insert,
+            attributes: Some(Box::new(attrs)),
+        }
+    }
+
+    pub fn with_id(mut self, id: ID) -> Self {
+        self.id = Some(id);
+        self
     }
 }
 
@@ -209,10 +241,11 @@ impl Delta<In> {
 
 #[cfg(test)]
 mod test {
+    use crate::block::ID;
     use crate::lib0::Value;
     use crate::read::{Decode, DecoderV1};
     use crate::test_util::{multi_doc, sync};
-    use crate::types::text::{Attrs, Delta};
+    use crate::types::text::{Attrs, Chunk, Delta};
     use crate::write::Encode;
     use crate::{lib0, ListPrelim, Map, MapPrelim, MapRef, Out, StateVector, Text, Unmounted};
 
@@ -354,10 +387,10 @@ mod test {
         let d2_sv = t2.state_vector().unwrap().encode().unwrap();
 
         let u1 = t1
-            .create_update(&StateVector::decode(&d2_sv).unwrap())
+            .diff_update(&StateVector::decode(&d2_sv).unwrap())
             .unwrap();
         let u2 = t2
-            .create_update(&StateVector::decode(&d1_sv).unwrap())
+            .diff_update(&StateVector::decode(&d1_sv).unwrap())
             .unwrap();
 
         t1.apply_update(&mut DecoderV1::from_slice(&u2)).unwrap();
@@ -391,7 +424,7 @@ mod test {
 
         let d2_sv = t2.state_vector().unwrap().encode().unwrap();
         let u1 = t1
-            .create_update(&StateVector::decode(&d2_sv).unwrap())
+            .diff_update(&StateVector::decode(&d2_sv).unwrap())
             .unwrap();
         t2.apply_update(&mut DecoderV1::from_slice(&u1)).unwrap();
 
@@ -412,10 +445,10 @@ mod test {
         let d2_sv = t2.state_vector().unwrap().encode().unwrap();
         let d1_sv = t1.state_vector().unwrap().encode().unwrap();
         let u1 = t1
-            .create_update(&StateVector::decode(&d2_sv.as_slice()).unwrap())
+            .diff_update(&StateVector::decode(&d2_sv.as_slice()).unwrap())
             .unwrap();
         let u2 = t2
-            .create_update(&StateVector::decode(&d1_sv.as_slice()).unwrap())
+            .diff_update(&StateVector::decode(&d1_sv.as_slice()).unwrap())
             .unwrap();
         t1.apply_update(&mut DecoderV1::from_slice(&u2)).unwrap();
         t2.apply_update(&mut DecoderV1::from_slice(&u1)).unwrap();
@@ -451,7 +484,7 @@ mod test {
 
         let d2_sv = t2.state_vector().unwrap().encode().unwrap();
         let u1 = t1
-            .create_update(&StateVector::decode(&d2_sv.as_slice()).unwrap())
+            .diff_update(&StateVector::decode(&d2_sv.as_slice()).unwrap())
             .unwrap();
         t2.apply_update(&mut DecoderV1::from_slice(&u1)).unwrap();
 
@@ -473,10 +506,10 @@ mod test {
         let d2_sv = t2.state_vector().unwrap().encode().unwrap();
         let d1_sv = t1.state_vector().unwrap().encode().unwrap();
         let u1 = t1
-            .create_update(&StateVector::decode(&d2_sv.as_slice()).unwrap())
+            .diff_update(&StateVector::decode(&d2_sv.as_slice()).unwrap())
             .unwrap();
         let u2 = t2
-            .create_update(&StateVector::decode(&d1_sv.as_slice()).unwrap())
+            .diff_update(&StateVector::decode(&d1_sv.as_slice()).unwrap())
             .unwrap();
 
         t1.apply_update(&mut DecoderV1::from_slice(&u2)).unwrap();
@@ -618,7 +651,7 @@ mod test {
 
         drop(txt1);
 
-        let u1 = t1.create_update(&StateVector::default()).unwrap();
+        let u1 = t1.diff_update(&StateVector::default()).unwrap();
 
         let (d2, _) = multi_doc(2);
         let mut t2 = d2.transact_mut("test").unwrap();
@@ -644,12 +677,8 @@ mod test {
 
         let sv1 = t1.state_vector().unwrap().encode().unwrap();
         let sv2 = t2.state_vector().unwrap().encode().unwrap();
-        let u1 = t1
-            .create_update(&StateVector::decode(&sv2).unwrap())
-            .unwrap();
-        let u2 = t2
-            .create_update(&StateVector::decode(&sv1).unwrap())
-            .unwrap();
+        let u1 = t1.diff_update(&StateVector::decode(&sv2).unwrap()).unwrap();
+        let u2 = t2.diff_update(&StateVector::decode(&sv1).unwrap()).unwrap();
 
         t1.apply_update(&mut DecoderV1::from_slice(&u2)).unwrap();
         t2.apply_update(&mut DecoderV1::from_slice(&u1)).unwrap();
@@ -684,10 +713,10 @@ mod test {
             assert_eq!(txt1.to_string(), "abc".to_string());
             assert_eq!(
                 txt1.chunks().map(Result::unwrap).collect::<Vec<_>>(),
-                vec![("abc".into(), Some(Box::new(a.clone())))]
+                vec![Chunk::new("abc").with_attrs(a.clone())]
             );
             assert_eq!(uncommitted, expected);
-            let update = txn.encode_update_v1();
+            let update = txn.incremental_update().unwrap();
             txn.commit(None).unwrap();
 
             let mut txn = d2.transact_mut("test").unwrap();
@@ -712,10 +741,10 @@ mod test {
             assert_eq!(txt1.to_string(), "bc");
             assert_eq!(
                 txt1.chunks().map(Result::unwrap).collect::<Vec<_>>(),
-                vec![("bc".into(), Some(Box::new(a.clone())))]
+                vec![Chunk::new("bc").with_attrs(a.clone())]
             );
             assert_eq!(uncommitted, expected);
-            let update = txn.encode_update_v1();
+            let update = txn.incremental_update().unwrap();
             txn.commit(None).unwrap();
 
             let mut txn = d2.transact_mut("test").unwrap();
@@ -741,11 +770,11 @@ mod test {
             assert_eq!(txt1.to_string(), "b");
             assert_eq!(
                 txt1.chunks().map(Result::unwrap).collect::<Vec<_>>(),
-                vec![("b".into(), Some(Box::new(a.clone())))]
+                vec![Chunk::new("b").with_attrs(a.clone())]
             );
             assert_eq!(uncommitted, expected);
 
-            let update = txn.encode_update_v1();
+            let update = txn.incremental_update().unwrap();
             txn.commit(None).unwrap();
 
             let mut txn = d2.transact_mut("test").unwrap();
@@ -771,10 +800,10 @@ mod test {
             assert_eq!(txt1.to_string(), "zb".to_string());
             assert_eq!(
                 txt1.chunks().map(Result::unwrap).collect::<Vec<_>>(),
-                vec![("zb".into(), Some(Box::new(a.clone())))]
+                vec![Chunk::new("zb").with_attrs(a.clone())]
             );
             assert_eq!(uncommitted, expected);
-            let update = txn.encode_update_v1();
+            let update = txn.incremental_update().unwrap();
             txn.commit(None).unwrap();
 
             let mut txn = d2.transact_mut("test").unwrap();
@@ -799,10 +828,10 @@ mod test {
             assert_eq!(txt1.to_string(), "yzb".to_string());
             assert_eq!(
                 txt1.chunks().map(Result::unwrap).collect::<Vec<_>>(),
-                vec![("y".into(), None), ("zb".into(), Some(Box::new(a.clone())))]
+                vec![Chunk::new("y"), Chunk::new("zb").with_attrs(a.clone())]
             );
             assert_eq!(uncommitted, expected);
-            let update = txn.encode_update_v1();
+            let update = txn.incremental_update().unwrap();
             txn.commit(None).unwrap();
 
             let mut txn = d2.transact_mut("test").unwrap();
@@ -829,10 +858,10 @@ mod test {
             assert_eq!(txt1.to_string(), "yzb");
             assert_eq!(
                 txt1.chunks().map(Result::unwrap).collect::<Vec<_>>(),
-                vec![("yz".into(), None), ("b".into(), Some(Box::new(a.clone())))]
+                vec![Chunk::new("yz"), Chunk::new("b").with_attrs(a.clone())]
             );
             assert_eq!(uncommitted, expected);
-            let update = txn.encode_update_v1();
+            let update = txn.incremental_update().unwrap();
             txn.commit(None).unwrap();
 
             let mut txn = d2.transact_mut("test").unwrap();
@@ -869,21 +898,18 @@ mod test {
                 .unwrap();
             let uncommitted: Vec<_> = txt1.uncommitted().map(Result::unwrap).collect();
 
-            let a1 = Some(Box::new(a1.clone()));
-            let a2 = Some(Box::new(a2.clone()));
-
             let expected = vec![
-                Delta::Inserted("a".into(), a1.clone()),
-                Delta::Inserted(embed.clone().into(), a2.clone()),
-                Delta::Inserted("b".into(), a1.clone()),
+                Delta::Inserted("a".into(), Some(Box::new(a1.clone()))),
+                Delta::Inserted(embed.clone().into(), Some(Box::new(a2.clone()))),
+                Delta::Inserted("b".into(), Some(Box::new(a1.clone()))),
             ];
             assert_eq!(uncommitted, expected);
             t1.commit(None).unwrap();
 
             let expected = vec![
-                (Value::from("a"), a1.clone()),
-                (embed.clone().into(), a2),
-                ("b".into(), a1.clone()),
+                Chunk::new("a").with_attrs(a1.clone()),
+                Chunk::new(embed.clone()).with_attrs(a2),
+                Chunk::new("b").with_attrs(a1.clone()),
             ];
             let t1 = d1.transact_mut("test").unwrap();
             let txt1 = txt.mount(&t1).unwrap();
@@ -892,20 +918,16 @@ mod test {
                 expected
             );
 
-            let update_v1 = t1.create_update(&StateVector::default()).unwrap();
+            let update_v1 = t1.diff_update(&StateVector::default()).unwrap();
             update_v1
         };
 
-        let a1 = Some(Box::new(a1));
-        let a2 = Some(Box::new(Attrs::from([(
-            "width".into(),
-            Value::from(100.0),
-        )])));
+        let a2 = Attrs::from([("width".into(), Value::from(100.0))]);
 
         let expected = vec![
-            (Value::from("a"), a1.clone()),
-            (embed.into(), a2),
-            ("b".into(), a1.clone()),
+            Chunk::new("a").with_attrs(a1.clone()),
+            Chunk::new(embed).with_attrs(a2),
+            Chunk::new("b").with_attrs(a1),
         ];
 
         let (d2, _) = multi_doc(2);
@@ -964,8 +986,8 @@ mod test {
 
         let diff: Vec<_> = txt.chunks().map(Result::unwrap).collect();
         let expected = vec![
-            (Value::from("abc"), Some(Box::new(attrs1))),
-            ("def".into(), Some(Box::new(attrs2))),
+            Chunk::new("abc").with_attrs(attrs1),
+            Chunk::new("def").with_attrs(attrs2),
         ];
         assert_eq!(diff, expected);
 
@@ -1150,10 +1172,10 @@ mod test {
         txt.insert_with(0, "ac", attrs.clone()).unwrap();
         txt.insert_with(1, "b", Attrs::new()).unwrap();
 
-        let expect: Vec<(Value, Option<Box<Attrs>>)> = vec![
-            ("a".into(), Some(Box::new(attrs.clone()))),
-            ("b".into(), None),
-            ("c".into(), Some(Box::new(attrs.clone()))),
+        let expect = vec![
+            Chunk::new("a").with_attrs(attrs.clone()),
+            Chunk::new("b"),
+            Chunk::new("c").with_attrs(attrs.clone()),
         ];
 
         let actual: Vec<_> = txt.chunks().map(Result::unwrap).collect();
@@ -1176,7 +1198,7 @@ mod test {
 
         assert_eq!(txt.to_string(), "abc");
 
-        let bin = txn.create_update(&StateVector::default()).unwrap();
+        let bin = txn.diff_update(&StateVector::default()).unwrap();
 
         txn.commit(None).unwrap();
 
@@ -1213,12 +1235,8 @@ mod test {
         assert_eq!(
             diff,
             vec![
-                (Value::from("hello"), None),
-                (
-                    " world".into(),
-                    None,
-                    //Some(YChange::new(ChangeKind::Added, ID::new(1, 5)))
-                )
+                Chunk::new("hello"),
+                Chunk::new(" world").with_id(ID::new(1.into(), 5.into()))
             ]
         );
         txn.commit(None).unwrap();
@@ -1238,7 +1256,7 @@ mod test {
         text.insert_with(0, "hello world", italic.clone()).unwrap(); // "<i>hello world</i>"
         text.format(6, 11, bold.clone()).unwrap(); // "<i>hello <b>world</b></i>"
         let image = vec![0, 0, 0, 0];
-        text.insert_embed(5, image.clone()).unwrap(); // insert binary after "hello"
+        text.insert_embed(5, Value::from(image.clone())).unwrap(); // insert binary after "hello"
         let array = text.insert_embed(5, ListPrelim::default()).unwrap(); // insert array ref after "hello"
 
         let italic_and_bold = Attrs::from([("b".into(), true.into()), ("i".into(), true.into())]);
@@ -1246,11 +1264,11 @@ mod test {
         assert_eq!(
             chunks,
             vec![
-                (Value::from("hello"), Some(Box::new(italic.clone()))),
-                (Value::Array(array), Some(Box::new(italic.clone()))),
-                (image.into(), Some(Box::new(italic.clone()))),
-                (" ".into(), Some(Box::new(italic))),
-                ("world".into(), Some(Box::new(italic_and_bold))),
+                Chunk::new("hello").with_attrs(italic.clone()),
+                Chunk::new(array).with_attrs(italic.clone()),
+                Chunk::new(image).with_attrs(italic.clone()),
+                Chunk::new(" ").with_attrs(italic),
+                Chunk::new("world").with_attrs(italic_and_bold),
             ]
         );
     }
@@ -1263,25 +1281,25 @@ mod test {
         let mut txn = mdoc.transact_mut("test").unwrap();
         let mut txt = root.mount_mut(&mut txn).unwrap();
 
-        let bold = Some(Box::new(Attrs::from_iter([("bold".into(), true.into())])));
+        let bold = Attrs::from_iter([("bold".into(), true.into())]);
         txt.insert(0, "Test\nMulti-line\nFormatting").unwrap();
         txt.apply_delta([
-            Delta::Retain(4, bold.clone()),
+            Delta::Retain(4, Some(Box::new(bold.clone()))),
             Delta::retain(1), // newline character
-            Delta::Retain(10, bold.clone()),
+            Delta::Retain(10, Some(Box::new(bold.clone()))),
             Delta::retain(1), // newline character
-            Delta::Retain(10, bold.clone()),
+            Delta::Retain(10, Some(Box::new(bold.clone()))),
         ])
         .unwrap();
         let delta: Vec<_> = txt.chunks().map(Result::unwrap).collect();
         assert_eq!(
             delta,
             vec![
-                ("Test".into(), bold.clone()),
-                ("\n".into(), None),
-                ("Multi-line".into(), bold.clone()),
-                ("\n".into(), None),
-                ("Formatting".into(), bold),
+                Chunk::new("Test").with_attrs(bold.clone()),
+                Chunk::new("\n"),
+                Chunk::new("Multi-line").with_attrs(bold.clone()),
+                Chunk::new("\n"),
+                Chunk::new("Formatting").with_attrs(bold),
             ]
         );
 
@@ -1301,7 +1319,7 @@ mod test {
         });
         txt.apply_delta([Delta::insert(linebreak.clone())]).unwrap();
         let delta: Vec<_> = txt.chunks().map(Result::unwrap).collect();
-        assert_eq!(delta, vec![(linebreak.into(), None)]);
+        assert_eq!(delta, vec![Chunk::new(linebreak)]);
     }
 
     #[test]
@@ -1315,25 +1333,28 @@ mod test {
         let mut t2 = d2.transact_mut("test").unwrap();
         let mut txt1 = root.mount_mut(&mut t1).unwrap();
 
-        txt1.apply_delta([Delta::insert(MapPrelim::from_iter([("key", "val")]))])
-            .unwrap();
+        txt1.apply_delta([Delta::insert(MapPrelim::from_iter([(
+            "key".into(),
+            "val".into(),
+        )]))])
+        .unwrap();
         let delta: Vec<_> = txt1.chunks().map(Result::unwrap).collect();
-        let node = delta[0].0.clone().as_node().cloned().unwrap();
+        let node = delta[0].insert.as_node().cloned().unwrap();
         let map: Unmounted<Map> = Unmounted::nested(node);
         let map = map.mount(&t1).unwrap();
         assert_eq!(map.get("key").unwrap(), Value::from("val"));
 
-        let update = t1.encode_update_v1();
+        let update = t1.incremental_update().unwrap();
         t2.apply_update(&mut DecoderV1::from_slice(&update))
             .unwrap();
         t1.commit(None).unwrap();
         t2.commit(None).unwrap();
 
         let t2 = d2.transact_mut("test").unwrap();
-        let txt2 = root.mount_mut(&t2).unwrap();
+        let txt2 = root.mount(&t2).unwrap();
         let delta: Vec<_> = txt2.chunks().map(Result::unwrap).collect();
         assert_eq!(delta.len(), 1);
-        let node = delta[0].0.clone().as_node().cloned().unwrap();
+        let node = delta[0].insert.clone().as_node().cloned().unwrap();
         let map: Unmounted<Map> = Unmounted::nested(node);
         let map = map.mount(&t2).unwrap();
         assert_eq!(map.get("key").unwrap(), Value::from("val"));
@@ -1345,13 +1366,17 @@ mod test {
 
         let (mdoc, _) = multi_doc(1);
         let mut txn = mdoc.transact_mut("test").unwrap();
-        let mut txt = root.mount_mut(&mut txn).unwrap();
 
+        let mut txt = root.mount_mut(&mut txn).unwrap();
         txt.apply_delta([Delta::insert("abcd")]).unwrap();
         let snapshot1 = txn.snapshot().unwrap(); // 'abcd'
+
+        let mut txt = root.mount_mut(&mut txn).unwrap();
         txt.apply_delta([Delta::retain(1), Delta::insert("x"), Delta::delete(1)])
             .unwrap();
         let snapshot2 = txn.snapshot().unwrap(); // 'axcd'
+
+        let mut txt = root.mount_mut(&mut txn).unwrap();
         txt.apply_delta([
             Delta::retain(2),   // ax^cd
             Delta::delete(1),   // ax^d
@@ -1359,46 +1384,27 @@ mod test {
             Delta::delete(1),   // axx^
         ])
         .unwrap();
-        let state1 = txt.chunks_between(Some(&snapshot1), None);
-        assert_eq!(state1, vec![Diff::new("abcd".into(), None)]);
-        let state2 = txt.chunks_between(Some(&snapshot2), None);
-        assert_eq!(state2, vec![Diff::new("axcd".into(), None)]);
-        let state2_diff = txt.chunks_between(Some(&snapshot2), Some(&snapshot1));
+        let state1: Vec<_> = txt
+            .chunks_between(Some(&snapshot1), None)
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(state1, vec![Chunk::new("abcd")]);
+        let state2: Vec<_> = txt
+            .chunks_between(Some(&snapshot2), None)
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(state2, vec![Chunk::new("axcd")]);
+        let state2_diff: Vec<_> = txt
+            .chunks_between(Some(&snapshot2), Some(&snapshot1))
+            .map(Result::unwrap)
+            .collect();
         assert_eq!(
             state2_diff,
             vec![
-                Diff {
-                    insert: "a".into(),
-                    attributes: None,
-                    ychange: None
-                },
-                Diff {
-                    insert: "x".into(),
-                    attributes: None,
-                    ychange: Some(YChange {
-                        kind: ChangeKind::Added,
-                        id: ID {
-                            client: 1,
-                            clock: 4
-                        }
-                    })
-                },
-                Diff {
-                    insert: "b".into(),
-                    attributes: None,
-                    ychange: Some(YChange {
-                        kind: ChangeKind::Removed,
-                        id: ID {
-                            client: 1,
-                            clock: 1
-                        }
-                    })
-                },
-                Diff {
-                    insert: "cd".into(),
-                    attributes: None,
-                    ychange: None
-                }
+                Chunk::new("a"),
+                Chunk::new("x").with_id(ID::new(1.into(), 4.into())),
+                Chunk::new("bcd").with_id(ID::new(1.into(), 1.into())),
+                Chunk::new("cd"),
             ]
         );
     }
@@ -1420,7 +1426,7 @@ mod test {
             .chunks_between(Some(&snapshot1), None)
             .map(Result::unwrap)
             .collect();
-        assert_eq!(state1, vec![(Value::from("abcd"), None)]);
+        assert_eq!(state1, vec![Chunk::new("abcd")]);
     }
 
     #[test]
@@ -1443,7 +1449,7 @@ mod test {
         txt.apply_delta(delta).unwrap();
         assert_eq!(txt.to_string(), "ab");
 
-        let bin = txn.create_update(&StateVector::default()).unwrap();
+        let bin = txn.diff_update(&StateVector::default()).unwrap();
 
         txn.commit(None).unwrap();
 

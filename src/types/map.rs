@@ -1,6 +1,7 @@
 use crate::node::NodeType;
+use crate::prelim::Prelim;
 use crate::types::Capability;
-use crate::{In, Mounted, Transaction};
+use crate::{In, Mounted, Transaction, Unmounted};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::ops::{Deref, DerefMut};
@@ -109,6 +110,10 @@ impl<'a> Iter<'a> {
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct MapPrelim(BTreeMap<String, In>);
 
+impl Prelim for MapPrelim {
+    type Return = Unmounted<Map>;
+}
+
 impl Deref for MapPrelim {
     type Target = BTreeMap<String, In>;
 
@@ -186,7 +191,7 @@ mod test {
         let v1 = m1.to_value().unwrap();
         assert_eq!(v1, expected);
 
-        let update = t1.create_update(&StateVector::default()).unwrap();
+        let update = t1.diff_update(&StateVector::default()).unwrap();
 
         let mut t2 = d2.transact_mut("test").unwrap();
         t2.apply_update(&mut DecoderV1::from_slice(&update))
@@ -209,7 +214,7 @@ mod test {
         m1.insert("stuff", "stuffy").unwrap();
         m1.insert("null", None as Option<String>).unwrap();
 
-        let update = t1.create_update(&StateVector::default()).unwrap();
+        let update = t1.diff_update(&StateVector::default()).unwrap();
 
         let (d2, _) = multi_doc(2);
         let mut t2 = d2.transact_mut("test").unwrap();
@@ -307,7 +312,7 @@ mod test {
         assert_eq!(m1.get::<_, Value>("key1").optional().unwrap(), None);
         assert_eq!(m1.get::<_, Value>("key2").optional().unwrap(), None);
 
-        let u1 = t1.create_update(&StateVector::default()).unwrap();
+        let u1 = t1.diff_update(&StateVector::default()).unwrap();
 
         t1.commit(None).unwrap();
 

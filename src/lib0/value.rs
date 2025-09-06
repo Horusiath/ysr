@@ -1,3 +1,4 @@
+use crate::prelim::Prelim;
 use bytes::Bytes;
 use serde::de::{Error, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -253,4 +254,8 @@ impl Display for Value {
             }
         }
     }
+}
+
+impl Prelim for Value {
+    type Return = ();
 }

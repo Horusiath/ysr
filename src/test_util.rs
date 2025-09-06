@@ -22,7 +22,7 @@ pub fn sync<const N: usize>(txns: [&mut Transaction<'_>; N]) {
         let sv = states[i].clone();
         for j in 0..N {
             if i != j {
-                let update = txns[j].create_update(&sv).unwrap();
+                let update = txns[j].diff_update(&sv).unwrap();
                 txns[i]
                     .apply_update(&mut DecoderV1::from_slice(&update))
                     .unwrap();

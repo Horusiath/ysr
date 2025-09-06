@@ -38,7 +38,7 @@ impl TransactionState {
     fn precommit<'db>(
         &self,
         db: Database<'_>,
-        summary: Option<&mut CommitSummary>,
+        summary: Option<&mut TransactionSummary>,
     ) -> crate::Result<()> {
         todo!()
     }
@@ -86,13 +86,17 @@ impl<'db> Transaction<'db> {
         self.db().state_vector()
     }
 
-    pub fn create_update(&self, since: &StateVector) -> crate::Result<Vec<u8>> {
+    pub fn incremental_update(&self) -> crate::Result<Vec<u8>> {
+        todo!()
+    }
+
+    pub fn diff_update(&self, since: &StateVector) -> crate::Result<Vec<u8>> {
         let mut buf = Vec::new();
-        self.create_update_with(since, &mut buf)?;
+        self.diff_update_with(since, &mut buf)?;
         Ok(buf)
     }
 
-    pub fn create_update_with<W: Write>(
+    pub fn diff_update_with<W: Write>(
         &self,
         since: &StateVector,
         writer: &mut W,
@@ -391,7 +395,7 @@ impl<'db> Transaction<'db> {
         }*/
     }
 
-    pub fn commit(mut self, summary: Option<&mut CommitSummary>) -> crate::Result<()> {
+    pub fn commit(mut self, summary: Option<&mut TransactionSummary>) -> crate::Result<()> {
         if let Some(state) = self.state.take() {
             // commit the transaction
             state.precommit(self.db(), summary)?;
@@ -406,17 +410,17 @@ impl<'db> Transaction<'db> {
 }
 
 #[derive(Debug, Default, Clone)]
-pub struct CommitSummary {
+pub struct TransactionSummary {
     flags: CommitFlags,
-    update: BytesMut,
+    update: Bytes,
     changed_nodes: HashSet<NodeID>,
 }
 
-impl CommitSummary {
+impl TransactionSummary {
     pub fn new(flags: CommitFlags) -> Self {
         Self {
             flags,
-            update: BytesMut::default(),
+            update: Bytes::default(),
             changed_nodes: HashSet::new(),
         }
     }
@@ -429,6 +433,10 @@ impl CommitSummary {
     pub fn clear(&mut self) {
         self.update.clear();
         self.changed_nodes.clear();
+    }
+
+    pub fn update(&self) -> &Bytes {
+        &self.update
     }
 }
 

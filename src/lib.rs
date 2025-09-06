@@ -17,6 +17,7 @@ mod block_cursor;
 mod input;
 mod integrate;
 mod output;
+mod prelim;
 #[cfg(test)]
 mod test_util;
 
@@ -175,5 +176,24 @@ impl TryFrom<U32> for ClientID {
             None => Err(crate::Error::ClientIDOutOfRange),
             Some(id) => Ok(id),
         }
+    }
+}
+
+impl Serialize for ClientID {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_u32(self.0.get())
+    }
+}
+
+impl<'de> Deserialize<'de> for ClientID {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = u32::deserialize(deserializer)?;
+        ClientID::try_from(value).map_err(serde::de::Error::custom)
     }
 }

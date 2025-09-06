@@ -13,7 +13,9 @@ use crate::{Error, Result};
 use bitflags::bitflags;
 use bytes::BytesMut;
 use lmdb_rs_m::Database;
-use serde::{Deserialize, Serialize};
+use serde::de::{SeqAccess, Visitor};
+use serde::ser::SerializeTuple;
+use serde::{Deserialize, Deserializer, Serialize};
 use std::cmp::Ordering;
 use std::fmt::{Debug, Display, Formatter};
 use std::io::Write;
@@ -45,6 +47,49 @@ impl Debug for ID {
 impl Display for ID {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "<{}:{}>", self.client, self.clock)
+    }
+}
+
+impl Serialize for ID {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut s = serializer.serialize_tuple(2)?;
+        s.serialize_element(&self.client)?;
+        s.serialize_element(&self.clock.get())?;
+        s.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for ID {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct IDVisitor;
+        impl<'de> Visitor<'de> for IDVisitor {
+            type Value = ID;
+
+            fn expecting(&self, formatter: &mut Formatter) -> std::fmt::Result {
+                formatter.write_str("struct ID")
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> std::result::Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let client: ClientID = seq.next_element()?.ok_or_else(|| {
+                    serde::de::Error::invalid_length(0, &"expected 2 elements for ID")
+                })?;
+                let clock: u32 = seq.next_element()?.ok_or_else(|| {
+                    serde::de::Error::invalid_length(1, &"expected 2 elements for ID")
+                })?;
+                let clock = Clock::new(clock);
+                Ok(ID::new(client, clock))
+            }
+        }
+        deserializer.deserialize_tuple(2, IDVisitor)
     }
 }
 
@@ -1103,6 +1148,13 @@ mod test {
 
     const CLIENT: ClientID = unsafe { ClientID::new_unchecked(123) };
     const PARENT: NodeID = NodeID::from_nested(ID::new(CLIENT, Clock::new(0)));
+
+    #[test]
+    fn id_serialize() {
+        let id = ID::new(CLIENT, 42.into());
+        let serialized = serde_json::to_string(&id).unwrap();
+        assert_eq!(serialized, r#"{"client":123,"clock":42}"#);
+    }
 
     #[test]
     fn block_set_header_values() {

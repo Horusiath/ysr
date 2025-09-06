@@ -1,5 +1,6 @@
 use crate::lib0::Value;
-use crate::{ListPrelim, MapPrelim};
+use crate::prelim::Prelim;
+use crate::{ListPrelim, MapPrelim, Out};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -28,4 +29,8 @@ where
     fn from(value: T) -> Self {
         In::Value(value.into())
     }
+}
+
+impl Prelim for In {
+    type Return = Out;
 }
