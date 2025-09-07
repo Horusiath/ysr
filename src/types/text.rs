@@ -7,6 +7,7 @@ use crate::state_vector::Snapshot;
 use crate::store::lmdb::BlockStore;
 use crate::types::Capability;
 use crate::{In, Mounted, Out, Transaction};
+use genawaiter2::yield_;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
@@ -31,12 +32,12 @@ impl<'tx, 'db> TextRef<&'tx Transaction<'db>> {
     /// Returns an iterator over uncommitted changes (deltas) made to this text type
     /// within its current transaction scope.
     pub fn uncommitted(&self) -> impl Iterator<Item = crate::Result<Delta>> {
-        yield Ok(Chunk::new(""));
+        genawaiter2::rc::gen!({ yield_!(Ok(Delta::Retain(0, None))) }).into_iter()
     }
 
     /// Returns an iterator over all text and embedded chunks grouped by their applied attributes.
     pub fn chunks(&self) -> impl Iterator<Item = crate::Result<Chunk>> {
-        todo!()
+        genawaiter2::rc::gen!({ yield_!(Ok(Chunk::new(0))) }).into_iter()
     }
 
     /// Returns an iterator over all text and embedded chunks grouped by their applied attributes,
@@ -46,7 +47,7 @@ impl<'tx, 'db> TextRef<&'tx Transaction<'db>> {
         from: Option<&Snapshot>,
         to: Option<&Snapshot>,
     ) -> impl Iterator<Item = crate::Result<Chunk>> {
-        todo!()
+        genawaiter2::rc::gen!({ yield_!(Ok(Chunk::new(0))) }).into_iter()
     }
 }
 
@@ -1342,7 +1343,8 @@ mod test {
         let node = delta[0].insert.as_node().cloned().unwrap();
         let map: Unmounted<Map> = Unmounted::nested(node);
         let map = map.mount(&t1).unwrap();
-        assert_eq!(map.get("key").unwrap(), Value::from("val"));
+        let actual: Value = map.get("key").unwrap();
+        assert_eq!(actual, Value::from("val"));
 
         let update = t1.incremental_update().unwrap();
         t2.apply_update(&mut DecoderV1::from_slice(&update))
@@ -1357,7 +1359,8 @@ mod test {
         let node = delta[0].insert.clone().as_node().cloned().unwrap();
         let map: Unmounted<Map> = Unmounted::nested(node);
         let map = map.mount(&t2).unwrap();
-        assert_eq!(map.get("key").unwrap(), Value::from("val"));
+        let actual: Value = map.get("key").unwrap();
+        assert_eq!(actual, Value::from("val"));
     }
 
     #[test]

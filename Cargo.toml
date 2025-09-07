@@ -20,6 +20,7 @@ twox-hash = "2.1.0"
 simple-base64 = "0.23.2"
 rand = "0.9.1"
 uuid = { version = "1.17.0", features = ["v4"] }
+genawaiter2 = "0.100.1"
 
 [dev-dependencies]
 tempfile = "3.19"

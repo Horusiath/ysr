@@ -1151,9 +1151,11 @@ mod test {
 
     #[test]
     fn id_serialize() {
-        let id = ID::new(CLIENT, 42.into());
+        let id = ID::new(123.into(), 42.into());
         let serialized = serde_json::to_string(&id).unwrap();
-        assert_eq!(serialized, r#"{"client":123,"clock":42}"#);
+        assert_eq!(serialized, r#"[123,42]"#);
+        let deserialized: ID = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized, id);
     }
 
     #[test]
