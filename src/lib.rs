@@ -20,13 +20,16 @@ mod output;
 mod prelim;
 #[cfg(test)]
 mod test_util;
+mod update;
 
 use crate::block::ID;
 pub use input::In;
 pub use multi_doc::MultiDoc;
 pub use output::Out;
+pub use read::DecoderV1;
 use serde::{Deserialize, Serialize};
 pub use state_vector::StateVector;
+use std::collections::TryReserveError;
 pub use transaction::Transaction;
 pub use types::list::{List, ListPrelim, ListRef};
 pub use types::map::{Map, MapPrelim, MapRef};
@@ -50,6 +53,8 @@ pub enum Error {
     IO(#[from] std::io::Error),
     #[error("expected more data, reached end of buffer")]
     EndOfBuffer,
+    #[error("operation tried to allocate too much memory: {0}")]
+    OutOfMemory(#[from] TryReserveError),
     #[error("value is out of range of expected type")]
     ValueOutOfRange,
     #[error("provided key is longer than 255 bytes")]

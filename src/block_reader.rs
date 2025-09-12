@@ -1,19 +1,188 @@
 use crate::block::{
-    BlockBuilder, BlockHeader, CONTENT_TYPE_ATOM, CONTENT_TYPE_BINARY, CONTENT_TYPE_DELETED,
+    Block, BlockBuilder, BlockHeader, CONTENT_TYPE_ATOM, CONTENT_TYPE_BINARY, CONTENT_TYPE_DELETED,
     CONTENT_TYPE_DOC, CONTENT_TYPE_EMBED, CONTENT_TYPE_FORMAT, CONTENT_TYPE_GC, CONTENT_TYPE_JSON,
     CONTENT_TYPE_NODE, CONTENT_TYPE_SKIP, CONTENT_TYPE_STRING, ID,
 };
+use crate::id_set::IDSet;
 use crate::node::{NodeHeader, NodeID};
-use crate::read::{Decoder, ReadExt};
+use crate::read::{Decode, Decoder, ReadExt};
 use crate::write::WriteExt;
 use crate::{ClientID, Clock};
 use bytes::BytesMut;
 use smallvec::SmallVec;
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt::{Display, Formatter};
 use std::io::{Read, Write};
 use zerocopy::IntoBytes;
 
-pub(crate) struct BlockReader<'a, D> {
+#[derive(Default)]
+pub struct Update {
+    pub(crate) blocks: BTreeMap<ClientID, VecDeque<Carrier>>,
+    pub(crate) delete_set: IDSet,
+}
+
+impl Update {
+    pub fn decode(bytes: &[u8]) -> crate::Result<Self> {
+        let mut decoder = crate::read::DecoderV1::from_slice(bytes);
+        Self::decode_with(&mut decoder)
+    }
+
+    pub fn decode_with<D: Decoder>(decoder: &mut D) -> crate::Result<Self> {
+        // read blocks
+        let blocks = Self::decode_blocks(decoder)?;
+        // read delete set
+        let delete_set = IDSet::decode_with(decoder)?;
+        Ok(Update { blocks, delete_set })
+    }
+
+    fn decode_blocks<D: Decoder>(
+        decoder: &mut D,
+    ) -> crate::Result<BTreeMap<ClientID, VecDeque<Carrier>>> {
+        // read blocks
+        let clients_len: u32 = decoder.read_var()?;
+        let mut clients = BTreeMap::new();
+
+        for _ in 0..clients_len {
+            let blocks_len = decoder.read_var::<u32>()? as usize;
+
+            let client = decoder.read_client()?;
+            let mut clock: Clock = decoder.read_var()?;
+            let blocks = clients.entry(client).or_insert_with(|| VecDeque::new());
+            // Attempt to pre-allocate memory for the blocks. If the capacity overflows and
+            // allocation fails, return an error.
+            blocks.try_reserve(blocks_len)?;
+
+            for _ in 0..blocks_len {
+                let id = ID::new(client, clock);
+                if let Some(block) = Self::decode_block(id, decoder)? {
+                    // due to bug in the past it was possible for empty bugs to be generated
+                    // even though they had no effect on the document store
+                    clock += block.len();
+                    blocks.push_back(block);
+                }
+            }
+        }
+        Ok(clients)
+    }
+
+    fn decode_block(id: ID, decoder: &mut impl Decoder) -> crate::Result<Option<Carrier>> {
+        let info = decoder.read_info()?;
+        match info & CARRIER_INFO {
+            CONTENT_TYPE_GC => {
+                let len = decoder.read_len()?;
+                Ok(Some(Carrier::GC(BlockRange { head: id, len })))
+            }
+            CONTENT_TYPE_SKIP => {
+                let len = decoder.read_len()?;
+                Ok(Some(Carrier::Skip(BlockRange { head: id, len })))
+            }
+            _ => Self::read_block(id, info, decoder),
+        }
+    }
+
+    fn read_block(id: ID, info: u8, decoder: &mut impl Decoder) -> crate::Result<Option<Carrier>> {
+        let mut block = BlockBuilder::parse(id, BytesMut::zeroed(BlockHeader::SIZE))?;
+        let mut parent_name = None;
+        let cannot_copy_parent_info = info & (HAS_RIGHT_ID | HAS_LEFT_ID) == 0;
+        if info & HAS_LEFT_ID != 0 {
+            let left_id = decoder.read_left_id()?;
+            block.set_origin_left(left_id);
+        }
+        if info & HAS_RIGHT_ID != 0 {
+            let right_id = decoder.read_right_id()?;
+            block.set_origin_right(right_id);
+        }
+        if cannot_copy_parent_info {
+            let parent_id = if decoder.read_parent_info()? {
+                let mut root_parent_name = String::new();
+                let buf = unsafe { root_parent_name.as_mut_vec() };
+                decoder.read_string(buf)?;
+                let node = NodeID::from_root(&root_parent_name);
+                parent_name = Some(root_parent_name);
+                node
+            } else {
+                let nested_parent_id = decoder.read_left_id()?;
+                NodeID::from_nested(nested_parent_id)
+            };
+            block.set_parent(parent_id);
+        }
+        if cannot_copy_parent_info && (info & HAS_PARENT_SUB) != 0 {
+            let mut entry_key = SmallVec::<[u8; 16]>::new();
+            decoder.read_string(&mut entry_key)?;
+            block.init_entry_key(&entry_key)?;
+        }
+        Self::init_content(info, &mut block, decoder)?;
+        Ok(Some(Carrier::Block(block, parent_name)))
+    }
+
+    fn init_content(
+        info: u8,
+        block: &mut BlockBuilder,
+        decoder: &mut impl Decoder,
+    ) -> crate::Result<()> {
+        let content_type = info & CARRIER_INFO;
+        block.set_content_type(content_type.try_into()?);
+        match content_type {
+            CONTENT_TYPE_GC => Err(crate::Error::UnsupportedContent(CONTENT_TYPE_GC)),
+            CONTENT_TYPE_DELETED => {
+                let deleted_len = decoder.read_len()?;
+                block.set_clock_len(deleted_len);
+                Ok(())
+            }
+            CONTENT_TYPE_JSON => copy_content(decoder, block),
+            CONTENT_TYPE_ATOM => copy_content(decoder, block),
+            CONTENT_TYPE_BINARY => {
+                let len = decoder.read_len()?;
+                block.set_clock_len(1.into());
+                let mut w = block.as_writer();
+                std::io::copy(&mut decoder.take(len.into()), &mut w)?;
+                Ok(())
+            }
+            CONTENT_TYPE_STRING => {
+                let len = decoder.read_len()?;
+                block.set_clock_len(len);
+                let mut w = block.as_writer();
+                std::io::copy(&mut decoder.take(len.into()), &mut w)?;
+                Ok(())
+            }
+            CONTENT_TYPE_EMBED => {
+                block.set_clock_len(1.into());
+                let json = decoder.read_json::<serde_json::Value>()?;
+                serde_json::to_writer(block.as_writer(), &json)?;
+                Ok(())
+            }
+            CONTENT_TYPE_FORMAT => {
+                block.set_clock_len(1.into());
+                let mut w = block.as_writer();
+                let mut buf: SmallVec<[u8; 16]> = SmallVec::new();
+                decoder.read_string(&mut buf)?;
+                if buf.len() > u8::MAX as usize {
+                    return Err(crate::Error::KeyTooLong);
+                }
+                w.write_u8(buf.len() as u8)?;
+                w.write_all(&buf)?;
+                let value: () = decoder.read_json()?;
+                serde_json::to_writer(w, &value)?;
+                Ok(())
+            }
+            CONTENT_TYPE_NODE => {
+                block.set_clock_len(1.into());
+                let type_ref = decoder.read_type_ref()?;
+                let node_header = NodeHeader::new(type_ref);
+                block.as_writer().write_all(node_header.as_bytes())?;
+                Ok(())
+            }
+            CONTENT_TYPE_DOC => {
+                block.set_clock_len(1.into());
+                todo!()
+            }
+            CONTENT_TYPE_SKIP => Err(crate::Error::UnsupportedContent(CONTENT_TYPE_SKIP)),
+            content_type => Err(crate::Error::UnsupportedContent(content_type)),
+        }
+    }
+}
+
+struct BlockReader<'a, D> {
     decoder: &'a mut D,
     remaining_clients: usize,
     remaining_blocks: usize,
@@ -218,6 +387,16 @@ impl Display for Carrier {
             Carrier::GC(range) => write!(f, "gc({})", range),
             Carrier::Skip(range) => write!(f, "skip({})", range),
             Carrier::Block(block, parent_name) => write!(f, "{}", block),
+        }
+    }
+}
+
+impl Carrier {
+    pub fn len(&self) -> Clock {
+        match self {
+            Carrier::GC(range) => range.len(),
+            Carrier::Skip(range) => range.len(),
+            Carrier::Block(block, _) => block.clock_len(),
         }
     }
 }

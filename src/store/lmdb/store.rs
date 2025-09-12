@@ -150,22 +150,28 @@ impl<'tx> BlockStore<'tx> for Database<'tx> {
     /// If `direct_only` is true, it will only search for blocks that starts with the given ID.
     /// If `direct_only` is false, it will search for blocks that contain the ID anywhere within
     /// their range.
-    fn block_containing(&self, id: ID, direct_only: bool) -> crate::Result<Block> {
+    fn block_containing(&self, id: ID, direct_only: bool) -> crate::Result<Block<'_>> {
         let mut cursor = self.cursor()?;
-        if !cursor.seek(id)? {
-            if direct_only {
-                return Err(Error::BlockNotFound(id));
-            }
-            // we didn't find the block directly, so we need to check the previous block
-            // if it contains the ID within its range
-            if !cursor.prev()? {
-                return Err(Error::BlockNotFound(id));
-            }
+        let found = cursor.seek(id)?;
+        if !found && direct_only {
+            // block was not found, but we're only looking for direct matches
+            return Err(Error::BlockNotFound(id));
         }
+
         let block = cursor.block()?;
         match block {
             Some(block) if block.contains(&id) => Ok(block),
-            _ => Err(Error::BlockNotFound(id)),
+            _ => {
+                if !direct_only && cursor.prev()? {
+                    // if we didn't find the block directly, we need to check the previous block
+                    if let Some(block) = cursor.block()? {
+                        if block.contains(&id) {
+                            return Ok(block);
+                        }
+                    }
+                }
+                Err(Error::BlockNotFound(id))
+            }
         }
     }
 
@@ -215,6 +221,15 @@ impl<'a> BlockCursor<'a> {
             Err(lmdb_rs_m::MdbError::NotFound) => Ok(false),
             Err(e) => Err(Error::Lmdb(e)),
         }
+    }
+
+    pub fn current_id(&mut self) -> crate::Result<Option<&ID>> {
+        let key: &[u8] = self.inner.get_key()?;
+        if key[0] != KEY_PREFIX_BLOCK {
+            return Ok(None);
+        }
+        let id = ID::ref_from_bytes(&key[1..]).map_err(|_| Error::InvalidMapping("ID"))?;
+        Ok(Some(id))
     }
 
     pub fn block(&mut self) -> crate::Result<Option<Block<'a>>> {
@@ -375,7 +390,7 @@ mod test {
         tx.commit().unwrap();
 
         let tx = env.new_transaction().unwrap();
-        let mut db = tx.bind(&h);
+        let db = tx.bind(&h);
 
         let id = ID::new(1.into(), 5.into());
         let actual = db.block_containing(id, false).unwrap();

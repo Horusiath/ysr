@@ -1,7 +1,4 @@
-use crate::lib0::{
-    Tag, TAG_ARRAY, TAG_BIGINT, TAG_BYTE_ARRAY, TAG_FALSE, TAG_FLOAT32, TAG_FLOAT64, TAG_INTEGER,
-    TAG_NULL, TAG_OBJECT, TAG_STRING, TAG_TRUE, TAG_UNDEFINED,
-};
+use crate::lib0::Tag;
 use crate::read::ReadExt;
 use crate::write::WriteExt;
 use std::io::{Read, Write};

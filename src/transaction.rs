@@ -1,5 +1,5 @@
 use crate::block::{Block, BlockBuilder, BlockFlags, ID};
-use crate::block_reader::{BlockRange, BlockReader, Carrier};
+use crate::block_reader::{BlockRange, Carrier, Update};
 use crate::id_set::IDSet;
 use crate::integrate::IntegrationContext;
 use crate::node::{Node, NodeID, NodeType};
@@ -136,7 +136,7 @@ impl<'db> Transaction<'db> {
     }
 
     pub fn apply_update<D: Decoder>(&mut self, decoder: &mut D) -> crate::Result<()> {
-        let mut block_reader = BlockReader::new(decoder)?;
+        let mut update = Update::decode_with(decoder)?;
         let (mut db, state) = self.split_mut();
         let mut missing_sv = StateVector::default();
         //let mut skip_client = None;
