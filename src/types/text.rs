@@ -89,7 +89,7 @@ impl<'tx, 'db> Display for TextRef<&'tx Transaction<'db>> {
         let mut next = node.header().start().cloned();
         let db = self.tx.db();
         while let Some(id) = next {
-            let Ok(block) = db.block_containing(id, false) else {
+            let Ok(block) = db.fetch_block(id, false) else {
                 return Err(std::fmt::Error);
             };
             if block.is_countable() && !block.is_deleted() {

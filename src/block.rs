@@ -740,18 +740,6 @@ impl BlockBuilder {
             // offset could be > 0 only in context of Update::integrate,
             // is such case offset kind in use always means Yjs-compatible offset (utf-16)
 
-            /*this.id.clock += offset;
-            this.left = store
-                .blocks
-                .get_item_clean_end(&ID::new(this.id.client, this.id.clock - 1))
-                .map(|slice| store.materialize(slice));
-            this.origin = this.left.as_deref().map(|b: &Item| b.last_id());
-            this.content = this
-                .content
-                .splice(offset as usize, OffsetKind::Utf16)
-                .unwrap();
-            this.len -= offset;*/
-
             self.id.clock += context.offset;
             let left = match db.split_block(ID::new(self.id.client, self.id.clock - 1))? {
                 SplitResult::Unchanged(left) => left.last_id(),
@@ -821,7 +809,7 @@ impl BlockBuilder {
                 .map(|r| !r.contains(right))
                 .unwrap_or(true)
             {
-                let right = db.block_containing(*right, true)?;
+                let right = db.fetch_block(*right, true)?;
                 context.right = Some(right.into());
             }
             let right = context.right.as_mut().unwrap();

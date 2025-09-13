@@ -1,5 +1,5 @@
 use crate::block::{Block, BlockBuilder, BlockFlags, ID};
-use crate::block_reader::{BlockRange, Carrier, Update};
+use crate::block_reader::{BlockRange, BlockReader, Carrier, Update};
 use crate::id_set::IDSet;
 use crate::integrate::IntegrationContext;
 use crate::node::{Node, NodeID, NodeType};
@@ -12,7 +12,7 @@ use crate::{ClientID, StateVector};
 use bitflags::bitflags;
 use bytes::{Bytes, BytesMut};
 use lmdb_rs_m::{Database, DbHandle};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt::{Display, Formatter};
 use std::io::Write;
 use zerocopy::IntoBytes;
@@ -136,18 +136,19 @@ impl<'db> Transaction<'db> {
     }
 
     pub fn apply_update<D: Decoder>(&mut self, decoder: &mut D) -> crate::Result<()> {
-        let mut update = Update::decode_with(decoder)?;
+        let mut block_reader = BlockReader::new(decoder)?;
         let (mut db, state) = self.split_mut();
         let mut missing_sv = StateVector::default();
-        //let mut skip_client = None;
-        while let Some(res) = block_reader.next() {
+        let mut stack_head = block_reader.next();
+        while let Some(res) = stack_head.take() {
             let carrier = res?;
             match carrier {
                 Carrier::Block(mut block, parent_name) => {
                     let id = *block.id();
                     if state.current_state.contains(&id) {
+                        // offset informs if current block partially overlaps with already integrated blocks
                         let offset = state.current_state.get(&id.client) - id.clock;
-                        if let Some(dep) = Self::missing(&block, &state.current_state) {
+                        if let Some(dep) = Self::missing_dependency(&block, &state.current_state) {
                             // current block is missing a dependency
                             /*
 
@@ -184,152 +185,65 @@ impl<'db> Transaction<'db> {
                         }
                     } else {
                         // update from the same client is missing
-                        let id = block.id();
-                        missing_sv.set_min(id.client, id.clock - 1);
-                        db.insert_block(block.as_ref())?;
-                        // hid a dead wall, add all items from stack to restSS
-                        /*
-                        stack.push(block);
-                        // hid a dead wall, add all items from stack to restSS
-                        Self::return_stack(stack, &mut self.blocks, &mut remaining);
-                        current_target = self.blocks.clients.get_mut(&current_client_id);
-                        stack = Vec::new();
-                         */
+                        stack_head =
+                            Self::push_pending(block, &mut db, &mut block_reader, &mut missing_sv)?
+                                .map(Ok);
                     }
                 }
                 Carrier::GC(range) => {
                     if state.current_state.contains(range.head()) {
+                        // integrate GC by moving the current state clock
                         state
                             .current_state
                             .set_max(range.head().client, range.end());
                     } else {
-                        todo!()
+                        // missing update prevents us from integrating the GC block,
+                        // so just add it to the missing state vector
+                        missing_sv.set_min(range.head().client, range.end());
                     }
                 }
-                Carrier::Skip(range) => continue,
+                Carrier::Skip(_) => continue,
             }
-            /*
-                while let Some(mut block) = stack_head {
-                    if !block.is_skip() {
-                        let id = *block.id();
-                        if local_sv.contains(&id) {
-                            let offset = local_sv.get(&id.client) as i32 - id.clock as i32;
-                            if let Some(dep) = Self::missing(&block, &local_sv) {
-                                stack.push(block);
-                                // get the struct reader that has the missing struct
-                                match self.blocks.clients.get_mut(&dep) {
-                                    Some(block_refs) if !block_refs.is_empty() => {
-                                        stack_head = block_refs.pop_front();
-                                        current_target =
-                                            self.blocks.clients.get_mut(&current_client_id);
-                                        continue;
-                                    }
-                                    _ => {
-                                        // This update message causally depends on another update message that doesn't exist yet
-                                        missing_sv.set_min(dep, local_sv.get(&dep));
-                                        Self::return_stack(stack, &mut self.blocks, &mut remaining);
-                                        current_target =
-                                            self.blocks.clients.get_mut(&current_client_id);
-                                        stack = Vec::new();
-                                    }
-                                }
-                            } else if offset == 0 || (offset as u32) < block.len() {
-                                let offset = offset as u32;
-                                let client = id.client;
-                                local_sv.set_max(client, id.clock + block.len());
-                                if let BlockCarrier::Item(item) = &mut block {
-                                    item.repair(store)?;
-                                }
-                                let should_delete = block.integrate(txn, offset);
-                                let mut delete_ptr = if should_delete {
-                                    let ptr = block.as_item_ptr();
-                                    ptr
-                                } else {
-                                    None
-                                };
-                                store = txn.store_mut();
-                                match block {
-                                    BlockCarrier::Item(item) => {
-                                        if item.parent != TypePtr::Unknown {
-                                            store.blocks.push_block(item)
-                                        } else {
-                                            // parent is not defined. Integrate GC struct instead
-                                            store.blocks.push_gc(BlockRange::new(item.id, item.len));
-                                            delete_ptr = None;
-                                        }
-                                    }
-                                    BlockCarrier::GC(gc) => store.blocks.push_gc(gc),
-                                    BlockCarrier::Skip(_) => { /* do nothing */ }
-                                }
-
-                                if let Some(ptr) = delete_ptr {
-                                    txn.delete(ptr);
-                                }
-                                store = txn.store_mut();
-                            }
-                        } else {
-                            // update from the same client is missing
-                            let id = block.id();
-                            missing_sv.set_min(id.client, id.clock - 1);
-                            stack.push(block);
-                            // hid a dead wall, add all items from stack to restSS
-                            Self::return_stack(stack, &mut self.blocks, &mut remaining);
-                            current_target = self.blocks.clients.get_mut(&current_client_id);
-                            stack = Vec::new();
-                        }
-                    }
-
-                    // iterate to next stackHead
-                    if !stack.is_empty() {
-                        stack_head = stack.pop();
-                    } else {
-                        match current_target.take() {
-                            Some(v) if !v.is_empty() => {
-                                stack_head = v.pop_front();
-                                current_target = Some(v);
-                            }
-                            _ => {
-                                if let Some((client_id, target)) =
-                                    Self::next_target(&mut client_block_ref_ids, &mut self.blocks)
-                                {
-                                    stack_head = target.pop_front();
-                                    current_client_id = client_id;
-                                    current_target = Some(target);
-                                } else {
-                                    // we're done
-                                    break;
-                                }
-                            }
-                        };
-                    }
-                }
-
-                if remaining.is_empty() {
-                    None
-                } else {
-                    Some(PendingUpdate {
-                        update: Update {
-                            blocks: remaining,
-                            delete_set: DeleteSet::new(),
-                        },
-                        missing: missing_sv,
-                    })
-                }
-            };
-
-            let remaining_ds = txn.apply_delete(&self.delete_set).map(|ds| {
-                let mut update = Update::new();
-                update.delete_set = ds;
-                update
-            });
-
-            Ok((remaining_blocks, remaining_ds))
-                 */
         }
         Ok(())
     }
 
-    fn missing(block: &BlockBuilder, local_sv: &StateVector) -> Option<ClientID> {
+    /// Push all pending blocks with the same client ID as `block` into the database.
+    /// These blocks are not immediately integrated, since they are missing dependencies on other blocks.
+    fn push_pending(
+        block: BlockBuilder,
+        db: &mut Database,
+        reader: &mut BlockReader<impl Decoder>,
+        missing_sv: &mut StateVector,
+    ) -> crate::Result<Option<Carrier>> {
+        let id = *block.id();
+        missing_sv.set_min(id.client, id.clock - 1);
+        db.insert_pending_block(block.as_ref())?;
+        while let Some(res) = reader.next() {
+            let carrier = res?;
+            if carrier.id().client != id.client {
+                // different client, return to caller
+                return Ok(Some(carrier));
+            }
+            missing_sv.set_min(carrier.id().client, carrier.end());
+            match carrier {
+                Carrier::Block(block, name) => {
+                    if let Some(name) = name {
+                        let node = Node::root(name);
+                        db.get_or_insert_node(node, NodeType::Unknown)?;
+                    }
+                    db.insert_pending_block(block.as_ref())?;
+                }
+                _ => { /* we don't insert GC or Skips */ }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Check if current `block` has any missing dependencies on other blocks that are not yet integrated.
+    /// A dependency is missing if any of the block's origins (left, right, parent) point to a block that is not yet integrated.
+    /// Returns the client ID of the missing dependency, or None if all dependencies are satisfied.
+    fn missing_dependency(block: &BlockBuilder, local_sv: &StateVector) -> Option<ClientID> {
         if let Some(origin) = &block.origin_left() {
             if origin.client != block.id().client && origin.clock >= local_sv.get(&origin.client) {
                 return Some(origin.client);
@@ -356,43 +270,6 @@ impl<'db> Transaction<'db> {
         }
 
         None
-        /*TODO: implement
-        match &block.content() {
-            ItemContent::Move(m) => {
-                if let Some(start) = m.start.id() {
-                    if start.clock >= local_sv.get(&start.client) {
-                        return Some(start.client);
-                    }
-                }
-                if !m.is_collapsed() {
-                    if let Some(end) = m.end.id() {
-                        if end.clock >= local_sv.get(&end.client) {
-                            return Some(end.client);
-                        }
-                    }
-                }
-            }
-            #[cfg(feature = "weak")]
-            ItemContent::Type(branch) => {
-                if let crate::types::TypeRef::WeakLink(source) = &branch.type_ref {
-                    let start = source.quote_start.id();
-                    let end = source.quote_end.id();
-                    if let Some(start) = start {
-                        if start.clock >= local_sv.get(&start.client) {
-                            return Some(start.client);
-                        }
-                    }
-                    if start != end {
-                        if let Some(end) = &source.quote_end.id() {
-                            if end.clock >= local_sv.get(&end.client) {
-                                return Some(end.client);
-                            }
-                        }
-                    }
-                }
-            }
-            _ => { /* do nothing */ }
-        }*/
     }
 
     pub fn commit(mut self, summary: Option<&mut TransactionSummary>) -> crate::Result<()> {

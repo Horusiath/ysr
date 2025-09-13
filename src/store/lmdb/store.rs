@@ -10,12 +10,13 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 pub trait BlockStore<'tx> {
     fn cursor(&self) -> crate::Result<BlockCursor<'_>>;
     fn insert_block(&mut self, block: Block) -> crate::Result<()>;
+    fn insert_pending_block(&mut self, block: Block) -> crate::Result<()>;
     fn try_update_clock(&mut self, id: ID) -> crate::Result<Clock>;
     fn split_block(&self, id: ID) -> crate::Result<SplitResult>;
     fn remove(&mut self, id: &BlockRange) -> crate::Result<()>;
     fn clock(&self, client_id: ClientID) -> crate::Result<Option<Clock>>;
     fn state_vector(&self) -> crate::Result<StateVector>;
-    fn block_containing(&self, id: ID, direct_only: bool) -> crate::Result<Block>;
+    fn fetch_block(&self, id: ID, direct_only: bool) -> crate::Result<Block>;
 
     fn entry(&self, map: &ID, entry_key: &str) -> crate::Result<ID>;
     fn set_entry(&mut self, map: &ID, entry_key: &str, value: &ID) -> crate::Result<()>;
@@ -25,7 +26,7 @@ pub trait BlockStore<'tx> {
         node: Node<'_>,
         node_type: NodeType,
     ) -> crate::Result<BlockBuilder> {
-        match self.block_containing(node.id(), true) {
+        match self.fetch_block(node.id(), true) {
             Ok(block) => Ok(block.into()),
             Err(crate::Error::BlockNotFound(_)) => {
                 if node.is_root() {
@@ -61,6 +62,16 @@ impl<'tx> BlockStore<'tx> for Database<'tx> {
         Ok(())
     }
 
+    fn insert_pending_block(&mut self, block: Block) -> crate::Result<()> {
+        let key = BlockKey::new(*block.id());
+        let key = key.as_bytes();
+        let value = block.bytes();
+
+        self.set(&key, &value)?;
+
+        Ok(())
+    }
+
     /// Inserts an [ID] into the state vector, updating the clock for the client if necessary.
     /// Returns the updated clock value: if [ID] is greater than the existing clock, its own clock
     /// is returned, otherwise the existing clock is returned.
@@ -87,8 +98,8 @@ impl<'tx> BlockStore<'tx> for Database<'tx> {
         }
     }
 
-    fn split_block(&self, id: ID) -> crate::Result<SplitResult> {
-        let left = self.block_containing(id, false)?;
+    fn split_block(&self, id: ID) -> crate::Result<SplitResult<'_>> {
+        let left = self.fetch_block(id, false)?;
         let clock = left.id().clock;
         if id.clock > clock && id.clock < clock + left.clock_len() {
             let offset = id.clock - left.id().clock;
@@ -150,7 +161,7 @@ impl<'tx> BlockStore<'tx> for Database<'tx> {
     /// If `direct_only` is true, it will only search for blocks that starts with the given ID.
     /// If `direct_only` is false, it will search for blocks that contain the ID anywhere within
     /// their range.
-    fn block_containing(&self, id: ID, direct_only: bool) -> crate::Result<Block<'_>> {
+    fn fetch_block(&self, id: ID, direct_only: bool) -> crate::Result<Block<'_>> {
         let mut cursor = self.cursor()?;
         let found = cursor.seek(id)?;
         if !found && direct_only {
@@ -337,7 +348,7 @@ mod test {
 
         let tx = env.new_transaction().unwrap();
         let mut db = tx.bind(&h);
-        let actual = db.block_containing(id, true).unwrap();
+        let actual = db.fetch_block(id, true).unwrap();
 
         assert_eq!(actual.as_bytes(), block.as_ref().as_bytes());
     }
@@ -393,7 +404,7 @@ mod test {
         let db = tx.bind(&h);
 
         let id = ID::new(1.into(), 5.into());
-        let actual = db.block_containing(id, false).unwrap();
+        let actual = db.fetch_block(id, false).unwrap();
 
         assert_eq!(actual.as_bytes(), searched.as_ref().as_bytes());
     }

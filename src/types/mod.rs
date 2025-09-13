@@ -63,7 +63,7 @@ where
         Txn: Borrow<Transaction<'db>>,
     {
         let borrowed = tx.borrow();
-        let block: BlockBuilder = borrowed.db().block_containing(self.node_id(), true)?.into();
+        let block: BlockBuilder = borrowed.db().fetch_block(self.node_id(), true)?.into();
         Ok(Mounted::new(block, tx))
     }
 }

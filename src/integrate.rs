@@ -92,7 +92,7 @@ impl IntegrationContext {
         } else if let Some(sub) = &target.entry_key() {
             let mut o = db.entry(parent.id(), sub).optional()?;
             while let Some(id) = o {
-                let item = db.block_containing(id, true)?;
+                let item = db.fetch_block(id, true)?;
                 if let Some(left) = item.left() {
                     o = Some(*left);
                     continue;
@@ -118,7 +118,7 @@ impl IntegrationContext {
             items_before_origin.insert(item.clone());
             conflicting_items.insert(item.clone());
 
-            let item = db.block_containing(item, true)?;
+            let item = db.fetch_block(item, true)?;
             if target.origin_left() == item.origin_left() {
                 // case 1
                 let item_id = item.id();
@@ -134,7 +134,7 @@ impl IntegrationContext {
             } else {
                 if let Some(origin_left) = item
                     .origin_left()
-                    .and_then(|&id| db.block_containing(id, true).ok())
+                    .and_then(|&id| db.fetch_block(id, true).ok())
                 {
                     if items_before_origin.contains(&origin_left.id()) {
                         if !conflicting_items.contains(&origin_left.id()) {

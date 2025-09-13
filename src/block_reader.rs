@@ -182,7 +182,7 @@ impl Update {
     }
 }
 
-struct BlockReader<'a, D> {
+pub(crate) struct BlockReader<'a, D> {
     decoder: &'a mut D,
     remaining_clients: usize,
     remaining_blocks: usize,
@@ -392,6 +392,22 @@ impl Display for Carrier {
 }
 
 impl Carrier {
+    pub fn id(&self) -> &ID {
+        match self {
+            Carrier::GC(range) => range.head(),
+            Carrier::Skip(range) => range.head(),
+            Carrier::Block(block, _) => block.id(),
+        }
+    }
+
+    pub fn end(&self) -> Clock {
+        match self {
+            Carrier::GC(range) => range.end(),
+            Carrier::Skip(range) => range.end(),
+            Carrier::Block(block, _) => block.id().clock + block.clock_len() - 1,
+        }
+    }
+
     pub fn len(&self) -> Clock {
         match self {
             Carrier::GC(range) => range.len(),
