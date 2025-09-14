@@ -153,12 +153,12 @@ impl BlockHeader {
             && id.clock < self.left.clock + self.clock_len // id is smaller than block's end clock
     }
 
-    pub fn parse(data: &[u8]) -> Result<(&BlockHeader, &[u8]), ParseError> {
+    pub fn parse(data: &[u8]) -> Result<(&BlockHeader, &[u8]), ParseError<'_>> {
         let (header, body) = Self::ref_from_prefix(data)?;
         Ok((header, body))
     }
 
-    pub fn parse_mut(data: &mut [u8]) -> Result<(&mut BlockHeader, &mut [u8]), ParseMutError> {
+    pub fn parse_mut(data: &mut [u8]) -> Result<(&mut BlockHeader, &mut [u8]), ParseMutError<'_>> {
         let (header, body) = Self::mut_from_prefix(data)?;
         Ok((header, body))
     }
@@ -556,7 +556,7 @@ impl BlockBuilder {
         header.entry_key(body)
     }
 
-    pub fn content(&self) -> Result<BlockContent> {
+    pub fn content(&self) -> Result<BlockContent<'_>> {
         let (header, body) = BlockHeader::parse(&self.body).unwrap();
         header.content(body)
     }

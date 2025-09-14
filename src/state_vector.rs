@@ -89,7 +89,7 @@ impl StateVector {
 
     /// Returns an iterator which enables to traverse over all clients and their known clock values
     /// described by a current state vector.
-    pub fn iter(&self) -> std::collections::btree_map::Iter<ClientID, Clock> {
+    pub fn iter(&self) -> std::collections::btree_map::Iter<'_, ClientID, Clock> {
         self.0.iter()
     }
 

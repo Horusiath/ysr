@@ -4,11 +4,14 @@ use crate::block::{
     CONTENT_TYPE_NODE, CONTENT_TYPE_SKIP, CONTENT_TYPE_STRING, ID,
 };
 use crate::id_set::IDSet;
+use crate::integrate::IntegrationContext;
 use crate::node::{NodeHeader, NodeID};
 use crate::read::{Decode, Decoder, ReadExt};
+use crate::transaction::TransactionState;
 use crate::write::WriteExt;
 use crate::{ClientID, Clock};
 use bytes::BytesMut;
+use lmdb_rs_m::Database;
 use smallvec::SmallVec;
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt::{Display, Formatter};
@@ -414,6 +417,38 @@ impl Carrier {
             Carrier::Skip(range) => range.len(),
             Carrier::Block(block, _) => block.clock_len(),
         }
+    }
+
+    pub fn is_skip(&self) -> bool {
+        matches!(self, Carrier::Skip(_))
+    }
+
+    #[inline(always)]
+    pub fn integrate(
+        self,
+        offset: Clock,
+        state: &mut TransactionState,
+        db: &mut Database,
+    ) -> crate::Result<()> {
+        match self {
+            Carrier::GC(range) => {
+                let id = range.head();
+                state
+                    .current_state
+                    .set_max(id.client, id.clock + range.len());
+            }
+            Carrier::Block(mut block, parent_name) => {
+                let id = *block.id();
+                let mut context =
+                    IntegrationContext::create(&mut block, parent_name.as_deref(), offset, db)?;
+                state
+                    .current_state
+                    .set_max(id.client, id.clock + block.clock_len());
+                block.integrate(db, state, &mut context)?;
+            }
+            Carrier::Skip(_) => { /* ignore skip blocks */ }
+        }
+        Ok(())
     }
 }
 

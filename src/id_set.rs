@@ -80,6 +80,10 @@ impl IDSet {
     pub fn get(&self, client_id: &ClientID) -> Option<&IDRange> {
         self.0.get(client_id)
     }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&ClientID, &IDRange)> {
+        self.0.iter()
+    }
 }
 
 impl Encode for IDSet {

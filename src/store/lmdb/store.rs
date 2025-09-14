@@ -1,10 +1,11 @@
 use crate::block::{Block, BlockBuilder, ID};
-use crate::block_reader::BlockRange;
+use crate::block_reader::{BlockRange, Carrier};
+use crate::id_set::IDSet;
 use crate::node::{Node, NodeType};
 use crate::{ClientID, Clock, Error, StateVector};
 use lmdb_rs_m::{Database, MdbError};
 use smallvec::{smallvec, SmallVec};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 pub trait BlockStore<'tx> {
@@ -12,14 +13,21 @@ pub trait BlockStore<'tx> {
     fn insert_block(&mut self, block: Block) -> crate::Result<()>;
     fn insert_pending_block(&mut self, block: Block) -> crate::Result<()>;
     fn try_update_clock(&mut self, id: ID) -> crate::Result<Clock>;
-    fn split_block(&self, id: ID) -> crate::Result<SplitResult>;
+    fn split_block(&self, id: ID) -> crate::Result<SplitResult<'_>>;
     fn remove(&mut self, id: &BlockRange) -> crate::Result<()>;
     fn clock(&self, client_id: ClientID) -> crate::Result<Option<Clock>>;
     fn state_vector(&self) -> crate::Result<StateVector>;
-    fn fetch_block(&self, id: ID, direct_only: bool) -> crate::Result<Block>;
+    fn fetch_block(&self, id: ID, direct_only: bool) -> crate::Result<Block<'_>>;
 
     fn entry(&self, map: &ID, entry_key: &str) -> crate::Result<ID>;
     fn set_entry(&mut self, map: &ID, entry_key: &str, value: &ID) -> crate::Result<()>;
+
+    fn insert_pending_update(
+        &mut self,
+        missing_sv: &StateVector,
+        remaining: &BTreeMap<ClientID, VecDeque<Carrier>>,
+        pending_delete_set: &IDSet,
+    ) -> crate::Result<()>;
 
     fn get_or_insert_node(
         &mut self,
@@ -99,19 +107,20 @@ impl<'tx> BlockStore<'tx> for Database<'tx> {
     }
 
     fn split_block(&self, id: ID) -> crate::Result<SplitResult<'_>> {
-        let left = self.fetch_block(id, false)?;
-        let clock = left.id().clock;
-        if id.clock > clock && id.clock < clock + left.clock_len() {
-            let offset = id.clock - left.id().clock;
-            let mut left = BlockBuilder::from_block(&left);
-            let right = left.splice(offset)?;
-            Ok(SplitResult::Split(left, right.unwrap()))
-        } else {
-            Ok(SplitResult::Unchanged(left))
+        let mut cursor = self.cursor()?;
+        match cursor.seek(id, false)? {
+            None => Err(crate::Error::BlockNotFound(id)),
+            Some(found_id) => {
+                let offset = id.clock - found_id.clock;
+                cursor.split_at(offset)
+            }
         }
     }
 
     fn remove(&mut self, id: &BlockRange) -> crate::Result<()> {
+        match self.split_block(*id.head()) {
+
+        }
         todo!()
     }
 
@@ -163,26 +172,11 @@ impl<'tx> BlockStore<'tx> for Database<'tx> {
     /// their range.
     fn fetch_block(&self, id: ID, direct_only: bool) -> crate::Result<Block<'_>> {
         let mut cursor = self.cursor()?;
-        let found = cursor.seek(id)?;
-        if !found && direct_only {
-            // block was not found, but we're only looking for direct matches
-            return Err(Error::BlockNotFound(id));
-        }
-
-        let block = cursor.block()?;
-        match block {
-            Some(block) if block.contains(&id) => Ok(block),
-            _ => {
-                if !direct_only && cursor.prev()? {
-                    // if we didn't find the block directly, we need to check the previous block
-                    if let Some(block) = cursor.block()? {
-                        if block.contains(&id) {
-                            return Ok(block);
-                        }
-                    }
-                }
-                Err(Error::BlockNotFound(id))
-            }
+        if let Some(_) = cursor.seek(id, direct_only)? {
+            let block = cursor.block()?.unwrap();
+            Ok(block)
+        } else {
+            Err(crate::Error::BlockNotFound(id))
         }
     }
 
@@ -202,6 +196,15 @@ impl<'tx> BlockStore<'tx> for Database<'tx> {
         self.set(&key.as_slice(), &value.as_bytes())?;
         Ok(())
     }
+
+    fn insert_pending_update(
+        &mut self,
+        missing_sv: &StateVector,
+        remaining: &BTreeMap<ClientID, VecDeque<Carrier>>,
+        pending_delete_set: &IDSet,
+    ) -> crate::Result<()> {
+        todo!()
+    }
 }
 
 pub struct BlockCursor<'a> {
@@ -209,12 +212,72 @@ pub struct BlockCursor<'a> {
 }
 
 impl<'a> BlockCursor<'a> {
-    pub fn seek(&mut self, id: ID) -> crate::Result<bool> {
+    /// Seeks the cursor to the given block ID.
+    /// If `direct` is true, it will only seek to the block that starts with the given ID.
+    /// If `direct` is false, it will seek to the block that contains the ID anywhere within its range.
+    pub fn seek(&mut self, id: ID, direct: bool) -> crate::Result<Option<&ID>> {
         let key = BlockKey::new(id);
+        // try to seek to the exact key first
         match self.inner.to_gte_key(&key.as_bytes()) {
-            Ok(_) => Ok(true),
-            Err(lmdb_rs_m::MdbError::NotFound) => Ok(false),
-            Err(e) => Err(Error::Lmdb(e)),
+            Ok(()) => {
+                let key: &[u8] = self.inner.get_key()?;
+                if key[0] == KEY_PREFIX_BLOCK {
+                    // the nearest >= key is a block, check if it's the one we're looking for
+                    let current_id =
+                        ID::ref_from_bytes(&key[1..]).map_err(|_| Error::InvalidMapping("ID"))?;
+                    if current_id == &id {
+                        return Ok(Some(current_id)); // found the block directly
+                    } else if direct {
+                        return Ok(None); // failed to found direct match
+                    }
+                }
+            }
+            Err(lmdb_rs_m::MdbError::NotFound) => {
+                // no >= key found, if we're looking for direct match, return None
+                if direct {
+                    return Ok(None);
+                }
+            }
+            Err(e) => return Err(Error::Lmdb(e)),
+        }
+
+        // at this point we either didn't find the block directly, and we're looking for indirect match
+        // we need to move left to find the block that might contain the ID
+        self.seek_prev_indirect(&id)
+    }
+
+    fn seek_prev_indirect(&mut self, id: &ID) -> crate::Result<Option<&ID>> {
+        if self.prev()? {
+            let key: &[u8] = self.inner.get_key()?;
+            if key[0] == KEY_PREFIX_BLOCK {
+                // previous entry is a block, check if it contains the ID
+                let current_id =
+                    ID::ref_from_bytes(&key[1..]).map_err(|_| Error::InvalidMapping("ID"))?;
+                if current_id.client == id.client {
+                    // client IDs match, check clock range
+                    let value = self.inner.get_value()?;
+                    let block = Block::new(*current_id, value)?;
+                    if block.contains(id) {
+                        // found a block that contains the ID
+                        return Ok(Some(current_id));
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    pub fn split_at(&mut self, offset: Clock) -> crate::Result<SplitResult<'a>> {
+        let block = match self.block()? {
+            None => return Err(crate::Error::NotFound),
+            Some(block) => block,
+        };
+        if offset == 0 || offset >= block.clock_len() {
+            Ok(SplitResult::Unchanged(block))
+        } else {
+            let mut left = BlockBuilder::from_block(&block);
+            let right = left.splice(offset)?;
+            Ok(SplitResult::Split(left, right.unwrap()))
         }
     }
 
