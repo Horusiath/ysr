@@ -1,16 +1,15 @@
 use crate::block::{
     CONTENT_TYPE_ATOM, CONTENT_TYPE_BINARY, CONTENT_TYPE_DELETED, CONTENT_TYPE_DOC,
     CONTENT_TYPE_EMBED, CONTENT_TYPE_FORMAT, CONTENT_TYPE_JSON, CONTENT_TYPE_NODE,
-    CONTENT_TYPE_STRING,
+    CONTENT_TYPE_STRING, ID,
 };
-use crate::node::NodeHeader;
+use crate::node::NodeType;
 use crate::{lib0, Clock};
 use serde::de::DeserializeOwned;
 use std::fmt::{Debug, Display, Formatter};
 use std::io::Cursor;
 use std::marker::PhantomData;
-use std::ops::{Deref, DerefMut};
-use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, TryFromBytes};
+use zerocopy::{Immutable, IntoBytes, KnownLayout, TryFromBytes};
 
 #[repr(u8)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq, TryFromBytes, KnownLayout, Immutable, IntoBytes)]
@@ -39,6 +38,33 @@ impl ContentType {
             ContentType::Deleted => false,
             ContentType::Format => false,
             //ContentType::Move => false,
+        }
+    }
+
+    #[inline]
+    pub fn is_mergeable(self) -> bool {
+        match self {
+            ContentType::Atom => true,
+            ContentType::Json => true,
+            ContentType::String => true,
+            ContentType::Deleted => true,
+            _ => false,
+        }
+    }
+}
+
+impl Display for ContentType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ContentType::Deleted => write!(f, "deleted"),
+            ContentType::Json => write!(f, "json"),
+            ContentType::Binary => write!(f, "binary"),
+            ContentType::String => write!(f, "string"),
+            ContentType::Embed => write!(f, "embed"),
+            ContentType::Format => write!(f, "format"),
+            ContentType::Node => write!(f, "node"),
+            ContentType::Atom => write!(f, "atom"),
+            ContentType::Doc => write!(f, "doc"),
         }
     }
 }
@@ -71,7 +97,7 @@ pub(crate) enum BlockContent<'a> {
     Binary(&'a [u8]) = CONTENT_TYPE_BINARY,
     Embed(&'a [u8]) = CONTENT_TYPE_EMBED,
     Text(&'a str) = CONTENT_TYPE_STRING,
-    Node(ContentNode<'a>) = CONTENT_TYPE_NODE,
+    Node(ContentNode) = CONTENT_TYPE_NODE,
     Format(ContentFormat<'a>) = CONTENT_TYPE_FORMAT,
     Doc(&'a [u8]) = CONTENT_TYPE_DOC,
     // to be supported..
@@ -102,7 +128,7 @@ impl<'a> BlockContent<'a> {
             Self::Binary(bin) => bin,
             Self::Embed(bin) => bin,
             Self::Text(text) => text.as_bytes(),
-            Self::Node(node) => node.as_bytes(),
+            Self::Node(node) => &[],
             Self::Format(format) => format.body(),
             Self::Doc(doc) => doc,
         }
@@ -134,7 +160,7 @@ pub(crate) enum BlockContentMut<'a> {
     Binary(&'a [u8]) = CONTENT_TYPE_BINARY,
     Embed(&'a [u8]) = CONTENT_TYPE_EMBED,
     Text(&'a str) = CONTENT_TYPE_STRING,
-    Node(ContentNodeMut<'a>) = CONTENT_TYPE_NODE,
+    Node(ContentNode) = CONTENT_TYPE_NODE,
     Format(ContentFormat<'a>) = CONTENT_TYPE_FORMAT,
     Doc(&'a [u8]) = CONTENT_TYPE_DOC,
     // to be supported..
@@ -371,127 +397,39 @@ where
 }
 
 #[derive(PartialEq)]
-pub struct ContentNode<'a> {
-    data: &'a [u8],
+pub struct ContentNode {
+    node_type: NodeType,
+    start: Option<ID>,
 }
 
-impl<'a> ContentNode<'a> {
-    pub fn new(data: &'a [u8]) -> crate::Result<Self> {
-        if NodeHeader::try_ref_from_prefix(data).is_err() {
-            return Err(crate::Error::InvalidMapping("NodeHeader"));
-        }
-
-        Ok(Self { data })
+impl ContentNode {
+    #[inline]
+    pub fn new(node_type: NodeType, start: Option<ID>) -> Self {
+        Self { node_type, start }
     }
 
-    pub fn as_bytes(&self) -> &'a [u8] {
-        self.data
+    pub fn node_type(&self) -> NodeType {
+        self.node_type
     }
 
-    pub fn header(&self) -> &'a NodeHeader {
-        let (header, _) = NodeHeader::ref_from_prefix(self.data).unwrap();
-        header
-    }
-
-    pub fn name(&self) -> &'a str {
-        let (_, suffix) = NodeHeader::ref_from_prefix(self.data).unwrap();
-        unsafe { std::str::from_utf8_unchecked(suffix) }
+    pub fn start(&self) -> Option<&ID> {
+        self.start.as_ref()
     }
 }
 
-impl<'a> Deref for ContentNode<'a> {
-    type Target = NodeHeader;
-
-    fn deref(&self) -> &Self::Target {
-        self.header()
-    }
-}
-
-impl<'a> Debug for ContentNode<'a> {
+impl Debug for ContentNode {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Display::fmt(&self.header(), f)
+        std::fmt::Display::fmt(&self, f)
     }
 }
 
-impl<'a> Display for ContentNode<'a> {
+impl Display for ContentNode {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let (header, suffix) = NodeHeader::ref_from_prefix(self.data).unwrap();
-        write!(f, "{:?}", header.node_type())?;
-        if !suffix.is_empty() {
-            write!(f, "::'{}'", unsafe {
-                std::str::from_utf8_unchecked(suffix)
-            })
-        } else {
-            Ok(())
+        write!(f, "{}", self.node_type)?;
+        if let Some(start) = &self.start {
+            write!(f, " @{}", start.clock)?;
         }
-    }
-}
-
-#[derive(PartialEq)]
-pub struct ContentNodeMut<'a> {
-    data: &'a mut [u8],
-}
-
-impl<'a> ContentNodeMut<'a> {
-    pub fn new(data: &'a mut [u8]) -> crate::Result<Self> {
-        if NodeHeader::try_ref_from_prefix(data).is_err() {
-            return Err(crate::Error::InvalidMapping("NodeHeader"));
-        }
-
-        Ok(Self { data })
-    }
-
-    pub fn as_bytes(&self) -> &[u8] {
-        self.data
-    }
-
-    pub fn header(&self) -> &NodeHeader {
-        let (header, _) = NodeHeader::ref_from_prefix(self.data).unwrap();
-        header
-    }
-
-    pub fn header_mut(&mut self) -> &mut NodeHeader {
-        let (header, _) = NodeHeader::mut_from_prefix(self.data).unwrap();
-        header
-    }
-
-    pub fn name(&self) -> &str {
-        let (_, suffix) = NodeHeader::ref_from_prefix(self.data).unwrap();
-        unsafe { std::str::from_utf8_unchecked(suffix) }
-    }
-}
-
-impl<'a> Deref for ContentNodeMut<'a> {
-    type Target = NodeHeader;
-
-    fn deref(&self) -> &Self::Target {
-        self.header()
-    }
-}
-
-impl<'a> DerefMut for ContentNodeMut<'a> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.header_mut()
-    }
-}
-
-impl<'a> Debug for ContentNodeMut<'a> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Display::fmt(&self.header(), f)
-    }
-}
-
-impl<'a> Display for ContentNodeMut<'a> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let (header, suffix) = NodeHeader::ref_from_prefix(self.data).unwrap();
-        write!(f, "{:?}", header.node_type())?;
-        if !suffix.is_empty() {
-            write!(f, "::'{}'", unsafe {
-                std::str::from_utf8_unchecked(suffix)
-            })
-        } else {
-            Ok(())
-        }
+        Ok(())
     }
 }
 

@@ -1,6 +1,5 @@
 use crate::block::{BlockBuilder, ID};
-use crate::content::{BlockContent, ContentNode};
-use crate::node::{Node, NodeHeader, NodeID, NodeType};
+use crate::node::{Node, NodeID, NodeType};
 use crate::store::lmdb::BlockStore;
 use crate::Transaction;
 use std::borrow::{Borrow, BorrowMut, Cow};

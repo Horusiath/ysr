@@ -4,9 +4,9 @@ use crate::node::{Node, NodeType};
 use crate::store::lmdb::store::SplitResult;
 use crate::store::lmdb::BlockStore;
 use crate::{Clock, Optional};
-use bitflags::Flags;
 use lmdb_rs_m::Database;
 use std::collections::HashSet;
+use std::ops::Deref;
 
 pub(crate) struct IntegrationContext {
     pub left: Option<BlockBuilder>,
@@ -18,7 +18,6 @@ pub(crate) struct IntegrationContext {
 impl IntegrationContext {
     pub fn create(
         target: &mut BlockBuilder,
-        parent_name: Option<&str>,
         offset: Clock,
         db: &mut Database,
     ) -> crate::Result<Self> {
@@ -41,17 +40,17 @@ impl IntegrationContext {
 
         if !target.flags().contains(BlockFlags::HAS_PARENT) {
             let parent = match &left {
-                Some(left) => Some(*left.parent()),
+                Some(left) => Some(*left.deref().parent()),
                 None => match &right {
                     None => None,
-                    Some(right) => Some(*right.parent()),
+                    Some(right) => Some(*right.deref().parent()),
                 },
             };
             if let Some(parent) = parent {
                 target.set_parent(parent);
             }
         }
-        let node = match parent_name {
+        let node = match target.parent() {
             None => Node::nested(*target.parent()),
             Some(parent_name) => Node::root(parent_name),
         };
@@ -101,7 +100,7 @@ impl IntegrationContext {
             }
             o.clone()
         } else {
-            parent_node.header().start().cloned()
+            parent_node.start().cloned()
         };
 
         let mut left = target.left().cloned();

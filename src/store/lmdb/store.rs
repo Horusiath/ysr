@@ -10,8 +10,8 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 pub trait BlockStore<'tx> {
     fn cursor(&self) -> crate::Result<BlockCursor<'_>>;
-    fn insert_block(&mut self, block: Block) -> crate::Result<()>;
-    fn insert_pending_block(&mut self, block: Block) -> crate::Result<()>;
+    fn insert_block(&mut self, builder: BlockBuilder) -> crate::Result<()>;
+    fn update_block(&mut self, block: Block) -> crate::Result<()>;
     fn try_update_clock(&mut self, id: ID) -> crate::Result<Clock>;
     fn split_block(&self, id: ID) -> crate::Result<SplitResult<'_>>;
     fn remove(&mut self, id: &BlockRange) -> crate::Result<()>;
@@ -40,7 +40,7 @@ pub trait BlockStore<'tx> {
                 if node.is_root() {
                     // since root nodes live forever, we can create it if it does not exist
                     let block = BlockBuilder::new_node(node, node_type);
-                    self.insert_block(block.as_ref())?;
+                    self.insert_block(block.as_block())?;
                     Ok(block)
                 } else {
                     // nested nodes are not created automatically, if we didn't find it, we return an error
@@ -66,16 +66,6 @@ impl<'tx> BlockStore<'tx> for Database<'tx> {
 
         self.set(&key, &value)?;
         self.try_update_clock(block.last_id())?;
-
-        Ok(())
-    }
-
-    fn insert_pending_block(&mut self, block: Block) -> crate::Result<()> {
-        let key = BlockKey::new(*block.id());
-        let key = key.as_bytes();
-        let value = block.bytes();
-
-        self.set(&key, &value)?;
 
         Ok(())
     }
@@ -118,9 +108,6 @@ impl<'tx> BlockStore<'tx> for Database<'tx> {
     }
 
     fn remove(&mut self, id: &BlockRange) -> crate::Result<()> {
-        match self.split_block(*id.head()) {
-
-        }
         todo!()
     }
 
@@ -334,6 +321,7 @@ const KEY_PREFIX_META: u8 = 0x00;
 const KEY_PREFIX_STATE_VECTOR: u8 = 0x01;
 const KEY_PREFIX_BLOCK: u8 = 0x02;
 const KEY_PREFIX_MAP: u8 = 0x03;
+const KEY_PREFIX_CONTENT: u8 = 0x04;
 
 #[repr(C, packed)]
 #[derive(FromBytes, IntoBytes, Immutable, KnownLayout, Clone, Copy, Debug, PartialEq, Eq)]
@@ -346,6 +334,22 @@ impl BlockKey {
     pub fn new(id: ID) -> Self {
         BlockKey {
             tag: KEY_PREFIX_BLOCK,
+            id,
+        }
+    }
+}
+
+#[repr(C, packed)]
+#[derive(FromBytes, IntoBytes, Immutable, KnownLayout, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BlockContentKey {
+    tag: u8,
+    id: ID,
+}
+
+impl BlockContentKey {
+    pub fn new(id: ID) -> Self {
+        BlockContentKey {
+            tag: KEY_PREFIX_CONTENT,
             id,
         }
     }

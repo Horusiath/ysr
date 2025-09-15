@@ -5,7 +5,7 @@ use crate::block::{
 };
 use crate::id_set::IDSet;
 use crate::integrate::IntegrationContext;
-use crate::node::{NodeHeader, NodeID};
+use crate::node::NodeID;
 use crate::read::{Decode, Decoder, ReadExt};
 use crate::transaction::TransactionState;
 use crate::write::WriteExt;
@@ -244,12 +244,12 @@ impl<'a, D: Decoder> BlockReader<'a, D> {
                 let (block, parent_name) = self.read_block(block_id, info)?;
                 self.remaining_blocks -= 1;
                 self.current_clock += block.clock_len();
-                Ok(Some(Carrier::Block(block, parent_name)))
+                Ok(Some(Carrier::Block(block)))
             }
         }
     }
 
-    fn read_block(&mut self, id: ID, info: u8) -> crate::Result<(BlockBuilder, Option<String>)> {
+    fn read_block(&mut self, id: ID, info: u8) -> crate::Result<BlockBuilder> {
         let mut block = BlockBuilder::parse(id, BytesMut::zeroed(BlockHeader::SIZE))?;
         let mut parent_name = None;
         let cannot_copy_parent_info = info & (HAS_RIGHT_ID | HAS_LEFT_ID) == 0;
@@ -381,7 +381,7 @@ const HAS_PARENT_SUB: u8 = 0b0010_0000;
 pub enum Carrier {
     GC(BlockRange) = 0,
     Skip(BlockRange) = 10,
-    Block(BlockBuilder, Option<String>),
+    Block(BlockBuilder),
 }
 
 impl Display for Carrier {
@@ -389,7 +389,7 @@ impl Display for Carrier {
         match self {
             Carrier::GC(range) => write!(f, "gc({})", range),
             Carrier::Skip(range) => write!(f, "skip({})", range),
-            Carrier::Block(block, parent_name) => write!(f, "{}", block),
+            Carrier::Block(block) => write!(f, "{}", block),
         }
     }
 }
@@ -399,7 +399,7 @@ impl Carrier {
         match self {
             Carrier::GC(range) => range.head(),
             Carrier::Skip(range) => range.head(),
-            Carrier::Block(block, _) => block.id(),
+            Carrier::Block(block) => block.id(),
         }
     }
 
@@ -407,7 +407,7 @@ impl Carrier {
         match self {
             Carrier::GC(range) => range.end(),
             Carrier::Skip(range) => range.end(),
-            Carrier::Block(block, _) => block.id().clock + block.clock_len() - 1,
+            Carrier::Block(block) => block.id().clock + block.clock_len() - 1,
         }
     }
 
@@ -415,7 +415,7 @@ impl Carrier {
         match self {
             Carrier::GC(range) => range.len(),
             Carrier::Skip(range) => range.len(),
-            Carrier::Block(block, _) => block.clock_len(),
+            Carrier::Block(block) => block.clock_len(),
         }
     }
 
@@ -437,10 +437,9 @@ impl Carrier {
                     .current_state
                     .set_max(id.client, id.clock + range.len());
             }
-            Carrier::Block(mut block, parent_name) => {
+            Carrier::Block(mut block) => {
                 let id = *block.id();
-                let mut context =
-                    IntegrationContext::create(&mut block, parent_name.as_deref(), offset, db)?;
+                let mut context = IntegrationContext::create(&mut block, offset, db)?;
                 state
                     .current_state
                     .set_max(id.client, id.clock + block.clock_len());
@@ -506,7 +505,7 @@ mod test {
         let mut reader = BlockReader::new(&mut decoder).unwrap();
         const CLIENT: ClientID = unsafe { ClientID::new_unchecked(1490905955) };
         // index: 0
-        let Carrier::Block(n, _) = reader.next().unwrap().unwrap() else {
+        let Carrier::Block(n) = reader.next().unwrap().unwrap() else {
             unreachable!()
         };
         assert_eq!(n.id(), &ID::new(CLIENT, 0.into()));
@@ -518,7 +517,7 @@ mod test {
         assert_eq!(text, "0");
 
         // index: 1
-        let Carrier::Block(n, _) = reader.next().unwrap().unwrap() else {
+        let Carrier::Block(n) = reader.next().unwrap().unwrap() else {
             unreachable!()
         };
         assert_eq!(n.id(), &ID::new(CLIENT, 1.into()));
@@ -529,7 +528,7 @@ mod test {
         assert_eq!(text, "1");
 
         // index: 2
-        let Carrier::Block(n, _) = reader.next().unwrap().unwrap() else {
+        let Carrier::Block(n) = reader.next().unwrap().unwrap() else {
             unreachable!()
         };
         assert_eq!(n.id(), &ID::new(CLIENT, 2.into()));
