@@ -1,16 +1,18 @@
 use crate::block::{
-    Block, BlockBuilder, BlockHeader, CONTENT_TYPE_ATOM, CONTENT_TYPE_BINARY, CONTENT_TYPE_DELETED,
-    CONTENT_TYPE_DOC, CONTENT_TYPE_EMBED, CONTENT_TYPE_FORMAT, CONTENT_TYPE_GC, CONTENT_TYPE_JSON,
-    CONTENT_TYPE_NODE, CONTENT_TYPE_SKIP, CONTENT_TYPE_STRING, ID,
+    Block, BlockFlags, BlockHeader, BlockMut, InsertBlockData, CONTENT_TYPE_ATOM,
+    CONTENT_TYPE_BINARY, CONTENT_TYPE_DELETED, CONTENT_TYPE_DOC, CONTENT_TYPE_EMBED,
+    CONTENT_TYPE_FORMAT, CONTENT_TYPE_GC, CONTENT_TYPE_JSON, CONTENT_TYPE_NODE, CONTENT_TYPE_SKIP,
+    CONTENT_TYPE_STRING, ID,
 };
+use crate::content::ContentType;
 use crate::id_set::IDSet;
 use crate::integrate::IntegrationContext;
-use crate::node::NodeID;
+use crate::node::{Node, NodeID, NodeType};
 use crate::read::{Decode, Decoder, ReadExt};
 use crate::transaction::TransactionState;
 use crate::write::WriteExt;
-use crate::{ClientID, Clock};
-use bytes::BytesMut;
+use crate::{ClientID, Clock, U32};
+use bytes::{BufMut, BytesMut};
 use lmdb_rs_m::Database;
 use smallvec::SmallVec;
 use std::collections::{BTreeMap, VecDeque};
@@ -68,7 +70,7 @@ impl Update {
         Ok(clients)
     }
 
-    fn decode_block(id: ID, decoder: &mut impl Decoder) -> crate::Result<Option<Carrier>> {
+    fn decode_block<D: Decoder>(id: ID, decoder: &mut D) -> crate::Result<Option<Carrier>> {
         let info = decoder.read_info()?;
         match info & CARRIER_INFO {
             CONTENT_TYPE_GC => {
@@ -83,80 +85,83 @@ impl Update {
         }
     }
 
-    fn read_block(id: ID, info: u8, decoder: &mut impl Decoder) -> crate::Result<Option<Carrier>> {
-        let mut block = BlockBuilder::parse(id, BytesMut::zeroed(BlockHeader::SIZE))?;
-        let mut parent_name = None;
+    fn read_block<D: Decoder>(id: ID, info: u8, decoder: &mut D) -> crate::Result<Option<Carrier>> {
+        let mut header = BlockHeader::empty();
+        let mut parent = None;
+        let mut entry = None;
         let cannot_copy_parent_info = info & (HAS_RIGHT_ID | HAS_LEFT_ID) == 0;
         if info & HAS_LEFT_ID != 0 {
-            let left_id = decoder.read_left_id()?;
-            block.set_origin_left(left_id);
+            let id = decoder.read_left_id()?;
+            header.set_origin_left(id);
         }
         if info & HAS_RIGHT_ID != 0 {
-            let right_id = decoder.read_right_id()?;
-            block.set_origin_right(right_id);
+            let id = decoder.read_right_id()?;
+            header.set_origin_right(id);
         }
         if cannot_copy_parent_info {
-            let parent_id = if decoder.read_parent_info()? {
+            let parent_node = if decoder.read_parent_info()? {
                 let mut root_parent_name = String::new();
                 let buf = unsafe { root_parent_name.as_mut_vec() };
                 decoder.read_string(buf)?;
-                let node = NodeID::from_root(&root_parent_name);
-                parent_name = Some(root_parent_name);
-                node
+                Node::root(root_parent_name)
             } else {
                 let nested_parent_id = decoder.read_left_id()?;
-                NodeID::from_nested(nested_parent_id)
+                Node::Nested(NodeID::from_nested(nested_parent_id))
             };
-            block.set_parent(parent_id);
+            header.set_parent(parent_node.id());
+            parent = Some(parent_node);
         }
         if cannot_copy_parent_info && (info & HAS_PARENT_SUB) != 0 {
-            let mut entry_key = SmallVec::<[u8; 16]>::new();
-            decoder.read_string(&mut entry_key)?;
-            block.init_entry_key(&entry_key)?;
+            let mut writer = BytesMut::new().writer();
+            decoder.read_string(&mut writer)?;
+            let entry_key = writer.into_inner().freeze();
+
+            let key_hash = twox_hash::XxHash32::oneshot(0, &entry_key);
+            header.set_key_hash(Some(U32::new(key_hash)));
+            entry = Some(entry_key);
         }
-        Self::init_content(info, &mut block, decoder)?;
-        Ok(Some(Carrier::Block(block, parent_name)))
+        let content_type = ContentType::try_from(info & CARRIER_INFO)?;
+        header.set_content_type(content_type);
+
+        let content = Self::read_content(&mut header, decoder)?;
+        let mut block = InsertBlockData {
+            block: BlockMut::new(id, header),
+            content,
+            parent,
+            entry,
+        };
+        Ok(Some(Carrier::Block(block)))
     }
 
-    fn init_content(
-        info: u8,
-        block: &mut BlockBuilder,
+    fn read_content(
+        block: &mut BlockHeader,
         decoder: &mut impl Decoder,
-    ) -> crate::Result<()> {
-        let content_type = info & CARRIER_INFO;
-        block.set_content_type(content_type.try_into()?);
-        match content_type {
-            CONTENT_TYPE_GC => Err(crate::Error::UnsupportedContent(CONTENT_TYPE_GC)),
-            CONTENT_TYPE_DELETED => {
+    ) -> crate::Result<BytesMut> {
+        let mut w = BytesMut::new().writer();
+        match block.content_type() {
+            ContentType::Deleted => {
                 let deleted_len = decoder.read_len()?;
                 block.set_clock_len(deleted_len);
-                Ok(())
             }
-            CONTENT_TYPE_JSON => copy_content(decoder, block),
-            CONTENT_TYPE_ATOM => copy_content(decoder, block),
-            CONTENT_TYPE_BINARY => {
+            ContentType::Json => block.set_clock_len(copy_content(decoder, &mut w)?),
+            ContentType::Atom => block.set_clock_len(copy_content(decoder, &mut w)?),
+            ContentType::Binary => {
                 let len = decoder.read_len()?;
                 block.set_clock_len(1.into());
-                let mut w = block.as_writer();
                 std::io::copy(&mut decoder.take(len.into()), &mut w)?;
-                Ok(())
             }
-            CONTENT_TYPE_STRING => {
+            ContentType::String => {
                 let len = decoder.read_len()?;
                 block.set_clock_len(len);
-                let mut w = block.as_writer();
                 std::io::copy(&mut decoder.take(len.into()), &mut w)?;
-                Ok(())
             }
-            CONTENT_TYPE_EMBED => {
+            ContentType::Embed => {
                 block.set_clock_len(1.into());
                 let json = decoder.read_json::<serde_json::Value>()?;
-                serde_json::to_writer(block.as_writer(), &json)?;
-                Ok(())
+                serde_json::to_writer(&mut w, &json)?;
             }
-            CONTENT_TYPE_FORMAT => {
+            ContentType::Format => {
                 block.set_clock_len(1.into());
-                let mut w = block.as_writer();
                 let mut buf: SmallVec<[u8; 16]> = SmallVec::new();
                 decoder.read_string(&mut buf)?;
                 if buf.len() > u8::MAX as usize {
@@ -165,23 +170,20 @@ impl Update {
                 w.write_u8(buf.len() as u8)?;
                 w.write_all(&buf)?;
                 let value: () = decoder.read_json()?;
-                serde_json::to_writer(w, &value)?;
-                Ok(())
+                serde_json::to_writer(&mut w, &value)?;
             }
-            CONTENT_TYPE_NODE => {
+            ContentType::Node => {
                 block.set_clock_len(1.into());
                 let type_ref = decoder.read_type_ref()?;
-                let node_header = NodeHeader::new(type_ref);
-                block.as_writer().write_all(node_header.as_bytes())?;
-                Ok(())
+                let node_type = NodeType::try_from(type_ref)?;
+                block.set_node_type(node_type);
             }
-            CONTENT_TYPE_DOC => {
+            ContentType::Doc => {
                 block.set_clock_len(1.into());
                 todo!()
             }
-            CONTENT_TYPE_SKIP => Err(crate::Error::UnsupportedContent(CONTENT_TYPE_SKIP)),
-            content_type => Err(crate::Error::UnsupportedContent(content_type)),
         }
+        Ok(w.into_inner())
     }
 }
 
@@ -241,108 +243,15 @@ impl<'a, D: Decoder> BlockReader<'a, D> {
             }
             _ => {
                 let block_id = ID::new(self.current_client, self.current_clock);
-                let (block, parent_name) = self.read_block(block_id, info)?;
-                self.remaining_blocks -= 1;
-                self.current_clock += block.clock_len();
-                Ok(Some(Carrier::Block(block)))
-            }
-        }
-    }
-
-    fn read_block(&mut self, id: ID, info: u8) -> crate::Result<BlockBuilder> {
-        let mut block = BlockBuilder::parse(id, BytesMut::zeroed(BlockHeader::SIZE))?;
-        let mut parent_name = None;
-        let cannot_copy_parent_info = info & (HAS_RIGHT_ID | HAS_LEFT_ID) == 0;
-        if info & HAS_LEFT_ID != 0 {
-            let left_id = self.decoder.read_left_id()?;
-            block.set_origin_left(left_id);
-        }
-        if info & HAS_RIGHT_ID != 0 {
-            let right_id = self.decoder.read_right_id()?;
-            block.set_origin_right(right_id);
-        }
-        if cannot_copy_parent_info {
-            let parent_id = if self.decoder.read_parent_info()? {
-                let mut root_parent_name = String::new();
-                let buf = unsafe { root_parent_name.as_mut_vec() };
-                self.decoder.read_string(buf)?;
-                let node = NodeID::from_root(&root_parent_name);
-                parent_name = Some(root_parent_name);
-                node
-            } else {
-                let nested_parent_id = self.decoder.read_left_id()?;
-                NodeID::from_nested(nested_parent_id)
-            };
-            block.set_parent(parent_id);
-        }
-        if cannot_copy_parent_info && (info & HAS_PARENT_SUB) != 0 {
-            let mut entry_key = SmallVec::<[u8; 16]>::new();
-            self.decoder.read_string(&mut entry_key)?;
-            block.init_entry_key(&entry_key)?;
-        }
-        self.init_content(info, &mut block)?;
-        Ok((block, parent_name))
-    }
-
-    fn init_content(&mut self, info: u8, block: &mut BlockBuilder) -> crate::Result<()> {
-        let content_type = info & CARRIER_INFO;
-        block.set_content_type(content_type.try_into()?);
-        match content_type {
-            CONTENT_TYPE_GC => Err(crate::Error::UnsupportedContent(CONTENT_TYPE_GC)),
-            CONTENT_TYPE_DELETED => {
-                let deleted_len = self.decoder.read_len()?;
-                block.set_clock_len(deleted_len);
-                Ok(())
-            }
-            CONTENT_TYPE_JSON => copy_content(self.decoder, block),
-            CONTENT_TYPE_ATOM => copy_content(self.decoder, block),
-            CONTENT_TYPE_BINARY => {
-                let len = self.decoder.read_len()?;
-                block.set_clock_len(1.into());
-                let mut w = block.as_writer();
-                std::io::copy(&mut self.decoder.take(len.into()), &mut w)?;
-                Ok(())
-            }
-            CONTENT_TYPE_STRING => {
-                let len = self.decoder.read_len()?;
-                block.set_clock_len(len);
-                let mut w = block.as_writer();
-                std::io::copy(&mut self.decoder.take(len.into()), &mut w)?;
-                Ok(())
-            }
-            CONTENT_TYPE_EMBED => {
-                block.set_clock_len(1.into());
-                let json = self.decoder.read_json::<serde_json::Value>()?;
-                serde_json::to_writer(block.as_writer(), &json)?;
-                Ok(())
-            }
-            CONTENT_TYPE_FORMAT => {
-                block.set_clock_len(1.into());
-                let mut w = block.as_writer();
-                let mut buf: SmallVec<[u8; 16]> = SmallVec::new();
-                self.decoder.read_string(&mut buf)?;
-                if buf.len() > u8::MAX as usize {
-                    return Err(crate::Error::KeyTooLong);
+                match Update::read_block(block_id, info, self.decoder)? {
+                    None => Ok(None),
+                    Some(carrier) => {
+                        self.remaining_blocks -= 1;
+                        self.current_clock += carrier.len();
+                        Ok(Some(carrier))
+                    }
                 }
-                w.write_u8(buf.len() as u8)?;
-                w.write_all(&buf)?;
-                let value = self.decoder.read_json()?;
-                serde_json::to_writer(w, &value)?;
-                Ok(())
             }
-            CONTENT_TYPE_NODE => {
-                block.set_clock_len(1.into());
-                let type_ref = self.decoder.read_type_ref()?;
-                let node_header = NodeHeader::new(type_ref);
-                block.as_writer().write_all(node_header.as_bytes())?;
-                Ok(())
-            }
-            CONTENT_TYPE_DOC => {
-                block.set_clock_len(1.into());
-                todo!()
-            }
-            CONTENT_TYPE_SKIP => Err(crate::Error::UnsupportedContent(CONTENT_TYPE_SKIP)),
-            content_type => Err(crate::Error::UnsupportedContent(content_type)),
         }
     }
 }
@@ -359,17 +268,15 @@ impl<'a, D: Decoder> Iterator for BlockReader<'a, D> {
     }
 }
 
-fn copy_content<D: Decoder>(decoder: &mut D, block: &mut BlockBuilder) -> crate::Result<()> {
+fn copy_content<D: Decoder, W: Write>(decoder: &mut D, writer: &mut W) -> crate::Result<Clock> {
     let count = decoder.read_len()?;
-    block.set_clock_len(count);
     let mut buf = Vec::new();
-    let mut writer = block.as_writer();
     for _ in 0u64..count.into() {
         decoder.read_bytes(&mut buf)?;
         writer.write_u32(buf.len() as u32)?;
         writer.write_all(&buf)?;
     }
-    Ok(())
+    Ok(count.into())
 }
 
 const CARRIER_INFO: u8 = 0b0001_1111;
@@ -381,7 +288,7 @@ const HAS_PARENT_SUB: u8 = 0b0010_0000;
 pub enum Carrier {
     GC(BlockRange) = 0,
     Skip(BlockRange) = 10,
-    Block(BlockBuilder),
+    Block(InsertBlockData),
 }
 
 impl Display for Carrier {
@@ -511,7 +418,8 @@ mod test {
         assert_eq!(n.id(), &ID::new(CLIENT, 0.into()));
         assert_eq!(n.origin_right(), None);
         assert_eq!(n.origin_left(), None);
-        let BlockContent::Text(text) = n.content().unwrap() else {
+        let BlockContent::Text(text) = BlockContent::new(n.content_type(), &n.content).unwrap()
+        else {
             unreachable!()
         };
         assert_eq!(text, "0");
@@ -522,7 +430,8 @@ mod test {
         };
         assert_eq!(n.id(), &ID::new(CLIENT, 1.into()));
         assert_eq!(n.origin_right(), Some(&ID::new(CLIENT, 0.into())));
-        let BlockContent::Text(text) = n.content().unwrap() else {
+        let BlockContent::Text(text) = BlockContent::new(n.content_type(), &n.content).unwrap()
+        else {
             unreachable!()
         };
         assert_eq!(text, "1");
@@ -532,7 +441,8 @@ mod test {
             unreachable!()
         };
         assert_eq!(n.id(), &ID::new(CLIENT, 2.into()));
-        let BlockContent::Text(text) = n.content().unwrap() else {
+        let BlockContent::Text(text) = BlockContent::new(n.content_type(), &n.content).unwrap()
+        else {
             unreachable!()
         };
         assert_eq!(text, "2");

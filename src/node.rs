@@ -22,7 +22,7 @@ impl<'a> Node<'a> {
         Node::Root(name.into())
     }
     #[inline]
-    pub fn nested(id: ID) -> Self {
+    pub const fn nested(id: ID) -> Self {
         Node::Nested(id)
     }
 

@@ -14,6 +14,7 @@ mod varint;
 mod write;
 
 mod block_cursor;
+mod bucket;
 mod input;
 mod integrate;
 mod output;

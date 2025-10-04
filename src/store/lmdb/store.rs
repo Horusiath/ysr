@@ -1,23 +1,29 @@
-use crate::block::{Block, BlockBuilder, ID};
+use crate::block::{Block, BlockMut, InsertBlockData, ID};
 use crate::block_reader::{BlockRange, Carrier};
+use crate::bucket::Bucket;
+use crate::content::{BlockContent, ContentType};
 use crate::id_set::IDSet;
 use crate::node::{Node, NodeType};
-use crate::{ClientID, Clock, Error, StateVector};
+use crate::{ClientID, Clock, Error, StateVector, U64};
 use lmdb_rs_m::{Database, MdbError};
 use smallvec::{smallvec, SmallVec};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, VecDeque};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 pub trait BlockStore<'tx> {
     fn cursor(&self) -> crate::Result<BlockCursor<'_>>;
-    fn insert_block(&mut self, builder: BlockBuilder) -> crate::Result<()>;
+    fn fetch_block(&self, id: ID, direct_only: bool) -> crate::Result<Block<'_>>;
+    fn insert_block(&mut self, builder: &InsertBlockData) -> crate::Result<()>;
     fn update_block(&mut self, block: Block) -> crate::Result<()>;
     fn try_update_clock(&mut self, id: ID) -> crate::Result<Clock>;
-    fn split_block(&self, id: ID) -> crate::Result<SplitResult<'_>>;
+    fn split_block(&self, id: ID) -> crate::Result<SplitResult>;
     fn remove(&mut self, id: &BlockRange) -> crate::Result<()>;
     fn clock(&self, client_id: ClientID) -> crate::Result<Option<Clock>>;
     fn state_vector(&self) -> crate::Result<StateVector>;
-    fn fetch_block(&self, id: ID, direct_only: bool) -> crate::Result<Block<'_>>;
+
+    fn block_content(&self, id: ID, kind: ContentType) -> crate::Result<BlockContent<'_>>;
+    fn set_block_content(&mut self, id: ID, content: &BlockContent) -> crate::Result<()>;
 
     fn entry(&self, map: &ID, entry_key: &str) -> crate::Result<ID>;
     fn set_entry(&mut self, map: &ID, entry_key: &str, value: &ID) -> crate::Result<()>;
@@ -33,15 +39,15 @@ pub trait BlockStore<'tx> {
         &mut self,
         node: Node<'_>,
         node_type: NodeType,
-    ) -> crate::Result<BlockBuilder> {
+    ) -> crate::Result<BlockMut> {
         match self.fetch_block(node.id(), true) {
             Ok(block) => Ok(block.into()),
             Err(crate::Error::BlockNotFound(_)) => {
                 if node.is_root() {
                     // since root nodes live forever, we can create it if it does not exist
-                    let block = BlockBuilder::new_node(node, node_type);
-                    self.insert_block(block.as_block())?;
-                    Ok(block)
+                    let data = InsertBlockData::new_node(node, node_type);
+                    self.insert_block(&data)?;
+                    Ok(data.block)
                 } else {
                     // nested nodes are not created automatically, if we didn't find it, we return an error
                     Err(crate::Error::NotFound)
@@ -58,16 +64,52 @@ impl<'tx> BlockStore<'tx> for Database<'tx> {
         Ok(BlockCursor::from(cursor))
     }
 
-    /// Inserts a block into the store, updating the state vector as necessary.
-    fn insert_block(&mut self, block: Block) -> crate::Result<()> {
-        let key = BlockKey::new(*block.id());
-        let key = key.as_bytes();
-        let value = block.bytes();
+    /// Returns the block which contains the given ID.
+    /// If `direct_only` is true, it will only search for blocks that starts with the given ID.
+    /// If `direct_only` is false, it will search for blocks that contain the ID anywhere within
+    /// their range.
+    fn fetch_block(&self, id: ID, direct_only: bool) -> crate::Result<Block<'_>> {
+        let mut cursor = self.cursor()?;
+        if let Some(_) = cursor.seek(id, direct_only)? {
+            let block = cursor.block()?.unwrap();
+            Ok(block)
+        } else {
+            Err(crate::Error::BlockNotFound(id))
+        }
+    }
 
-        self.set(&key, &value)?;
-        self.try_update_clock(block.last_id())?;
+    /// Inserts a block into the store, updating the state vector as necessary.
+    fn insert_block(&mut self, insert: &InsertBlockData) -> crate::Result<()> {
+        // insert block metadata
+        self.set(
+            &BlockKey::new(*insert.id()).as_bytes(),
+            &insert.as_block().as_bytes(),
+        )?;
+        self.try_update_clock(insert.last_id())?;
+
+        // insert block content if any
+        if !insert.content.is_empty() {
+            self.set(
+                &BlockContentKey::new(*insert.id()).as_bytes(),
+                &insert.content.as_bytes(),
+            )?;
+        }
+
+        // insert block entry key if any
+        if let Some(key) = insert.entry.as_deref() {
+            let key = unsafe { str::from_utf8_unchecked(key) };
+            if let Some(parent) = insert.parent() {
+                self.set_entry(&parent.id(), key, insert.id())?;
+            } else {
+                return Err(crate::Error::NotFound);
+            }
+        }
 
         Ok(())
+    }
+
+    fn update_block(&mut self, block: Block<'_>) -> crate::Result<()> {
+        todo!()
     }
 
     /// Inserts an [ID] into the state vector, updating the clock for the client if necessary.
@@ -96,13 +138,20 @@ impl<'tx> BlockStore<'tx> for Database<'tx> {
         }
     }
 
-    fn split_block(&self, id: ID) -> crate::Result<SplitResult<'_>> {
+    fn split_block(&self, id: ID) -> crate::Result<SplitResult> {
         let mut cursor = self.cursor()?;
         match cursor.seek(id, false)? {
             None => Err(crate::Error::BlockNotFound(id)),
             Some(found_id) => {
                 let offset = id.clock - found_id.clock;
-                cursor.split_at(offset)
+                match cursor.split_at(offset) {
+                    Ok(SplitResult::Split(left, right)) => {
+                        self.set(&BlockKey::new(*right.id()).as_bytes(), &right.as_bytes())?;
+                        todo!("split content for blocks not yet implemented");
+                        Ok(SplitResult::Split(left, right))
+                    }
+                    other => other,
+                }
             }
         }
     }
@@ -153,34 +202,46 @@ impl<'tx> BlockStore<'tx> for Database<'tx> {
         Ok(StateVector::new(state_vector))
     }
 
-    /// Returns the block which contains the given ID.
-    /// If `direct_only` is true, it will only search for blocks that starts with the given ID.
-    /// If `direct_only` is false, it will search for blocks that contain the ID anywhere within
-    /// their range.
-    fn fetch_block(&self, id: ID, direct_only: bool) -> crate::Result<Block<'_>> {
-        let mut cursor = self.cursor()?;
-        if let Some(_) = cursor.seek(id, direct_only)? {
-            let block = cursor.block()?.unwrap();
-            Ok(block)
+    fn block_content(&self, id: ID, kind: ContentType) -> crate::Result<BlockContent<'_>> {
+        let data: &[u8] = if !kind.is_empty() {
+            let key = BlockContentKey::new(id);
+            self.get(&key.as_bytes())?
         } else {
-            Err(crate::Error::BlockNotFound(id))
-        }
+            &[]
+        };
+        BlockContent::new(kind, data)
+    }
+
+    fn set_block_content(&mut self, id: ID, content: &BlockContent) -> crate::Result<()> {
+        let key = BlockContentKey::new(id);
+        Ok(self.set(&key.as_bytes(), &content.body())?)
     }
 
     fn entry(&self, map: &ID, entry_key: &str) -> crate::Result<ID> {
-        let key = map_entry_key(map, entry_key);
-        let value: &[u8] = match self.get(&key.as_slice()) {
-            Ok(value) => value,
+        let hash: U64 = twox_hash::xxhash3_64::Hasher::oneshot(entry_key.as_bytes()).into();
+        let key = map_bucket_key(map, hash);
+        let bucket = match self.get(&key.as_slice()) {
+            Ok(value) => Bucket::from_bytes(value),
             Err(MdbError::NotFound) => return Err(crate::Error::NotFound),
             Err(e) => return Err(Error::Lmdb(e)),
         };
-        let block_id = ID::ref_from_bytes(value).map_err(|_| Error::InvalidMapping("ID"))?;
-        Ok(*block_id)
+        match bucket.get(entry_key.as_bytes()) {
+            None => Err(crate::Error::NotFound),
+            Some(id) => Ok(*id),
+        }
     }
 
     fn set_entry(&mut self, map: &ID, entry_key: &str, value: &ID) -> crate::Result<()> {
-        let key = map_entry_key(map, entry_key);
-        self.set(&key.as_slice(), &value.as_bytes())?;
+        let entry_key = entry_key.as_bytes();
+        let hash: U64 = twox_hash::xxhash3_64::Hasher::oneshot(entry_key).into();
+        let key = map_bucket_key(map, hash);
+        let mut bucket = match self.get(&key.as_slice()) {
+            Ok(value) => Bucket::from_bytes(value),
+            Err(MdbError::NotFound) => Bucket::from_bytes(&[]),
+            Err(e) => return Err(Error::Lmdb(e)),
+        };
+        bucket.insert(entry_key, value);
+        self.set(&key.as_slice(), &bucket.as_bytes())?;
         Ok(())
     }
 
@@ -254,17 +315,19 @@ impl<'a> BlockCursor<'a> {
         Ok(None)
     }
 
-    pub fn split_at(&mut self, offset: Clock) -> crate::Result<SplitResult<'a>> {
+    pub fn split_at(&mut self, offset: Clock) -> crate::Result<SplitResult> {
         let block = match self.block()? {
             None => return Err(crate::Error::NotFound),
             Some(block) => block,
         };
-        if offset == 0 || offset >= block.clock_len() {
-            Ok(SplitResult::Unchanged(block))
-        } else {
-            let mut left = BlockBuilder::from_block(&block);
-            let right = left.splice(offset)?;
-            Ok(SplitResult::Split(left, right.unwrap()))
+        let mut left = BlockMut::from(block);
+        match left.split(offset) {
+            None => Ok(SplitResult::Unchanged(left)),
+            Some(right) => {
+                // update split block
+                self.inner.replace(&left.as_bytes())?;
+                Ok(SplitResult::Split(left, right))
+            }
         }
     }
 
@@ -312,9 +375,9 @@ impl<'tx> From<lmdb_rs_m::Cursor<'tx>> for BlockCursor<'tx> {
     }
 }
 
-pub enum SplitResult<'a> {
-    Unchanged(Block<'a>),
-    Split(BlockBuilder, BlockBuilder),
+pub enum SplitResult {
+    Unchanged(BlockMut),
+    Split(BlockMut, BlockMut),
 }
 
 const KEY_PREFIX_META: u8 = 0x00;
@@ -371,16 +434,17 @@ impl StateVectorKey {
     }
 }
 
-fn map_entry_key(map: &ID, key: &str) -> SmallVec<[u8; 16]> {
+fn map_bucket_key(map: &ID, hash: U64) -> SmallVec<[u8; 16]> {
     let mut buf = smallvec![KEY_PREFIX_MAP];
     buf.extend_from_slice(map.as_bytes());
-    buf.extend_from_slice(key.as_bytes());
+    buf.extend_from_slice(hash.as_bytes());
     buf
 }
 
 #[cfg(test)]
 mod test {
-    use crate::block::{BlockBuilder, ID};
+    use crate::block::{InsertBlockData, ID};
+    use crate::node::Node;
     use crate::store::lmdb::store::BlockStore;
     use lmdb_rs_m::DbFlags;
     use zerocopy::IntoBytes;
@@ -396,20 +460,11 @@ mod test {
         let tx = env.new_transaction().unwrap();
         let mut db = tx.bind(&h);
 
+        let node_id = Node::nested(ID::new(1.into(), 1.into()));
         let id = ID::new(1.into(), 2.into());
-        let block = BlockBuilder::new(
-            id,
-            1.into(),
-            None,
-            None,
-            None,
-            None,
-            ID::new(1.into(), 1.into()),
-            None,
-        )
-        .unwrap();
+        let block = InsertBlockData::new(id, 1.into(), None, None, None, None, node_id, None);
 
-        db.insert_block(block.as_ref()).unwrap();
+        db.insert_block(&block).unwrap();
 
         tx.commit().unwrap();
 
@@ -417,7 +472,7 @@ mod test {
         let mut db = tx.bind(&h);
         let actual = db.fetch_block(id, true).unwrap();
 
-        assert_eq!(actual.as_bytes(), block.as_ref().as_bytes());
+        assert_eq!(actual.as_bytes(), block.as_bytes());
     }
 
     #[test]
@@ -431,38 +486,20 @@ mod test {
         let tx = env.new_transaction().unwrap();
         let mut db = tx.bind(&h);
 
+        let node_id = Node::nested(ID::new(1.into(), 1.into()));
         let searched = {
             let id = ID::new(1.into(), 2.into());
-            let block = BlockBuilder::new(
-                id,
-                10.into(),
-                None,
-                None,
-                None,
-                None,
-                ID::new(1.into(), 1.into()),
-                None,
-            )
-            .unwrap();
+            let block =
+                InsertBlockData::new(id, 10.into(), None, None, None, None, node_id.clone(), None);
 
-            db.insert_block(block.as_ref()).unwrap();
+            db.insert_block(&block).unwrap();
             block
         };
         {
             let id = ID::new(1.into(), 12.into());
-            let block = BlockBuilder::new(
-                id,
-                2.into(),
-                None,
-                None,
-                None,
-                None,
-                ID::new(1.into(), 1.into()),
-                None,
-            )
-            .unwrap();
+            let block = InsertBlockData::new(id, 2.into(), None, None, None, None, node_id, None);
 
-            db.insert_block(block.as_ref()).unwrap();
+            db.insert_block(&block).unwrap();
         }
 
         tx.commit().unwrap();
@@ -473,6 +510,6 @@ mod test {
         let id = ID::new(1.into(), 5.into());
         let actual = db.fetch_block(id, false).unwrap();
 
-        assert_eq!(actual.as_bytes(), searched.as_ref().as_bytes());
+        assert_eq!(actual.as_bytes(), searched.as_bytes());
     }
 }

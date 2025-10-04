@@ -1,4 +1,4 @@
-use crate::block::{Block, BlockBuilder, BlockFlags, ID};
+use crate::block::{Block, BlockFlags, InsertBlockData, ID};
 use crate::block_reader::{BlockRange, BlockReader, Carrier, Update};
 use crate::id_set::IDSet;
 use crate::integrate::IntegrationContext;
@@ -124,7 +124,7 @@ impl<'db> Transaction<'db> {
     }
 
     fn write_updates(
-        cursor: &mut impl Iterator<Item = crate::Result<crate::block::BlockBuilder>>,
+        cursor: &mut impl Iterator<Item = crate::Result<crate::block::InsertBlockData>>,
         buf: &mut BytesMut,
     ) -> crate::Result<usize> {
         let mut blocks_count = 0;
@@ -265,7 +265,7 @@ impl<'db> Transaction<'db> {
     /// A dependency is missing if any of the block's origins (left, right, parent) point to a block that is not yet integrated.
     /// Returns the client ID of the missing dependency, or None if all dependencies are satisfied.
     fn missing_dependency(block: &Carrier, local_sv: &StateVector) -> Option<ClientID> {
-        if let Carrier::Block(block, _) = block {
+        if let Carrier::Block(block) = block {
             if let Some(origin) = &block.origin_left() {
                 if origin.client != block.id().client
                     && origin.clock >= local_sv.get(&origin.client)
@@ -282,14 +282,11 @@ impl<'db> Transaction<'db> {
                 }
             }
 
-            if block.flags().contains(BlockFlags::HAS_PARENT) {
-                let parent_id = block.parent();
-                if parent_id.is_nested() {
-                    if parent_id.client != block.id().client
-                        && parent_id.clock >= local_sv.get(&parent_id.client)
-                    {
-                        return Some(parent_id.client);
-                    }
+            if let Some(Node::Nested(parent)) = block.parent() {
+                if parent.client != block.id().client
+                    && parent.clock >= local_sv.get(&parent.client)
+                {
+                    return Some(parent.client);
                 }
             }
         }

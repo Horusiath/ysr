@@ -26,6 +26,13 @@ pub(crate) enum ContentType {
 }
 
 impl ContentType {
+    pub fn is_empty(&self) -> bool {
+        match self {
+            ContentType::Node | ContentType::Deleted => true,
+            _ => false,
+        }
+    }
+
     pub fn is_countable(self) -> bool {
         match self {
             ContentType::Atom => true,
@@ -91,13 +98,13 @@ impl TryFrom<u8> for ContentType {
 #[repr(u8)]
 #[derive(Debug, PartialEq)]
 pub(crate) enum BlockContent<'a> {
-    Deleted(Clock) = CONTENT_TYPE_DELETED,
+    Deleted = CONTENT_TYPE_DELETED,
     Json(ContentRef<'a, JsonEncoding>) = CONTENT_TYPE_JSON,
     Atom(ContentRef<'a, AtomEncoding>) = CONTENT_TYPE_ATOM,
     Binary(&'a [u8]) = CONTENT_TYPE_BINARY,
     Embed(&'a [u8]) = CONTENT_TYPE_EMBED,
     Text(&'a str) = CONTENT_TYPE_STRING,
-    Node(ContentNode) = CONTENT_TYPE_NODE,
+    Node = CONTENT_TYPE_NODE,
     Format(ContentFormat<'a>) = CONTENT_TYPE_FORMAT,
     Doc(&'a [u8]) = CONTENT_TYPE_DOC,
     // to be supported..
@@ -105,16 +112,30 @@ pub(crate) enum BlockContent<'a> {
 }
 
 impl<'a> BlockContent<'a> {
+    pub fn new(content_type: ContentType, data: &'a [u8]) -> crate::Result<Self> {
+        Ok(match content_type {
+            ContentType::Deleted => BlockContent::Deleted,
+            ContentType::Json => BlockContent::Json(ContentRef::new(data)),
+            ContentType::Binary => BlockContent::Binary(data),
+            ContentType::String => BlockContent::Text(unsafe { str::from_utf8_unchecked(data) }),
+            ContentType::Embed => BlockContent::Embed(data),
+            ContentType::Format => BlockContent::Format(ContentFormat::new(data)?),
+            ContentType::Node => BlockContent::Node,
+            ContentType::Atom => BlockContent::Atom(ContentRef::new(data)),
+            ContentType::Doc => BlockContent::Doc(data),
+        })
+    }
+
     #[inline]
     pub fn content_type(&self) -> ContentType {
         match self {
-            Self::Deleted(_) => ContentType::Deleted,
+            Self::Deleted => ContentType::Deleted,
             Self::Atom(_) => ContentType::Atom,
             Self::Binary(_) => ContentType::Binary,
             Self::Doc(_) => ContentType::Doc,
             Self::Embed(_) => ContentType::Embed,
             Self::Format(_) => ContentType::Format,
-            Self::Node(_) => ContentType::Node,
+            Self::Node => ContentType::Node,
             Self::Text(_) => ContentType::String,
             Self::Json(_) => ContentType::Json,
         }
@@ -122,13 +143,13 @@ impl<'a> BlockContent<'a> {
 
     pub fn body(&self) -> &[u8] {
         match self {
-            Self::Deleted(_) => &[],
+            Self::Deleted => &[],
             Self::Json(jsons) => jsons.inner.body(),
             Self::Atom(atoms) => atoms.inner.body(),
             Self::Binary(bin) => bin,
             Self::Embed(bin) => bin,
             Self::Text(text) => text.as_bytes(),
-            Self::Node(node) => &[],
+            Self::Node => &[],
             Self::Format(format) => format.body(),
             Self::Doc(doc) => doc,
         }
@@ -138,13 +159,13 @@ impl<'a> BlockContent<'a> {
 impl<'a> Display for BlockContent<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Deleted(len) => write!(f, "deleted({})", len),
+            Self::Deleted => write!(f, "deleted"),
             Self::Json(jsons) => write!(f, "{}", jsons),
             Self::Atom(atoms) => write!(f, "{}", atoms),
             Self::Binary(bin) => write!(f, "binary({})", simple_base64::encode(bin)),
             Self::Embed(bin) => write!(f, "embed({})", simple_base64::encode(bin)),
             Self::Text(text) => write!(f, "'{}'", text),
-            Self::Node(node) => write!(f, "{}", node),
+            Self::Node => write!(f, "node"),
             Self::Format(format) => write!(f, "{}", format),
             Self::Doc(doc) => todo!("Display::fmt(doc)"),
         }
@@ -154,13 +175,13 @@ impl<'a> Display for BlockContent<'a> {
 #[repr(u8)]
 #[derive(Debug, PartialEq)]
 pub(crate) enum BlockContentMut<'a> {
-    Deleted(Clock) = CONTENT_TYPE_DELETED,
+    Deleted = CONTENT_TYPE_DELETED,
     Json(ContentRef<'a, JsonEncoding>) = CONTENT_TYPE_JSON,
     Atom(ContentRef<'a, AtomEncoding>) = CONTENT_TYPE_ATOM,
     Binary(&'a [u8]) = CONTENT_TYPE_BINARY,
     Embed(&'a [u8]) = CONTENT_TYPE_EMBED,
     Text(&'a str) = CONTENT_TYPE_STRING,
-    Node(ContentNode) = CONTENT_TYPE_NODE,
+    Node = CONTENT_TYPE_NODE,
     Format(ContentFormat<'a>) = CONTENT_TYPE_FORMAT,
     Doc(&'a [u8]) = CONTENT_TYPE_DOC,
     // to be supported..
@@ -171,13 +192,13 @@ impl<'a> BlockContentMut<'a> {
     #[inline]
     pub fn content_type(&self) -> ContentType {
         match self {
-            Self::Deleted(_) => ContentType::Deleted,
+            Self::Deleted => ContentType::Deleted,
             Self::Atom(_) => ContentType::Atom,
             Self::Binary(_) => ContentType::Binary,
             Self::Doc(_) => ContentType::Doc,
             Self::Embed(_) => ContentType::Embed,
             Self::Format(_) => ContentType::Format,
-            Self::Node(_) => ContentType::Node,
+            Self::Node => ContentType::Node,
             Self::Text(_) => ContentType::String,
             Self::Json(_) => ContentType::Json,
         }
@@ -187,13 +208,13 @@ impl<'a> BlockContentMut<'a> {
 impl<'a> Display for BlockContentMut<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Deleted(len) => write!(f, "deleted({})", len),
+            Self::Deleted => write!(f, "deleted"),
             Self::Json(jsons) => write!(f, "{}", jsons),
             Self::Atom(atoms) => write!(f, "{}", atoms),
             Self::Binary(bin) => write!(f, "binary({})", simple_base64::encode(bin)),
             Self::Embed(bin) => write!(f, "embed({})", simple_base64::encode(bin)),
             Self::Text(text) => write!(f, "'{}'", text),
-            Self::Node(node) => write!(f, "{}", node),
+            Self::Node => write!(f, "node"),
             Self::Format(format) => write!(f, "{}", format),
             Self::Doc(doc) => todo!("Display::fmt(doc)"),
         }
@@ -393,43 +414,6 @@ where
             Ok(data) => Some(Ok(data)),
             Err(e) => Some(Err(e)),
         }
-    }
-}
-
-#[derive(PartialEq)]
-pub struct ContentNode {
-    node_type: NodeType,
-    start: Option<ID>,
-}
-
-impl ContentNode {
-    #[inline]
-    pub fn new(node_type: NodeType, start: Option<ID>) -> Self {
-        Self { node_type, start }
-    }
-
-    pub fn node_type(&self) -> NodeType {
-        self.node_type
-    }
-
-    pub fn start(&self) -> Option<&ID> {
-        self.start.as_ref()
-    }
-}
-
-impl Debug for ContentNode {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Display::fmt(&self, f)
-    }
-}
-
-impl Display for ContentNode {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.node_type)?;
-        if let Some(start) = &self.start {
-            write!(f, " @{}", start.clock)?;
-        }
-        Ok(())
     }
 }
 

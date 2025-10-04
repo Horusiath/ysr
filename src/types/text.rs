@@ -83,18 +83,19 @@ impl Chunk {
 
 impl<'tx, 'db> Display for TextRef<&'tx Transaction<'db>> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let Ok(BlockContent::Node(node)) = self.block.content() else {
-            return Err(std::fmt::Error);
-        };
-        let mut next = node.header().start().cloned();
+        let mut next = self.block.start().cloned();
         let db = self.tx.db();
         while let Some(id) = next {
             let Ok(block) = db.fetch_block(id, false) else {
                 return Err(std::fmt::Error);
             };
             if block.is_countable() && !block.is_deleted() {
-                let Ok(BlockContent::Text(chunk)) = block.content() else {
-                    return Err(std::fmt::Error);
+                let content_type = block.header().content_type();
+                let BlockContent::Text(chunk) = db
+                    .block_content(id, content_type)
+                    .map_err(|_| std::fmt::Error)?
+                else {
+                    continue;
                 };
                 write!(f, "{}", chunk)?;
             }

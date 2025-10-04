@@ -1,4 +1,4 @@
-use crate::block::{BlockBuilder, ID};
+use crate::block::{BlockMut, InsertBlockData, ID};
 use crate::node::{Node, NodeID, NodeType};
 use crate::store::lmdb::BlockStore;
 use crate::Transaction;
@@ -62,7 +62,7 @@ where
         Txn: Borrow<Transaction<'db>>,
     {
         let borrowed = tx.borrow();
-        let block: BlockBuilder = borrowed.db().fetch_block(self.node_id(), true)?.into();
+        let block: BlockMut = borrowed.db().fetch_block(self.node_id(), true)?.into();
         Ok(Mounted::new(block, tx))
     }
 }
@@ -81,13 +81,13 @@ impl<Cap> From<Unmounted<Cap>> for NodeID {
 
 #[derive(Debug)]
 pub struct Mounted<Cap, Txn> {
-    block: BlockBuilder,
+    block: BlockMut,
     tx: Txn,
     _capability: PhantomData<Cap>,
 }
 
 impl<Cap, Txn> Mounted<Cap, Txn> {
-    pub fn new(block: BlockBuilder, tx: Txn) -> Self {
+    pub fn new(block: BlockMut, tx: Txn) -> Self {
         Mounted {
             block,
             tx,
@@ -99,7 +99,7 @@ impl<Cap, Txn> Mounted<Cap, Txn> {
         self.block.id()
     }
 
-    pub fn split(self) -> (BlockBuilder, Txn) {
+    pub fn split(self) -> (BlockMut, Txn) {
         (self.block, self.tx)
     }
 }
