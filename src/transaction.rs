@@ -237,7 +237,7 @@ impl<'db> Transaction<'db> {
                 }
             }
         }
-        todo!()
+        Ok(unapplied)
     }
 
     /// Push all pending blocks with the same client ID as `block` into the database.

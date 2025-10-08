@@ -74,7 +74,7 @@ impl<'a> Bucket<'a> {
     pub fn remove(&mut self, key: &[u8]) -> bool {
         let mut offset = 0;
         for (curr, _) in self.iter() {
-            let entry_len = 1 + curr.len() + 16;
+            let entry_len = 1 + curr.len() + ID_SIZE;
             if curr == key {
                 let mut owned = self.entries.to_vec();
                 owned.drain(offset..offset + entry_len);
@@ -86,6 +86,8 @@ impl<'a> Bucket<'a> {
         false
     }
 }
+
+const ID_SIZE: usize = size_of::<ID>();
 
 #[repr(transparent)]
 pub struct BucketIter<'a> {
@@ -100,13 +102,13 @@ impl<'a> Iterator for BucketIter<'a> {
             return None;
         }
         let key_len: usize = self.data[0] as usize;
-        if self.data.len() < 1 + key_len + 16 {
+        if self.data.len() < 1 + key_len + ID_SIZE {
             return None;
         }
         let key = &self.data[1..1 + key_len];
-        let value = &self.data[1 + key_len..1 + key_len + 16];
+        let value = &self.data[1 + key_len..1 + key_len + ID_SIZE];
         let value = ID::ref_from_bytes(value).unwrap();
-        self.data = &self.data[1 + key_len + 16..];
+        self.data = &self.data[1 + key_len + ID_SIZE..];
         Some((key, value))
     }
 }
@@ -124,14 +126,14 @@ impl<'a> Iterator for BucketIterMut<'a> {
             return None;
         }
         let key_len: usize = self.data[0] as usize;
-        if self.data.len() < 1 + key_len + 16 {
+        if self.data.len() < 1 + key_len + ID_SIZE {
             return None;
         }
         let data: &'a mut [u8] = std::mem::take(&mut self.data);
         let (key, rest) = data.split_at_mut(1 + key_len);
 
         let key: &'a [u8] = &key[1..];
-        let (value, rest) = rest.split_at_mut(16);
+        let (value, rest) = rest.split_at_mut(ID_SIZE);
         let value = ID::mut_from_bytes(value).unwrap();
         self.data = rest;
         Some((key, value))

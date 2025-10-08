@@ -109,7 +109,8 @@ impl<'tx> BlockStore<'tx> for Database<'tx> {
     }
 
     fn update_block(&mut self, block: Block<'_>) -> crate::Result<()> {
-        todo!()
+        self.set(&BlockKey::new(*block.id()).as_bytes(), &block.as_bytes())?;
+        Ok(())
     }
 
     /// Inserts an [ID] into the state vector, updating the clock for the client if necessary.

@@ -1,7 +1,5 @@
 use crate::block_cursor::BlockCursor;
-use crate::content::{
-    BlockContent, BlockContentMut, ContentFormat, ContentIter, ContentRef, ContentType,
-};
+use crate::content::{BlockContent, ContentIter, ContentType};
 use crate::integrate::IntegrationContext;
 use crate::node::{Node, NodeID, NodeType};
 use crate::store::lmdb::store::SplitResult;
@@ -15,13 +13,10 @@ use lmdb_rs_m::Database;
 use serde::de::{SeqAccess, Visitor};
 use serde::ser::SerializeTuple;
 use serde::{Deserialize, Deserializer, Serialize};
-use std::cmp::Ordering;
 use std::fmt::{Debug, Display, Formatter};
 use std::io::Write;
 use std::ops::{Deref, DerefMut};
-use zerocopy::{
-    CastError, FromBytes, Immutable, IntoBytes, KnownLayout, TryCastError, TryFromBytes,
-};
+use zerocopy::{CastError, FromBytes, Immutable, IntoBytes, KnownLayout, TryFromBytes};
 
 #[repr(C)]
 #[derive(
@@ -330,6 +325,11 @@ impl BlockHeader {
         } else {
             self.flags -= BlockFlags::COUNTABLE;
         }
+        if matches!(self.content_type, ContentType::Deleted) {
+            self.flags |= BlockFlags::DELETED;
+        } else {
+            self.flags -= BlockFlags::DELETED;
+        }
     }
 
     #[inline]
@@ -397,6 +397,7 @@ impl Deref for Block<'_> {
     }
 }
 
+#[repr(C)] // use C repr to make sure that id, header order is unchanged
 #[derive(Debug, Clone, PartialEq)]
 pub struct BlockMut {
     id: ID,
@@ -433,7 +434,7 @@ impl BlockMut {
         &mut self.header
     }
     pub fn split(&mut self, offset: Clock) -> Option<Self> {
-        if offset == 0 || offset > self.clock_len || !self.is_countable() {
+        if offset == 0 || offset > self.clock_len || !(self.is_countable() || self.is_deleted()) {
             None
         } else {
             let clock_len = self.clock_len;
@@ -449,7 +450,7 @@ impl BlockMut {
             self.flags |= BlockFlags::RIGHT;
 
             let right = BlockHeader {
-                clock_len,
+                clock_len: clock_len - offset,
                 flags,
                 content_type: self.content_type,
                 node_type: Default::default(),
@@ -749,7 +750,7 @@ impl InsertBlockData {
             }
         }
 
-        let parent_id = self.parent().unwrap().id();
+        let parent_id = *self.header.parent();
 
         // reconnect left/right + update parent map/start if necessary
         if let Some(left) = &mut context.left {
@@ -767,14 +768,19 @@ impl InsertBlockData {
                     }
                 }
                 Some(right)
-            } else if let Some(parent) = &mut context.parent {
-                // current block is new head of the list
-
-                let old = parent.start().cloned();
-                parent.set_start(Some(self.id()));
-                old
             } else {
-                return Err(crate::Error::BlockNotFound(parent_id));
+                if context.parent.is_none() {
+                    context.parent = Some(db.fetch_block(parent_id, true)?.into());
+                }
+                if let Some(parent) = &mut context.parent {
+                    // current block is new head of the list
+
+                    let old = parent.start().cloned();
+                    parent.set_start(Some(self.id()));
+                    old
+                } else {
+                    return Err(crate::Error::BlockNotFound(parent_id));
+                }
             };
             self.set_right(right.as_ref());
         }
@@ -1029,7 +1035,7 @@ impl Display for BlockHeader {
         if let Some(key) = self.key_hash() {
             write!(f, ", hash_key: \"{}\"", key)?;
         }
-        if self.flags.contains(BlockFlags::COUNTABLE) {
+        if self.flags.contains(BlockFlags::COUNTABLE) || self.flags.contains(BlockFlags::DELETED) {
             write!(f, ", clock-len: {}", self.clock_len)?;
         }
         if self.flags.contains(BlockFlags::LEFT) {
@@ -1054,7 +1060,7 @@ impl Display for BlockHeader {
 mod test {
     use crate::block::{InsertBlockData, ID};
     use crate::content::{BlockContent, ContentRef, ContentType};
-    use crate::node::{Node, NodeID};
+    use crate::node::Node;
     use crate::{ClientID, Clock};
     use bytes::{BufMut, BytesMut};
     use serde::{Deserialize, Serialize};
