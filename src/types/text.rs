@@ -1,14 +1,18 @@
-use crate::block::ID;
+use crate::block::{BlockMut, InsertBlockData, ID};
 use crate::content::BlockContent;
+use crate::integrate::IntegrationContext;
 use crate::lib0::Value;
 use crate::node::NodeType;
 use crate::prelim::Prelim;
 use crate::state_vector::Snapshot;
 use crate::store::lmdb::BlockStore;
 use crate::types::Capability;
-use crate::{In, Mounted, Out, Transaction};
+use crate::{Clock, In, Mounted, Out, Transaction};
+use bytes::BytesMut;
 use genawaiter2::yield_;
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 use std::ops::{Deref, RangeBounds};
@@ -26,7 +30,7 @@ impl Capability for Text {
 
 impl<'tx, 'db> TextRef<&'tx Transaction<'db>> {
     pub fn len(&self) -> usize {
-        self.block.clock_len().get() as usize
+        todo!()
     }
 
     /// Returns an iterator over uncommitted changes (deltas) made to this text type
@@ -107,11 +111,18 @@ impl<'tx, 'db> Display for TextRef<&'tx Transaction<'db>> {
 }
 
 impl<'tx, 'db> TextRef<&'tx mut Transaction<'db>> {
+    pub fn cursor_mut<'a>(&'a mut self) -> crate::Result<TextCursor<&'a mut Transaction<'db>>> {
+        TextCursor::new(self.tx, self.block.start())
+    }
+
     pub fn insert<S>(&mut self, index: usize, chunk: S) -> crate::Result<()>
     where
         S: AsRef<str>,
     {
-        todo!()
+        let mut cursor = self.cursor_mut()?;
+        cursor.seek(index)?;
+        cursor.insert(StringPrelim::new(chunk.as_ref()))?;
+        Ok(())
     }
 
     pub fn insert_with<S1, S2, A, V>(
@@ -123,17 +134,39 @@ impl<'tx, 'db> TextRef<&'tx mut Transaction<'db>> {
     where
         S1: AsRef<str>,
         S2: AsRef<str>,
-        V: Serialize,
+        V: Prelim,
         A: IntoIterator<Item = (S2, V)>,
     {
-        todo!()
+        let mut cursor = self.cursor_mut()?;
+        cursor.seek(index)?;
+
+        let attributes: Vec<_> = attrs.into_iter().collect();
+        if !attributes.is_empty() {
+            todo!("minimize attributes")
+        }
+
+        let mut negated_attrs = Vec::with_capacity(attributes.len());
+        for (attr, value) in attributes {
+            cursor.insert(FormatPrelim::new(attr.as_ref(), value))?;
+            negated_attrs.push(attr);
+        }
+
+        cursor.insert(StringPrelim::new(chunk.as_ref()))?;
+
+        while let Some(attr) = negated_attrs.pop() {
+            cursor.insert(FormatPrelim::<'_, V>::negated(attr.as_ref()))?;
+        }
+
+        Ok(())
     }
 
     pub fn insert_embed<V>(&mut self, index: usize, value: V) -> crate::Result<V::Return>
     where
         V: Prelim,
     {
-        todo!()
+        let mut cursor = self.cursor_mut()?;
+        cursor.seek(index)?;
+        cursor.insert(value)
     }
 
     pub fn insert_embed_with<S, A, V1, V2>(
@@ -144,7 +177,7 @@ impl<'tx, 'db> TextRef<&'tx mut Transaction<'db>> {
     ) -> crate::Result<()>
     where
         S: AsRef<str>,
-        V1: Serialize,
+        V1: Prelim,
         V2: Serialize,
         A: IntoIterator<Item = (S, V2)>,
     {
@@ -189,6 +222,181 @@ impl<'tx, 'db> Deref for TextRef<&'tx mut Transaction<'db>> {
         // Assuming that the mutable reference can be dereferenced to an immutable reference
         // This is a common pattern in Rust to allow shared access to the same data
         unsafe { &*(self as *const _ as *const TextRef<&'tx Transaction<'db>>) }
+    }
+}
+
+pub struct FormatPrelim<'t, P> {
+    key: &'t str,
+    value: Option<P>,
+}
+
+impl<'t, P> FormatPrelim<'t, P> {
+    pub fn new(key: &'t str, value: P) -> Self {
+        FormatPrelim {
+            key,
+            value: Some(value),
+        }
+    }
+
+    pub fn negated(key: &'t str) -> Self {
+        FormatPrelim { key, value: None }
+    }
+}
+
+impl<'t, P> Prelim for FormatPrelim<'t, P>
+where
+    P: Prelim,
+{
+    type Return = ();
+
+    fn prepare(
+        self,
+        insert: &mut InsertBlockData,
+        tx: &mut Transaction,
+    ) -> crate::Result<Self::Return> {
+        todo!()
+    }
+}
+
+pub struct TextCursor<T> {
+    /// Transaction.
+    tx: T,
+    /// Current block, the cursor is pointing at.
+    curr: Option<BlockMut>,
+    /// Offset within the block, cursor is pointing at.
+    offset: usize,
+    /// Current position of the cursor within the iterated collection.
+    index: usize,
+    /// Attributes applicable at the current cursor's position.
+    attributes: Attrs,
+}
+
+impl<'tref, 'db> TextCursor<&'tref mut Transaction<'db>> {
+    pub fn new(tx: &'tref mut Transaction<'db>, start: Option<&ID>) -> crate::Result<Self> {
+        let curr = match start {
+            None => None,
+            Some(&id) => {
+                let db = tx.db();
+                Some(db.fetch_block(id, true)?.into())
+            }
+        };
+        Ok(TextCursor {
+            tx,
+            curr,
+            index: 0,
+            offset: 0,
+            attributes: Default::default(),
+        })
+    }
+    pub fn seek(&mut self, pos: usize) -> crate::Result<()> {
+        match pos.cmp(&self.index) {
+            Ordering::Less => self.backward(self.index - pos),
+            Ordering::Equal => Ok(()),
+            Ordering::Greater => self.forward(pos - self.index),
+        }
+    }
+
+    fn forward(&mut self, mut remaining: usize) -> crate::Result<()> {
+        while remaining > 0 {
+            if let Some(block) = &self.curr {
+                if block.is_countable() {
+                    let len = block.len().get() as usize;
+                    if len > remaining {
+                        self.offset = remaining;
+                        break;
+                    } else if len < remaining {
+                        remaining -= len;
+                    }
+                }
+                match block.right() {
+                    None => {
+                        self.curr = None;
+                        break;
+                    }
+                    Some(&right_id) => {
+                        //TODO: use cursor to advance over neighbour blocks
+                        let db = self.tx.db();
+                        self.curr = Some(db.fetch_block(right_id, true)?.into());
+                    }
+                }
+            } else {
+                return Err(crate::Error::OutOfRange);
+            }
+        }
+        Ok(())
+    }
+
+    fn backward(&mut self, mut remaining: usize) -> crate::Result<()> {
+        while remaining > 0 {
+            if let Some(block) = &self.curr {
+                if block.is_countable() {
+                    let len = block.len().get() as usize;
+                    if len > remaining {
+                        self.offset = len - remaining;
+                        break;
+                    } else if len < remaining {
+                        remaining -= len;
+                    }
+                }
+                match block.left() {
+                    None => {
+                        self.curr = None;
+                        break;
+                    }
+                    Some(&right_id) => {
+                        //TODO: use cursor to advance over neighbour blocks
+                        let db = self.tx.db();
+                        self.curr = Some(db.fetch_block(right_id, false)?.into());
+                    }
+                }
+            } else {
+                return Err(crate::Error::OutOfRange);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn insert<P: Prelim>(&mut self, prelim: P) -> crate::Result<P::Return> {
+        let mut insert: InsertBlockData = todo!();
+        let result = prelim.prepare(&mut insert, &mut self.tx)?;
+        let (mut db, state) = self.tx.split_mut();
+        if self.offset != 0 {
+            todo!("split block?");
+        }
+        let mut ctx = IntegrationContext::create(&mut insert, Clock::new(0), &mut db)?;
+        insert.integrate(&mut db, state, &mut ctx)?;
+        Ok(result)
+    }
+
+    pub fn delete(&mut self, len: u32) -> crate::Result<()> {
+        let (mut db, state) = self.tx.split_mut();
+        let mut cursor = db.cursor()?;
+
+        todo!("");
+    }
+}
+
+#[repr(transparent)]
+struct StringPrelim<'a> {
+    data: &'a str,
+}
+
+impl<'a> StringPrelim<'a> {
+    fn new(data: &'a str) -> Self {
+        StringPrelim { data }
+    }
+}
+
+impl<'a> Prelim for StringPrelim<'a> {
+    type Return = ();
+
+    fn prepare(
+        self,
+        insert: &mut InsertBlockData,
+        tx: &mut Transaction,
+    ) -> crate::Result<Self::Return> {
+        insert.content = BytesMut::from(self.data.as_bytes());
+        Ok(())
     }
 }
 

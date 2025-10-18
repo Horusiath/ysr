@@ -1,12 +1,13 @@
 use crate::block::{Block, BlockMut, InsertBlockData, ID};
 use crate::block_reader::{BlockRange, Carrier};
-use crate::bucket::Bucket;
 use crate::content::{BlockContent, ContentType};
 use crate::id_set::IDSet;
-use crate::node::{Node, NodeType};
+use crate::node::{Node, NodeID, NodeType};
 use crate::{ClientID, Clock, Error, StateVector, U64};
+use genawaiter2::yield_;
+use lmdb_rs_m::core::MdbResult;
 use lmdb_rs_m::{Database, MdbError};
-use smallvec::{smallvec, SmallVec};
+use smallvec::{smallvec, ExtendFromSlice, SmallVec};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, VecDeque};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
@@ -18,7 +19,6 @@ pub trait BlockStore<'tx> {
     fn update_block(&mut self, block: Block) -> crate::Result<()>;
     fn try_update_clock(&mut self, id: ID) -> crate::Result<Clock>;
     fn split_block(&self, id: ID) -> crate::Result<SplitResult>;
-    fn remove(&mut self, id: &BlockRange) -> crate::Result<()>;
     fn clock(&self, client_id: ClientID) -> crate::Result<Option<Clock>>;
     fn state_vector(&self) -> crate::Result<StateVector>;
 
@@ -26,6 +26,7 @@ pub trait BlockStore<'tx> {
     fn set_block_content(&mut self, id: ID, content: &BlockContent) -> crate::Result<()>;
 
     fn entry(&self, map: &ID, entry_key: &str) -> crate::Result<ID>;
+    fn entries(&self, map: &ID) -> crate::Result<Entries<'_>>;
     fn set_entry(&mut self, map: &ID, entry_key: &str, value: &ID) -> crate::Result<()>;
 
     fn insert_pending_update(
@@ -157,10 +158,6 @@ impl<'tx> BlockStore<'tx> for Database<'tx> {
         }
     }
 
-    fn remove(&mut self, id: &BlockRange) -> crate::Result<()> {
-        todo!()
-    }
-
     /// Returns the state vector clock for a given client ID.
     fn clock(&self, client_id: ClientID) -> crate::Result<Option<Clock>> {
         let key = StateVectorKey::new(client_id);
@@ -221,29 +218,51 @@ impl<'tx> BlockStore<'tx> for Database<'tx> {
     fn entry(&self, map: &ID, entry_key: &str) -> crate::Result<ID> {
         let hash: U64 = twox_hash::xxhash3_64::Hasher::oneshot(entry_key.as_bytes()).into();
         let key = map_bucket_key(map, hash);
-        let bucket = match self.get(&key.as_slice()) {
-            Ok(value) => Bucket::from_bytes(value),
-            Err(MdbError::NotFound) => return Err(crate::Error::NotFound),
-            Err(e) => return Err(Error::Lmdb(e)),
-        };
-        match bucket.get(entry_key.as_bytes()) {
-            None => Err(crate::Error::NotFound),
-            Some(id) => Ok(*id),
+        let mut cursor = self.new_cursor()?;
+        match cursor.to_key(&key.as_bytes()) {
+            Ok(()) => {
+                let expected = entry_key.as_bytes();
+                loop {
+                    let bytes: &[u8] = cursor.get_value()?;
+                    let id = ID::ref_from_bytes(&bytes[..ID::SIZE])
+                        .map_err(|_| Error::InvalidMapping("ID"))?;
+                    let key = &bytes[ID::SIZE..];
+                    if key == expected {
+                        return Ok(*id);
+                    } else {
+                        if !cursor.to_next_key().is_ok() {
+                            break;
+                        }
+                    }
+                }
+                Err(Error::NotFound)
+            }
+            Err(MdbError::NotFound) => Err(Error::NotFound),
+            Err(e) => Err(Error::Lmdb(e)),
         }
+    }
+
+    fn entries(&self, map: &ID) -> crate::Result<Entries<'_>> {
+        let cursor = self.new_cursor()?;
+        Ok(Entries::new(cursor, map))
     }
 
     fn set_entry(&mut self, map: &ID, entry_key: &str, value: &ID) -> crate::Result<()> {
         let entry_key = entry_key.as_bytes();
         let hash: U64 = twox_hash::xxhash3_64::Hasher::oneshot(entry_key).into();
         let key = map_bucket_key(map, hash);
-        let mut bucket = match self.get(&key.as_slice()) {
-            Ok(value) => Bucket::from_bytes(value),
-            Err(MdbError::NotFound) => Bucket::from_bytes(&[]),
-            Err(e) => return Err(Error::Lmdb(e)),
+        let value = {
+            let mut buf = SmallVec::<[u8; 16]>::with_capacity(ID::SIZE + entry_key.len());
+            buf.extend_from_slice(value.as_bytes());
+            buf.extend_from_slice(entry_key.as_bytes());
+            buf
         };
-        bucket.insert(entry_key, value);
-        self.set(&key.as_slice(), &bucket.as_bytes())?;
-        Ok(())
+        let mut cursor = self.new_cursor()?;
+        match cursor.to_key(&key.as_bytes()) {
+            Ok(()) => Ok(cursor.add_item(&value.as_bytes())?),
+            Err(MdbError::NotFound) => Ok(cursor.set(&key.as_bytes(), &value.as_bytes(), 0)?),
+            Err(e) => Err(Error::Lmdb(e)),
+        }
     }
 
     fn insert_pending_update(
@@ -370,6 +389,72 @@ impl<'a> BlockCursor<'a> {
     }
 }
 
+pub struct Entries<'a> {
+    cursor: lmdb_rs_m::Cursor<'a>,
+    prefix: [u8; 9],
+    init: bool,
+}
+
+impl<'a> Entries<'a> {
+    pub fn new(cursor: lmdb_rs_m::Cursor<'a>, node_id: &NodeID) -> Self {
+        let mut prefix = [KEY_PREFIX_MAP, 0, 0, 0, 0, 0, 0, 0, 0];
+        prefix[1..].copy_from_slice(node_id.as_bytes());
+        Entries {
+            cursor,
+            prefix,
+            init: false,
+        }
+    }
+
+    fn cursor_parse(
+        cursor: &mut lmdb_rs_m::Cursor<'a>,
+        prefix: &[u8],
+    ) -> crate::Result<Option<(&'a str, &'a ID)>> {
+        let key: &[u8] = cursor.get_key()?;
+        if !key.starts_with(&prefix) {
+            return Ok(None);
+        }
+        let value: &[u8] = cursor.get_value()?;
+        let id = ID::ref_from_bytes(&value[..ID::SIZE]).map_err(|_| Error::InvalidMapping("ID"))?;
+        let entry_key = unsafe { str::from_utf8_unchecked(&value[ID::SIZE..]) };
+        Ok(Some((entry_key, id)))
+    }
+
+    pub fn next_entry(&mut self) -> crate::Result<Option<(&'a str, &'a ID)>> {
+        if !self.init {
+            match self.cursor.to_gte_key(&self.prefix.as_bytes()) {
+                Ok(_) => {}
+                Err(MdbError::NotFound) => return Ok(None),
+                Err(e) => return Err(Error::Lmdb(e)),
+            }
+            self.init = true;
+        } else {
+            match self.cursor.to_next_item() {
+                Ok(_) => { /* ok */ }
+                Err(MdbError::NotFound) => match self.cursor.to_next_key() {
+                    Ok(_) => { /* ok */ }
+                    Err(MdbError::NotFound) => return Ok(None),
+                    Err(e) => return Err(Error::Lmdb(e)),
+                },
+                Err(e) => return Err(Error::Lmdb(e)),
+            }
+        }
+        Self::cursor_parse(&mut self.cursor, &self.prefix)
+    }
+}
+
+impl<'a> Iterator for Entries<'a> {
+    type Item = crate::Result<(&'a str, &'a ID)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.next_entry() {
+            Ok(Some(entry)) => Some(Ok(entry)),
+            Ok(None) => None,
+            Err(e) => Some(Err(e)),
+        }
+    }
+}
+
 impl<'tx> From<lmdb_rs_m::Cursor<'tx>> for BlockCursor<'tx> {
     fn from(cursor: lmdb_rs_m::Cursor<'tx>) -> Self {
         BlockCursor { inner: cursor }
@@ -448,6 +533,7 @@ mod test {
     use crate::node::Node;
     use crate::store::lmdb::store::BlockStore;
     use lmdb_rs_m::DbFlags;
+    use std::collections::BTreeMap;
     use zerocopy::IntoBytes;
 
     #[test]
@@ -512,5 +598,45 @@ mod test {
         let actual = db.fetch_block(id, false).unwrap();
 
         assert_eq!(actual.as_bytes(), searched.as_bytes());
+    }
+
+    #[test]
+    fn get_set_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = lmdb_rs_m::Environment::builder()
+            .max_dbs(10)
+            .open(dir.path(), 0o777)
+            .unwrap();
+        let h = env.create_db("test", DbFlags::DbCreate).unwrap();
+        let tx = env.new_transaction().unwrap();
+        let mut db = tx.bind(&h);
+
+        let map = Node::nested(ID::new(1.into(), 1.into()));
+
+        let expected = BTreeMap::from([
+            ("key-1".to_string(), ID::new(2.into(), 0.into())),
+            ("key-2".to_string(), ID::new(2.into(), 1.into())),
+            ("key-3".to_string(), ID::new(2.into(), 2.into())),
+        ]);
+
+        for (k, v) in &expected {
+            db.set_entry(&map.id(), k, v).unwrap();
+        }
+
+        for (k, v) in &expected {
+            let actual = db.entry(&map.id(), k).unwrap();
+            assert_eq!(&actual, v);
+        }
+
+        let mut actual = BTreeMap::new();
+        let entries = db.entries(&map.id()).unwrap();
+        for result in entries {
+            let (k, v) = result.unwrap();
+            actual.insert(k.to_string(), *v);
+        }
+
+        assert_eq!(actual, expected);
+
+        tx.commit().unwrap();
     }
 }

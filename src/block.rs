@@ -20,7 +20,18 @@ use zerocopy::{CastError, FromBytes, Immutable, IntoBytes, KnownLayout, TryFromB
 
 #[repr(C)]
 #[derive(
-    PartialEq, Eq, Hash, Copy, Clone, FromBytes, KnownLayout, Immutable, IntoBytes, Default,
+    PartialEq,
+    Eq,
+    Hash,
+    Copy,
+    Clone,
+    FromBytes,
+    KnownLayout,
+    Immutable,
+    IntoBytes,
+    Default,
+    Ord,
+    PartialOrd,
 )]
 pub struct ID {
     pub client: ClientID,
@@ -28,6 +39,8 @@ pub struct ID {
 }
 
 impl ID {
+    pub const SIZE: usize = size_of::<ID>();
+
     #[inline]
     pub const fn new(client: ClientID, clock: Clock) -> Self {
         Self { client, clock }
@@ -334,6 +347,10 @@ impl BlockHeader {
 
     #[inline]
     pub fn clock_len(&self) -> Clock {
+        self.clock_len
+    }
+
+    pub fn len(&self) -> Clock {
         self.clock_len
     }
 
@@ -800,78 +817,24 @@ impl InsertBlockData {
         } else if let Some(entry_key) = self.entry_key() {
             // set as current parent value if right === null and this is parentSub
             db.set_entry(&parent_id, entry_key, self.id())?;
-            /*TODO:
-               if let Some(mut left) = this.left {
-                   #[cfg(feature = "weak")]
-                   {
-                       if left.info.is_linked() {
-                           // inherit links from the block we're overriding
-                           left.info.clear_linked();
-                           this.info.set_linked();
-                           let all_links = &mut txn.doc_mut().linked_by;
-                           if let Some(linked_by) = all_links.remove(&left) {
-                               all_links.insert(self_ptr, linked_by);
-                               // since left is being deleted, it will remove
-                               // its links from store.linkedBy anyway
-                           }
-                       }
-                   }
-                   // this is the current attribute value of parent. delete right
-                   txn.delete(left);
-               }
-            */
+
+            // this is the current attribute value of parent. delete right
+            if let Some(left) = context.left.as_mut() {
+                let parent_deleted = context
+                    .parent
+                    .as_ref()
+                    .map(|p| p.is_deleted())
+                    .unwrap_or(true);
+                tx_state.delete(db, left, parent_deleted)?;
+            }
         }
 
         if self.entry_key().is_none() && !self.is_deleted() {
-            if self.is_countable() {
-                // adjust length of parent
-                let parent_block = context.parent.as_mut().unwrap();
-                parent_block.clock_len += self.clock_len;
-            }
-            /*TODO:
-               #[cfg(feature = "weak")]
-               match (this.left, this.right) {
-                   (Some(l), Some(r)) if l.info.is_linked() || r.info.is_linked() => {
-                       crate::types::weak::join_linked_range(self_ptr, txn)
-                   }
-                   _ => {}
-               }
-            */
+            //TODO: adjust parent length
+            //TODO: linked type joining
         }
 
-        /*TODO:
-           // check if this item is in a moved range
-           let left_moved = this.left.and_then(|i| i.moved);
-           let right_moved = this.right.and_then(|i| i.moved);
-           let (doc, state) = txn.split_mut();
-           if left_moved.is_some() || right_moved.is_some() {
-               if left_moved == right_moved {
-                   this.moved = left_moved;
-               } else {
-                   #[inline]
-                   fn try_integrate(
-                       mut item: ItemPtr,
-                       doc: &mut Doc,
-                       state: &mut TransactionState,
-                   ) {
-                       let ptr = item.clone();
-                       if let ItemContent::Move(m) = &mut item.content {
-                           if !m.is_collapsed() {
-                               m.integrate_block(doc, state, ptr);
-                           }
-                       }
-                   }
-
-                   if let Some(ptr) = left_moved {
-                       try_integrate(ptr, doc, state);
-                   }
-
-                   if let Some(ptr) = right_moved {
-                       try_integrate(ptr, doc, state);
-                   }
-               }
-           }
-        */
+        //TODO: check if this item is in a moved range and merge moves
 
         match self.content()? {
             BlockContent::Deleted => {
@@ -881,13 +844,12 @@ impl InsertBlockData {
                 self.set_deleted();
             }
             BlockContent::Doc(doc_id) => {
-                /*
+                /*TODO:
                    let mut borrowed = subdoc.borrow_mut();
                    doc.subdocs.insert((borrowed.guid(), this.id));
                    borrowed.subdoc = Some(self_ptr);
                    let should_load = borrowed.should_load();
                    drop(borrowed);
-
                    let subdocs = state.subdocs.get_or_init();
                    if should_load {
                        subdocs.loaded.push(SubDocHook::new(subdoc.clone()));
@@ -898,47 +860,29 @@ impl InsertBlockData {
             _ => { /* do nothing */ }
         }
 
-        /*
-        if let Some(mut parent_ref) = parent {
-
-            state.add_changed_type(parent_ref, this.parent_sub.clone());
-            if this.info.is_linked() {
-                if let Some(links) = doc.linked_by.get(&self_ptr).cloned() {
-                    // notify links about changes
-                    for link in links.iter() {
-                        state.add_changed_type(*link, this.parent_sub.clone());
-                    }
-                }
-            }
-            let parent_deleted = if let TypePtr::Branch(ptr) = &this.parent {
-                if let Some(block) = ptr.item {
-                    block.is_deleted()
-                } else {
-                    false
-                }
-            } else {
-                false
-            };
-            if parent_deleted || (this.parent_sub.is_some() && this.right.is_some()) {
-                // delete if parent is deleted or if this is not the current attribute value of parent
-                true
-            } else {
-                false
-            }
-        } else {
-            true
-        }
-         */
-
         db.insert_block(self)?;
+
+        let parent_deleted = if let Some(parent_block) = context.parent.as_mut() {
+            let parent = parent_block.as_block();
+            let is_deleted = parent.id.is_nested() && parent.is_deleted();
+            tx_state.add_changed_type(parent.id, is_deleted, self.key_hash());
+            db.update_block(parent)?;
+            is_deleted
+        } else {
+            true // parent GCed?
+        };
+
+        if parent_deleted || (self.key_hash().is_some() && self.right().is_some()) {
+            // if either parent is deleted or this block is not the last block in
+            // a map-like structure, delete it
+            tx_state.delete(db, &mut self.block, parent_deleted)?;
+        }
+
         if let Some(right) = context.right.as_mut() {
             db.update_block(right.as_block())?;
         }
         if let Some(left) = context.left.as_mut() {
             db.update_block(left.as_block())?;
-        }
-        if let Some(parent_block) = context.parent.as_mut() {
-            db.update_block(parent_block.as_block())?;
         }
 
         Ok(())

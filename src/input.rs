@@ -1,6 +1,7 @@
+use crate::block::InsertBlockData;
 use crate::lib0::Value;
 use crate::prelim::Prelim;
-use crate::{ListPrelim, MapPrelim, Out};
+use crate::{ListPrelim, MapPrelim, Out, Transaction};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -33,4 +34,12 @@ where
 
 impl Prelim for In {
     type Return = Out;
+
+    fn prepare(
+        self,
+        insert: &mut InsertBlockData,
+        tx: &mut Transaction,
+    ) -> crate::Result<Self::Return> {
+        todo!()
+    }
 }

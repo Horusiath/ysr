@@ -1,5 +1,6 @@
-use crate::block::{Block, BlockFlags, InsertBlockData, ID};
+use crate::block::{Block, BlockFlags, BlockMut, InsertBlockData, ID};
 use crate::block_reader::{BlockRange, BlockReader, Carrier, Update};
+use crate::content::ContentType;
 use crate::id_set::IDSet;
 use crate::integrate::IntegrationContext;
 use crate::node::{Node, NodeID, NodeType};
@@ -8,12 +9,12 @@ use crate::state_vector::Snapshot;
 use crate::store::lmdb::store::SplitResult;
 use crate::store::lmdb::BlockStore;
 use crate::write::WriteExt;
-use crate::{ClientID, StateVector};
+use crate::{ClientID, StateVector, U32};
 use bitflags::bitflags;
 use bytes::{Bytes, BytesMut};
 use lmdb_rs_m::{Database, DbHandle};
 use std::collections::btree_map::{Entry, OccupiedEntry};
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
 use std::io::Write;
 use zerocopy::IntoBytes;
@@ -23,6 +24,8 @@ pub(crate) struct TransactionState {
     pub current_state: StateVector,
     pub origin: Option<Origin>,
     pub delete_set: IDSet,
+    pub changed: HashMap<NodeID, HashSet<U32>>,
+    pub merge_blocks: BTreeSet<ID>,
 }
 
 impl TransactionState {
@@ -33,7 +36,83 @@ impl TransactionState {
             current_state,
             origin,
             delete_set: IDSet::default(),
+            changed: HashMap::default(),
+            merge_blocks: BTreeSet::default(),
         }
+    }
+    pub(crate) fn add_changed_type(
+        &mut self,
+        parent_id: NodeID,
+        parent_deleted: bool,
+        key_hash: Option<&U32>,
+    ) {
+        if parent_id.is_root()
+            || (parent_id.clock < self.begin_state.get(&parent_id.client) && !parent_deleted)
+        {
+            let e = self.changed.entry(parent_id).or_default();
+            if let Some(key_hash) = key_hash {
+                e.insert(*key_hash);
+            }
+        }
+    }
+
+    pub(crate) fn delete(
+        &mut self,
+        db: &mut Database,
+        block: &mut BlockMut,
+        parent_deleted: bool,
+    ) -> crate::Result<()> {
+        if block.is_deleted() {
+            return Ok(());
+        }
+
+        block.set_deleted();
+        db.update_block(block.as_block())?;
+        self.delete_set.insert(*block.id(), block.clock_len());
+        self.add_changed_type(*block.parent(), parent_deleted, block.key_hash());
+
+        match block.content_type() {
+            ContentType::Node => {
+                // iterate over list values of the node and delete them
+                let mut current = block.start().copied();
+                while let Some(id) = current {
+                    let mut block: BlockMut = db.fetch_block(id, true)?.into();
+                    if !block.is_deleted() {
+                        self.delete(db, &mut block, true)?;
+                    } else if block.id().clock < self.begin_state.get(&block.id().client) {
+                        // This will be gc'd later and we want to merge it if possible
+                        // We try to merge all deleted items after each transaction,
+                        // but we have no knowledge about that this needs to be merged
+                        // since it is not in transaction.ds. Hence we add it to transaction._mergeStructs
+                        self.merge_blocks.insert(*block.id());
+                    }
+                    current = block.right().copied();
+                }
+
+                //iterate over map entries of the node and delete them
+                let mut to_delete = Vec::new();
+                for result in db.entries(block.parent())? {
+                    let (_, &entry_id) = result?;
+                    to_delete.push(entry_id);
+                }
+
+                for entry_id in to_delete {
+                    let mut entry_block: BlockMut = db.fetch_block(entry_id, true)?.into();
+                    if !entry_block.is_deleted() {
+                        self.delete(db, &mut entry_block, true)?;
+                    } else if entry_block.id().clock
+                        < self.begin_state.get(&entry_block.id().client)
+                    {
+                        // same as above
+                        self.merge_blocks.insert(*entry_block.id());
+                    }
+                }
+                self.changed.remove(block.id());
+            }
+            ContentType::Doc => { /*TODO: document delete events */ }
+            _ => { /* not used */ }
+        }
+        Ok(())
     }
 
     fn precommit<'db>(

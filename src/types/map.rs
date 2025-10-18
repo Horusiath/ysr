@@ -1,3 +1,4 @@
+use crate::block::InsertBlockData;
 use crate::node::NodeType;
 use crate::prelim::Prelim;
 use crate::types::Capability;
@@ -112,6 +113,21 @@ pub struct MapPrelim(BTreeMap<String, In>);
 
 impl Prelim for MapPrelim {
     type Return = Unmounted<Map>;
+
+    fn prepare(
+        self,
+        insert: &mut InsertBlockData,
+        tx: &mut Transaction,
+    ) -> crate::Result<Self::Return> {
+        let unmounted: Unmounted<Map> = Unmounted::nested(*insert.block.id());
+        if !self.0.is_empty() {
+            let mut mounted = unmounted.mount(tx)?;
+            for (key, value) in self.0 {
+                mounted.insert(key, value)?;
+            }
+        }
+        Ok(unmounted)
+    }
 }
 
 impl Deref for MapPrelim {

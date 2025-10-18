@@ -14,7 +14,7 @@ mod varint;
 mod write;
 
 mod block_cursor;
-mod bucket;
+//mod bucket;
 mod input;
 mod integrate;
 mod output;
@@ -56,8 +56,8 @@ pub enum Error {
     EndOfBuffer,
     #[error("operation tried to allocate too much memory: {0}")]
     OutOfMemory(#[from] TryReserveError),
-    #[error("value is out of range of expected type")]
-    ValueOutOfRange,
+    #[error("index is out of range of expected type")]
+    OutOfRange,
     #[error("provided key is longer than 255 bytes")]
     KeyTooLong,
     #[error("failed to map data to {0}")]
@@ -201,5 +201,46 @@ impl<'de> Deserialize<'de> for ClientID {
     {
         let value = u32::deserialize(deserializer)?;
         ClientID::try_from(value).map_err(serde::de::Error::custom)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use lmdb_rs_m::core::MdbResult;
+    use lmdb_rs_m::{DbFlags, MdbError};
+    use tempfile::TempDir;
+
+    #[test]
+    fn lmdb_items() {
+        let dir = TempDir::new().unwrap();
+        let env = lmdb_rs_m::Environment::builder()
+            .max_dbs(10)
+            .open(dir.path(), 0o600)
+            .unwrap();
+        let handle = env
+            .create_db("test", DbFlags::DbCreate | DbFlags::DbAllowDups)
+            .unwrap();
+        let tx = env.new_transaction().unwrap();
+        let db = tx.bind(&handle);
+        let mut cursor = db.new_cursor().unwrap();
+
+        cursor.set(&"key1", &0, 0).unwrap();
+        cursor.add_item(&1).unwrap();
+        cursor.add_item(&2).unwrap();
+        cursor.add_item(&3).unwrap();
+
+        cursor.set(&"key2", &10, 0).unwrap();
+        cursor.add_item(&11).unwrap();
+        cursor.add_item(&12).unwrap();
+        cursor.add_item(&13).unwrap();
+
+        println!("{}", cursor.item_count().unwrap());
+        drop(cursor);
+        drop(db);
+        tx.commit().unwrap();
+
+        let tx = env.new_transaction().unwrap();
+        let db = tx.bind(&handle);
+        let mut cursor = db.new_cursor().unwrap();
     }
 }
