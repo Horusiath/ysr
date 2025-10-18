@@ -1,3 +1,4 @@
+use crate::block::InsertBlockData;
 use crate::lib0::Value;
 use crate::node::NodeType;
 use crate::prelim::Prelim;
@@ -119,6 +120,22 @@ pub struct ListPrelim(Vec<In>);
 
 impl Prelim for ListPrelim {
     type Return = Unmounted<List>;
+
+    fn prepare(
+        self,
+        insert: &mut InsertBlockData,
+        tx: &mut Transaction,
+    ) -> crate::Result<Self::Return> {
+        let unmounted: Unmounted<List> = Unmounted::nested(*insert.block.id());
+        if !self.0.is_empty() {
+            let mut mounted = unmounted.mount(tx)?;
+            for input in self.0 {
+                //TODO: optimize for batch insert
+                mounted.push_back(input)?;
+            }
+        }
+        Ok(unmounted)
+    }
 }
 
 impl Deref for ListPrelim {

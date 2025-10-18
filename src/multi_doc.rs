@@ -14,7 +14,9 @@ impl MultiDoc {
     }
 
     pub fn transact_mut(&self, doc_id: &str) -> crate::Result<Transaction<'_>> {
-        let handle = self.env.create_db(doc_id, DbFlags::DbCreate)?;
+        let handle = self
+            .env
+            .create_db(doc_id, DbFlags::DbCreate | DbFlags::DbAllowDups)?;
         let tx = self.env.new_transaction()?;
         Ok(Transaction::read_write(tx, handle, None))
     }
@@ -25,7 +27,9 @@ impl MultiDoc {
         origin: O,
     ) -> crate::Result<Transaction<'_>> {
         let origin = origin.into();
-        let handle = self.env.create_db(doc_id, DbFlags::DbCreate)?;
+        let handle = self
+            .env
+            .create_db(doc_id, DbFlags::DbCreate | DbFlags::DbAllowDups)?;
         let tx = self.env.new_transaction()?;
         Ok(Transaction::read_write(tx, handle, Some(origin)))
     }

@@ -1,5 +1,7 @@
+use crate::block::InsertBlockData;
 use crate::prelim::Prelim;
-use bytes::Bytes;
+use crate::Transaction;
+use bytes::{Bytes, BytesMut};
 use serde::de::{Error, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
@@ -258,4 +260,12 @@ impl Display for Value {
 
 impl Prelim for Value {
     type Return = ();
+
+    fn prepare(
+        self,
+        insert: &mut InsertBlockData,
+        tx: &mut Transaction,
+    ) -> crate::Result<Self::Return> {
+        todo!()
+    }
 }

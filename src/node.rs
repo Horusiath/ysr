@@ -22,7 +22,7 @@ impl<'a> Node<'a> {
         Node::Root(name.into())
     }
     #[inline]
-    pub fn nested(id: ID) -> Self {
+    pub const fn nested(id: ID) -> Self {
         Node::Nested(id)
     }
 
@@ -50,11 +50,21 @@ impl<'a> Node<'a> {
             Node::Nested(id) => *id,
         }
     }
+
+    pub fn to_owned(self) -> Node<'static> {
+        match self {
+            Node::Root(name) => Node::Root(Cow::Owned(name.into_owned())),
+            Node::Nested(id) => Node::Nested(id),
+        }
+    }
 }
 
 #[repr(u8)]
-#[derive(Debug, TryFromBytes, KnownLayout, Immutable, IntoBytes)]
+#[derive(
+    Copy, Clone, Debug, PartialEq, Eq, TryFromBytes, KnownLayout, Immutable, IntoBytes, Default,
+)]
 pub enum NodeType {
+    #[default]
     Unknown = 0,
     List = 1,
     Map = 2,
@@ -81,52 +91,17 @@ impl TryFrom<u8> for NodeType {
     }
 }
 
-#[repr(C)]
-#[derive(FromBytes, KnownLayout, Immutable, IntoBytes)]
-pub struct NodeHeader {
-    type_ref: u8,
-    flags: NodeFlags,
-    start: ID,
-}
-
-impl NodeHeader {
-    pub const SIZE: usize = size_of::<NodeHeader>();
-
-    pub fn new(type_ref: u8) -> Self {
-        Self {
-            type_ref,
-            flags: NodeFlags::default(),
-            start: ID::new_zeroed(),
-        }
-    }
-
-    pub fn node_type(&self) -> NodeType {
-        NodeType::try_from(self.type_ref).unwrap_or(NodeType::Unknown)
-    }
-
-    pub fn start(&self) -> Option<&ID> {
-        if self.flags.contains(NodeFlags::HAS_START) {
-            Some(&self.start)
-        } else {
-            None
-        }
-    }
-
-    pub fn set_start(&mut self, id: Option<&ID>) {
-        match id {
-            None => self.flags -= NodeFlags::HAS_START,
-            Some(id) => {
-                self.flags |= NodeFlags::HAS_START;
-                self.start = *id;
-            }
-        }
-    }
-}
-
-impl Display for NodeHeader {
+impl Display for NodeType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let node_type = NodeType::try_from(self.type_ref).unwrap_or(NodeType::Unknown);
-        write!(f, "{:?}", node_type)
+        match self {
+            NodeType::Unknown => write!(f, "Unknown"),
+            NodeType::List => write!(f, "List"),
+            NodeType::Map => write!(f, "Map"),
+            NodeType::Text => write!(f, "Text"),
+            NodeType::XmlFragment => write!(f, "XmlFragment"),
+            NodeType::XmlElement => write!(f, "XmlElement"),
+            NodeType::XmlText => write!(f, "XmlText"),
+        }
     }
 }
 

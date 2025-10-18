@@ -1,24 +1,23 @@
-use crate::block::{BlockBuilder, BlockFlags};
+use crate::block::{Block, BlockFlags, BlockMut, InsertBlockData};
 use crate::content::BlockContentMut;
 use crate::node::{Node, NodeType};
 use crate::store::lmdb::store::SplitResult;
 use crate::store::lmdb::BlockStore;
 use crate::{Clock, Optional};
-use bitflags::Flags;
 use lmdb_rs_m::Database;
 use std::collections::HashSet;
+use std::ops::Deref;
 
 pub(crate) struct IntegrationContext {
-    pub left: Option<BlockBuilder>,
-    pub right: Option<BlockBuilder>,
-    pub parent: Option<BlockBuilder>,
+    pub left: Option<BlockMut>,
+    pub right: Option<BlockMut>,
+    pub parent: Option<BlockMut>,
     pub offset: Clock,
 }
 
 impl IntegrationContext {
     pub fn create(
-        target: &mut BlockBuilder,
-        parent_name: Option<&str>,
+        target: &mut InsertBlockData,
         offset: Clock,
         db: &mut Database,
     ) -> crate::Result<Self> {
@@ -39,26 +38,25 @@ impl IntegrationContext {
             None
         };
 
-        if !target.flags().contains(BlockFlags::HAS_PARENT) {
+        if target.parent().is_none() {
             let parent = match &left {
-                Some(left) => Some(*left.parent()),
+                Some(left) => Some(*left.deref().parent()),
                 None => match &right {
                     None => None,
-                    Some(right) => Some(*right.parent()),
+                    Some(right) => Some(*right.deref().parent()),
                 },
             };
             if let Some(parent) = parent {
                 target.set_parent(parent);
             }
         }
-        let node = match parent_name {
-            None => Node::nested(*target.parent()),
-            Some(parent_name) => Node::root(parent_name),
-        };
-        let parent = match db.get_or_insert_node(node, NodeType::Unknown) {
-            Ok(block) => Some(block),
-            Err(crate::Error::NotFound) => None,
-            Err(e) => return Err(e),
+        let parent = match target.parent() {
+            Some(node) => match db.get_or_insert_node(node.clone(), NodeType::Unknown) {
+                Ok(block) => Some(block),
+                Err(crate::Error::NotFound) => None,
+                Err(e) => return Err(e),
+            },
+            None => None,
         };
         Ok(IntegrationContext {
             left,
@@ -68,7 +66,7 @@ impl IntegrationContext {
         })
     }
 
-    pub fn detect_conflict(&self, target: &BlockBuilder) -> bool {
+    pub fn detect_conflict(&self, target: &InsertBlockData) -> bool {
         // original code: ((!target.left && (!target.right || target.right.left !== null)) || (target.left && target.left.right !== target.right))
         match (&self.left, &self.right) {
             (None, None) => true,                          // !target.left && !target.right
@@ -80,16 +78,13 @@ impl IntegrationContext {
 
     pub fn resolve_conflict(
         &mut self,
-        target: &mut BlockBuilder,
+        target: &mut InsertBlockData,
         db: &Database,
     ) -> crate::Result<()> {
         let parent = self.parent.as_mut().unwrap();
-        let BlockContentMut::Node(parent_node) = parent.content_mut()? else {
-            unreachable!()
-        };
         let mut o = if let Some(left) = &self.left {
             left.right().cloned()
-        } else if let Some(sub) = &target.entry_key() {
+        } else if let Some(sub) = target.entry_key() {
             let mut o = db.entry(parent.id(), sub).optional()?;
             while let Some(id) = o {
                 let item = db.fetch_block(id, true)?;
@@ -101,7 +96,7 @@ impl IntegrationContext {
             }
             o.clone()
         } else {
-            parent_node.header().start().cloned()
+            parent.start().cloned()
         };
 
         let mut left = target.left().cloned();
