@@ -1,23 +1,22 @@
-use crate::block::{Block, BlockFlags, BlockMut, InsertBlockData, ID};
-use crate::block_reader::{BlockRange, BlockReader, Carrier, Update};
+use crate::block::{BlockHeader, BlockMut, ID};
+use crate::block_reader::{BlockRange, Carrier, Update};
 use crate::content::ContentType;
 use crate::id_set::IDSet;
-use crate::integrate::IntegrationContext;
-use crate::node::{Node, NodeID, NodeType};
+use crate::node::{Node, NodeID};
 use crate::read::Decoder;
 use crate::state_vector::Snapshot;
-use crate::store::lmdb::store::SplitResult;
+use crate::store::lmdb::store::{BlockKey, CursorExt, MapBucketKey};
 use crate::store::lmdb::BlockStore;
 use crate::write::WriteExt;
-use crate::{ClientID, StateVector, U32};
+use crate::{ClientID, Error, Optional, StateVector, U32};
 use bitflags::bitflags;
 use bytes::{Bytes, BytesMut};
 use lmdb_rs_m::{Database, DbHandle};
-use std::collections::btree_map::{Entry, OccupiedEntry};
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
 use std::io::Write;
-use zerocopy::IntoBytes;
+use zerocopy::{FromBytes, IntoBytes, TryFromBytes};
 
 pub(crate) struct TransactionState {
     pub begin_state: StateVector,
@@ -66,6 +65,7 @@ impl TransactionState {
             return Ok(());
         }
 
+        println!("deleting block {}", block.id());
         block.set_deleted();
         db.update_block(block.as_block())?;
         self.delete_set.insert(*block.id(), block.clock_len());
@@ -91,7 +91,7 @@ impl TransactionState {
 
                 //iterate over map entries of the node and delete them
                 let mut to_delete = Vec::new();
-                for result in db.entries(block.parent())? {
+                for result in db.entries(*block.parent())? {
                     let (_, &entry_id) = result?;
                     to_delete.push(entry_id);
                 }
@@ -116,11 +116,85 @@ impl TransactionState {
     }
 
     fn precommit<'db>(
-        &self,
+        &mut self,
         db: Database<'_>,
         summary: Option<&mut TransactionSummary>,
     ) -> crate::Result<()> {
-        todo!()
+        // squash delete set
+        self.delete_set.squash();
+
+        // transaction.afterState = getStateVector(transaction.doc.store)
+
+        if let Some(summary) = summary {
+            if summary.flags.contains(CommitFlags::OBSERVE_NODES) {
+                // gather info about which nodes have changed
+                todo!();
+                if summary.flags.contains(CommitFlags::OBSERVE_NODES_DEEP) {
+                    // bubble up changes to parent nodes and gather them as well
+                    todo!();
+                }
+            }
+        }
+
+        //if (doc.gc) {
+        //  tryGcDeleteSet(ds, store, doc.gcFilter)
+        //}
+        //tryMergeDeleteSet(ds, store)
+
+        // on all affected store.clients props, try to merge
+        let mut cursor = db.new_cursor()?;
+        let mut key_changes = BTreeMap::new();
+        for (client, &clock) in self.current_state.iter() {
+            let before_clock = self.begin_state.get(client);
+            if before_clock != clock {
+                let key = BlockKey::new(ID::new(*client, clock));
+                cursor.to_gte_key(&key.as_bytes())?;
+                Self::merge_with_lefts(&mut cursor, &mut key_changes)?;
+            }
+        }
+
+        // try to merge mergeStructs
+
+        // create incremental update
+
+        //TODO: subdoc events
+
+        Ok(())
+    }
+
+    /// Moving cursor right to left, try to merge structs with their left neighbors.
+    /// Returns ID of the current position after merging.
+    /// Expects that cursor is set within a block keyspace position.
+    fn merge_with_lefts(
+        cursor: &mut lmdb_rs_m::Cursor,
+        key_changes: &mut BTreeMap<MapBucketKey, (ID, ID)>,
+    ) -> crate::Result<ID> {
+        let mut right: BlockMut = cursor.get_block()?.into();
+        cursor.to_prev_key()?;
+        let mut left = cursor.get_block().optional()?.map(BlockMut::from);
+        while let Some(curr) = &mut left {
+            if curr.merge(right.as_block()) {
+                if let Some(parent_sub) = right.key_hash() {
+                    let e = key_changes
+                        .entry(MapBucketKey::new(*right.parent(), *parent_sub))
+                        .or_insert((*right.id(), *curr.id()));
+                    e.1 = *curr.id();
+                }
+                cursor.del()?;
+            } else {
+                break; // we couldn't merge left and right blocks
+            }
+
+            // move to left block
+            cursor.to_prev_key()?;
+            right = std::mem::replace(
+                &mut left,
+                cursor.get_block().optional()?.map(BlockMut::from),
+            )
+            .unwrap();
+        }
+
+        Ok(*right.id())
     }
 }
 
@@ -207,10 +281,10 @@ impl<'db> Transaction<'db> {
         buf: &mut BytesMut,
     ) -> crate::Result<usize> {
         let mut blocks_count = 0;
-        for block in cursor {
-            let block = block?;
+        for result in cursor {
+            let insert = result?;
             blocks_count += 1;
-            buf.extend_from_slice(block.as_bytes());
+            buf.extend_from_slice(insert.block.as_bytes());
         }
         Ok(blocks_count)
     }
@@ -344,25 +418,25 @@ impl<'db> Transaction<'db> {
     /// A dependency is missing if any of the block's origins (left, right, parent) point to a block that is not yet integrated.
     /// Returns the client ID of the missing dependency, or None if all dependencies are satisfied.
     fn missing_dependency(block: &Carrier, local_sv: &StateVector) -> Option<ClientID> {
-        if let Carrier::Block(block) = block {
-            if let Some(origin) = &block.origin_left() {
-                if origin.client != block.id().client
+        if let Carrier::Block(insert) = block {
+            if let Some(origin) = &insert.block.origin_left() {
+                if origin.client != insert.id().client
                     && origin.clock >= local_sv.get(&origin.client)
                 {
                     return Some(origin.client);
                 }
             }
 
-            if let Some(right_origin) = &block.origin_right() {
-                if right_origin.client != block.id().client
+            if let Some(right_origin) = &insert.block.origin_right() {
+                if right_origin.client != insert.id().client
                     && right_origin.clock >= local_sv.get(&right_origin.client)
                 {
                     return Some(right_origin.client);
                 }
             }
 
-            if let Some(Node::Nested(parent)) = block.parent() {
-                if parent.client != block.id().client
+            if let Some(Node::Nested(parent)) = insert.parent() {
+                if parent.client != insert.id().client
                     && parent.clock >= local_sv.get(&parent.client)
                 {
                     return Some(parent.client);
@@ -374,7 +448,7 @@ impl<'db> Transaction<'db> {
     }
 
     pub fn commit(mut self, summary: Option<&mut TransactionSummary>) -> crate::Result<()> {
-        if let Some(state) = self.state.take() {
+        if let Some(mut state) = self.state.take() {
             // commit the transaction
             state.precommit(self.db(), summary)?;
             self.txn.commit()?;
@@ -428,6 +502,7 @@ bitflags! {
         const UPDATE_V1 = 0b0000_0001;
         const UPDATE_V2 = 0b0000_0010;
         const OBSERVE_NODES = 0b0000_0100;
+        const OBSERVE_NODES_DEEP = 0b0000_1000;
     }
 }
 

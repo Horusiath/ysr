@@ -416,9 +416,10 @@ mod test {
             unreachable!()
         };
         assert_eq!(n.id(), &ID::new(CLIENT, 0.into()));
-        assert_eq!(n.origin_right(), None);
-        assert_eq!(n.origin_left(), None);
-        let BlockContent::Text(text) = BlockContent::new(n.content_type(), &n.content).unwrap()
+        assert_eq!(n.block.origin_right(), None);
+        assert_eq!(n.block.origin_left(), None);
+        let BlockContent::Text(text) =
+            BlockContent::new(n.block.content_type(), &n.content).unwrap()
         else {
             unreachable!()
         };
@@ -429,8 +430,9 @@ mod test {
             unreachable!()
         };
         assert_eq!(n.id(), &ID::new(CLIENT, 1.into()));
-        assert_eq!(n.origin_right(), Some(&ID::new(CLIENT, 0.into())));
-        let BlockContent::Text(text) = BlockContent::new(n.content_type(), &n.content).unwrap()
+        assert_eq!(n.block.origin_right(), Some(&ID::new(CLIENT, 0.into())));
+        let BlockContent::Text(text) =
+            BlockContent::new(n.block.content_type(), &n.content).unwrap()
         else {
             unreachable!()
         };
@@ -441,7 +443,8 @@ mod test {
             unreachable!()
         };
         assert_eq!(n.id(), &ID::new(CLIENT, 2.into()));
-        let BlockContent::Text(text) = BlockContent::new(n.content_type(), &n.content).unwrap()
+        let BlockContent::Text(text) =
+            BlockContent::new(n.block.content_type(), &n.content).unwrap()
         else {
             unreachable!()
         };

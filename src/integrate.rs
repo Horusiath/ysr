@@ -21,7 +21,7 @@ impl IntegrationContext {
         offset: Clock,
         db: &mut Database,
     ) -> crate::Result<Self> {
-        let left = if let Some(&origin) = target.origin_left() {
+        let left = if let Some(&origin) = target.block.origin_left() {
             Some(match db.split_block(origin)? {
                 SplitResult::Unchanged(left) => left.into(),
                 SplitResult::Split(left, _) => left,
@@ -29,7 +29,7 @@ impl IntegrationContext {
         } else {
             None
         };
-        let right = if let Some(&origin) = target.origin_right() {
+        let right = if let Some(&origin) = target.block.origin_right() {
             Some(match db.split_block(origin)? {
                 SplitResult::Unchanged(block) => block.into(),
                 SplitResult::Split(_, right) => right,
@@ -47,7 +47,7 @@ impl IntegrationContext {
                 },
             };
             if let Some(parent) = parent {
-                target.set_parent(parent);
+                target.block.set_parent(parent);
             }
         }
         let parent = match target.parent() {
@@ -56,7 +56,10 @@ impl IntegrationContext {
                 Err(crate::Error::NotFound) => None,
                 Err(e) => return Err(e),
             },
-            None => None,
+            None => {
+                let block = db.fetch_block(*target.block.parent(), true)?;
+                Some(block.into())
+            }
         };
         Ok(IntegrationContext {
             left,
@@ -71,7 +74,7 @@ impl IntegrationContext {
         match (&self.left, &self.right) {
             (None, None) => true,                          // !target.left && !target.right
             (None, Some(right)) => right.left().is_some(), // !target.left && target.right.left !== null
-            (Some(left), _) => left.right() != target.right(), // target.left && target.left.right !== target.right
+            (Some(left), _) => left.right() != target.block.right(), // target.left && target.left.right !== target.right
             _ => false,
         }
     }
@@ -85,7 +88,7 @@ impl IntegrationContext {
         let mut o = if let Some(left) = &self.left {
             left.right().cloned()
         } else if let Some(sub) = target.entry_key() {
-            let mut o = db.entry(parent.id(), sub).optional()?;
+            let mut o = db.entry(*parent.id(), sub).optional()?;
             while let Some(id) = o {
                 let item = db.fetch_block(id, true)?;
                 if let Some(left) = item.left() {
@@ -99,7 +102,7 @@ impl IntegrationContext {
             parent.start().cloned()
         };
 
-        let mut left = target.left().cloned();
+        let mut left = target.block.left().cloned();
         let mut conflicting_items = HashSet::new();
         let mut items_before_origin = HashSet::new();
 
@@ -107,20 +110,20 @@ impl IntegrationContext {
         // ***{origin}bbbb{this}{c,b}{c,b}{o}***
         // Note that conflicting_items is a subset of items_before_origin
         while let Some(item) = o {
-            if Some(&item) == target.right() {
+            if Some(&item) == target.block.right() {
                 break;
             }
             items_before_origin.insert(item.clone());
             conflicting_items.insert(item.clone());
 
             let item = db.fetch_block(item, true)?;
-            if target.origin_left() == item.origin_left() {
+            if target.block.origin_left() == item.origin_left() {
                 // case 1
                 let item_id = item.id();
                 if item_id.client < target.id().client {
                     left = Some(item_id.clone());
                     conflicting_items.clear();
-                } else if target.origin_right() == item.origin_right() {
+                } else if target.block.origin_right() == item.origin_right() {
                     // `self` and `item` are conflicting and point to the same integration
                     // points. The id decides which item comes first. Since `self` is to
                     // the left of `item`, we can break here.
@@ -145,7 +148,7 @@ impl IntegrationContext {
                 o = item.right().cloned();
             }
 
-            target.set_left(left.as_ref());
+            target.block.set_left(left.as_ref());
         }
 
         Ok(())

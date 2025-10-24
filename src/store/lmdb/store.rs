@@ -1,12 +1,12 @@
 use crate::block::{Block, BlockMut, InsertBlockData, ID};
 use crate::block_reader::{BlockRange, Carrier};
-use crate::content::{BlockContent, ContentType};
+use crate::content::{BlockContent, ContentIter, ContentType};
 use crate::id_set::IDSet;
 use crate::node::{Node, NodeID, NodeType};
-use crate::{ClientID, Clock, Error, StateVector, U64};
+use crate::{ClientID, Clock, Error, Optional, StateVector, U32, U64};
 use genawaiter2::yield_;
 use lmdb_rs_m::core::MdbResult;
-use lmdb_rs_m::{Database, MdbError};
+use lmdb_rs_m::{Cursor, Database, MdbError};
 use smallvec::{smallvec, ExtendFromSlice, SmallVec};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, VecDeque};
@@ -25,9 +25,9 @@ pub trait BlockStore<'tx> {
     fn block_content(&self, id: ID, kind: ContentType) -> crate::Result<BlockContent<'_>>;
     fn set_block_content(&mut self, id: ID, content: &BlockContent) -> crate::Result<()>;
 
-    fn entry(&self, map: &ID, entry_key: &str) -> crate::Result<ID>;
-    fn entries(&self, map: &ID) -> crate::Result<Entries<'_>>;
-    fn set_entry(&mut self, map: &ID, entry_key: &str, value: &ID) -> crate::Result<()>;
+    fn entry(&self, map: ID, entry_key: &str) -> crate::Result<ID>;
+    fn entries(&self, map: ID) -> crate::Result<Entries<'_>>;
+    fn set_entry(&mut self, map: ID, entry_key: &str, value: &ID) -> crate::Result<()>;
 
     fn insert_pending_update(
         &mut self,
@@ -81,6 +81,10 @@ impl<'tx> BlockStore<'tx> for Database<'tx> {
 
     /// Inserts a block into the store, updating the state vector as necessary.
     fn insert_block(&mut self, insert: &InsertBlockData) -> crate::Result<()> {
+        println!(
+            "inserting block: {:?} => {:?}",
+            insert.block, insert.content
+        );
         // insert block metadata
         self.set(
             &BlockKey::new(*insert.id()).as_bytes(),
@@ -100,7 +104,7 @@ impl<'tx> BlockStore<'tx> for Database<'tx> {
         if let Some(key) = insert.entry.as_deref() {
             let key = unsafe { str::from_utf8_unchecked(key) };
             if let Some(parent) = insert.parent() {
-                self.set_entry(&parent.id(), key, insert.id())?;
+                self.set_entry(parent.id(), key, insert.id())?;
             } else {
                 return Err(crate::Error::NotFound);
             }
@@ -110,7 +114,11 @@ impl<'tx> BlockStore<'tx> for Database<'tx> {
     }
 
     fn update_block(&mut self, block: Block<'_>) -> crate::Result<()> {
-        self.set(&BlockKey::new(*block.id()).as_bytes(), &block.as_bytes())?;
+        println!("updating block: {:?}", block);
+        let key = BlockKey::new(*block.id());
+        let mut cursor = self.new_cursor()?;
+        cursor.to_key(&key.as_bytes())?;
+        cursor.replace(&block.as_bytes())?;
         Ok(())
     }
 
@@ -149,7 +157,13 @@ impl<'tx> BlockStore<'tx> for Database<'tx> {
                 match cursor.split_at(offset) {
                     Ok(SplitResult::Split(left, right)) => {
                         self.set(&BlockKey::new(*right.id()).as_bytes(), &right.as_bytes())?;
-                        todo!("split content for blocks not yet implemented");
+                        match left.content_type() {
+                            ContentType::Json | ContentType::String | ContentType::Atom => {
+                                split_content(cursor.inner, &left, &right)?
+                            }
+                            _ => { /* no content to split */ }
+                        };
+
                         Ok(SplitResult::Split(left, right))
                     }
                     other => other,
@@ -215,9 +229,8 @@ impl<'tx> BlockStore<'tx> for Database<'tx> {
         Ok(self.set(&key.as_bytes(), &content.body())?)
     }
 
-    fn entry(&self, map: &ID, entry_key: &str) -> crate::Result<ID> {
-        let hash: U64 = twox_hash::xxhash3_64::Hasher::oneshot(entry_key.as_bytes()).into();
-        let key = map_bucket_key(map, hash);
+    fn entry(&self, map: ID, entry_key: &str) -> crate::Result<ID> {
+        let key = MapBucketKey::from_key(map, entry_key);
         let mut cursor = self.new_cursor()?;
         match cursor.to_key(&key.as_bytes()) {
             Ok(()) => {
@@ -242,15 +255,14 @@ impl<'tx> BlockStore<'tx> for Database<'tx> {
         }
     }
 
-    fn entries(&self, map: &ID) -> crate::Result<Entries<'_>> {
+    fn entries(&self, map: ID) -> crate::Result<Entries<'_>> {
         let cursor = self.new_cursor()?;
         Ok(Entries::new(cursor, map))
     }
 
-    fn set_entry(&mut self, map: &ID, entry_key: &str, value: &ID) -> crate::Result<()> {
+    fn set_entry(&mut self, map: ID, entry_key: &str, value: &ID) -> crate::Result<()> {
         let entry_key = entry_key.as_bytes();
-        let hash: U64 = twox_hash::xxhash3_64::Hasher::oneshot(entry_key).into();
-        let key = map_bucket_key(map, hash);
+        let key = MapBucketKey::from_key(map, entry_key);
         let value = {
             let mut buf = SmallVec::<[u8; 16]>::with_capacity(ID::SIZE + entry_key.len());
             buf.extend_from_slice(value.as_bytes());
@@ -273,6 +285,46 @@ impl<'tx> BlockStore<'tx> for Database<'tx> {
     ) -> crate::Result<()> {
         todo!()
     }
+}
+
+fn split_content(mut cursor: Cursor<'_>, left: &BlockMut, right: &BlockMut) -> crate::Result<()> {
+    let left_id = BlockContentKey::new(*left.id());
+    cursor.to_key(&left_id.as_bytes())?;
+    let left_content = cursor.get_value()?;
+    let content_type = left.content_type();
+    let offset = left.clock_len().get() as usize;
+    match content_type {
+        ContentType::String => {
+            let content = unsafe { std::str::from_utf8_unchecked(left_content) };
+            // We need to map UTF-16 offset (which is used by Yjs) into UTF-8 (Rust's representation).
+            let mut utf16 = 0;
+            let mut utf8 = 0;
+            for c in content.chars() {
+                if utf16 == offset {
+                    break;
+                }
+                utf16 += c.len_utf16();
+                utf8 += c.len_utf8();
+            }
+            let (left_content, right_content) = content.split_at(utf8);
+            cursor.del()?;
+            cursor.set(&left_id.as_bytes(), &left_content.as_bytes(), 0)?;
+            let right_id = BlockContentKey::new(*right.id());
+            cursor.set(&right_id.as_bytes(), &right_content.as_bytes(), 0)?;
+        }
+        ContentType::Json | ContentType::Atom => {
+            let i = ContentIter::new(left_content);
+            let r = i.slice(offset).unwrap().len();
+            let (left_content, right_content) = left_content.split_at(r);
+            cursor.del()?;
+            cursor.set(&left_id.as_bytes(), &left_content.as_bytes(), 0)?;
+            let right_id = BlockContentKey::new(*right.id());
+            cursor.set(&right_id.as_bytes(), &right_content.as_bytes(), 0)?;
+        }
+        _ => unreachable!("unexpected content type"),
+    }
+
+    Ok(())
 }
 
 pub struct BlockCursor<'a> {
@@ -318,7 +370,6 @@ impl<'a> BlockCursor<'a> {
         if self.prev()? {
             let key: &[u8] = self.inner.get_key()?;
             if key[0] == KEY_PREFIX_BLOCK {
-                // previous entry is a block, check if it contains the ID
                 let current_id =
                     ID::ref_from_bytes(&key[1..]).map_err(|_| Error::InvalidMapping("ID"))?;
                 if current_id.client == id.client {
@@ -377,15 +428,7 @@ impl<'a> BlockCursor<'a> {
     }
 
     pub fn block(&mut self) -> crate::Result<Option<Block<'a>>> {
-        let key: &[u8] = self.inner.get_key()?;
-        let value: &[u8] = self.inner.get_value()?;
-        if key[0] != KEY_PREFIX_BLOCK {
-            return Ok(None);
-        }
-        let id = ID::ref_from_bytes(&key[1..]).map_err(|_| Error::InvalidMapping("ID"))?;
-
-        let block = Block::new(*id, value)?;
-        Ok(Some(block))
+        self.inner.get_block().optional()
     }
 }
 
@@ -396,7 +439,7 @@ pub struct Entries<'a> {
 }
 
 impl<'a> Entries<'a> {
-    pub fn new(cursor: lmdb_rs_m::Cursor<'a>, node_id: &NodeID) -> Self {
+    pub fn new(cursor: lmdb_rs_m::Cursor<'a>, node_id: NodeID) -> Self {
         let mut prefix = [KEY_PREFIX_MAP, 0, 0, 0, 0, 0, 0, 0, 0];
         prefix[1..].copy_from_slice(node_id.as_bytes());
         Entries {
@@ -520,11 +563,47 @@ impl StateVectorKey {
     }
 }
 
-fn map_bucket_key(map: &ID, hash: U64) -> SmallVec<[u8; 16]> {
-    let mut buf = smallvec![KEY_PREFIX_MAP];
-    buf.extend_from_slice(map.as_bytes());
-    buf.extend_from_slice(hash.as_bytes());
-    buf
+#[repr(C, packed)]
+#[derive(
+    FromBytes, IntoBytes, Immutable, KnownLayout, PartialOrd, Ord, Clone, Copy, Debug, PartialEq, Eq,
+)]
+pub struct MapBucketKey {
+    tag: u8,
+    map: ID,
+    hash: U32,
+}
+
+impl MapBucketKey {
+    pub fn new(map: ID, key_hash: U32) -> Self {
+        Self {
+            tag: KEY_PREFIX_MAP,
+            map,
+            hash: key_hash,
+        }
+    }
+
+    pub fn from_key<P: AsRef<[u8]>>(map: ID, key: P) -> Self {
+        let hash: U32 = twox_hash::xxhash32::Hasher::oneshot(0, key.as_ref()).into();
+        Self::new(map, hash)
+    }
+}
+
+pub trait CursorExt<'a> {
+    fn get_block(&mut self) -> crate::Result<Block<'a>>;
+}
+
+impl<'a> CursorExt<'a> for lmdb_rs_m::Cursor<'a> {
+    fn get_block(&mut self) -> crate::Result<Block<'a>> {
+        let key: &[u8] = self.get_key()?;
+        let value: &[u8] = self.get_value()?;
+        if key[0] != KEY_PREFIX_BLOCK {
+            return Err(crate::Error::NotFound);
+        }
+        let id = ID::ref_from_bytes(&key[1..]).map_err(|_| Error::InvalidMapping("ID"))?;
+
+        let block = Block::new(*id, value)?;
+        Ok(block)
+    }
 }
 
 #[cfg(test)]
@@ -549,9 +628,9 @@ mod test {
 
         let node_id = Node::nested(ID::new(1.into(), 1.into()));
         let id = ID::new(1.into(), 2.into());
-        let block = InsertBlockData::new(id, 1.into(), None, None, None, None, node_id, None);
+        let insert = InsertBlockData::new(id, 1.into(), None, None, None, None, node_id, None);
 
-        db.insert_block(&block).unwrap();
+        db.insert_block(&insert).unwrap();
 
         tx.commit().unwrap();
 
@@ -559,7 +638,7 @@ mod test {
         let mut db = tx.bind(&h);
         let actual = db.fetch_block(id, true).unwrap();
 
-        assert_eq!(actual.as_bytes(), block.as_bytes());
+        assert_eq!(actual.as_bytes(), insert.block.as_bytes());
     }
 
     #[test]
@@ -597,7 +676,7 @@ mod test {
         let id = ID::new(1.into(), 5.into());
         let actual = db.fetch_block(id, false).unwrap();
 
-        assert_eq!(actual.as_bytes(), searched.as_bytes());
+        assert_eq!(actual.as_bytes(), searched.block.as_bytes());
     }
 
     #[test]
@@ -620,16 +699,16 @@ mod test {
         ]);
 
         for (k, v) in &expected {
-            db.set_entry(&map.id(), k, v).unwrap();
+            db.set_entry(map.id(), k, v).unwrap();
         }
 
         for (k, v) in &expected {
-            let actual = db.entry(&map.id(), k).unwrap();
+            let actual = db.entry(map.id(), k).unwrap();
             assert_eq!(&actual, v);
         }
 
         let mut actual = BTreeMap::new();
-        let entries = db.entries(&map.id()).unwrap();
+        let entries = db.entries(map.id()).unwrap();
         for result in entries {
             let (k, v) = result.unwrap();
             actual.insert(k.to_string(), *v);

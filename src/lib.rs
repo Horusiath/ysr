@@ -25,6 +25,7 @@ mod update;
 
 use crate::block::ID;
 pub use input::In;
+use lmdb_rs_m::MdbError;
 pub use multi_doc::MultiDoc;
 pub use output::Out;
 pub use read::DecoderV1;
@@ -100,6 +101,18 @@ impl<T> Optional for Result<T, Error> {
         match self {
             Ok(value) => Ok(Some(value)),
             Err(Error::NotFound) => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+}
+
+impl<T> Optional for Result<T, MdbError> {
+    type Return = Result<Option<T>, MdbError>;
+
+    fn optional(self) -> Self::Return {
+        match self {
+            Ok(value) => Ok(Some(value)),
+            Err(MdbError::NotFound) => Ok(None),
             Err(err) => Err(err),
         }
     }
@@ -224,23 +237,17 @@ mod test {
         let db = tx.bind(&handle);
         let mut cursor = db.new_cursor().unwrap();
 
-        cursor.set(&"key1", &0, 0).unwrap();
-        cursor.add_item(&1).unwrap();
-        cursor.add_item(&2).unwrap();
-        cursor.add_item(&3).unwrap();
+        cursor.set(&"key1", &"1", 0).unwrap();
+        cursor.add_item(&"2".as_bytes()).unwrap();
+        cursor.add_item(&"1".as_bytes()).unwrap();
 
-        cursor.set(&"key2", &10, 0).unwrap();
-        cursor.add_item(&11).unwrap();
-        cursor.add_item(&12).unwrap();
-        cursor.add_item(&13).unwrap();
-
-        println!("{}", cursor.item_count().unwrap());
-        drop(cursor);
-        drop(db);
-        tx.commit().unwrap();
-
-        let tx = env.new_transaction().unwrap();
-        let db = tx.bind(&handle);
         let mut cursor = db.new_cursor().unwrap();
+        cursor.to_key(&"key1").unwrap();
+        for i in 1..=3 {
+            let key: &str = std::str::from_utf8(cursor.get_key().unwrap()).unwrap();
+            let value: &str = std::str::from_utf8(cursor.get_value().unwrap()).unwrap();
+            println!("key: {}, value: {}", key, value);
+            cursor.to_next_item().unwrap();
+        }
     }
 }

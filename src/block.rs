@@ -372,6 +372,7 @@ impl BlockHeader {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct Block<'a> {
     id: ID,
     header: &'a BlockHeader,
@@ -484,6 +485,30 @@ impl BlockMut {
         }
     }
 
+    pub fn merge(&mut self, other: Block<'_>) -> bool {
+        if self.can_merge(&other) {
+            self.clock_len += other.clock_len;
+
+            self.set_right(other.right());
+
+            // other.right.left points to the last id, so we don't need to update it
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn can_merge(&self, other: &Block<'_>) -> bool {
+        self.id.client == other.id.client
+            && self.right == other.id
+            && self.id.clock + self.clock_len() == other.id.clock
+            && other.origin_left() == Some(&self.last_id())
+            && self.origin_right() == other.origin_right()
+            && self.is_deleted() == other.is_deleted()
+            && self.content_type == other.content_type
+            && self.content_type.is_mergeable()
+    }
+
     pub fn as_block(&self) -> Block<'_> {
         Block {
             id: self.id,
@@ -572,7 +597,7 @@ impl InsertBlockData {
     }
 
     pub fn content(&self) -> crate::Result<BlockContent<'_>> {
-        BlockContent::new(self.content_type(), &self.content)
+        BlockContent::new(self.block.content_type(), &self.content)
     }
 
     pub(crate) fn new_node(node: Node, kind: NodeType) -> Self {
@@ -636,6 +661,16 @@ impl InsertBlockData {
         self.content.extend(bytes);
     }
 
+    pub fn merge(&mut self, other: Self) -> bool {
+        if self.block.merge(other.block.as_block()) {
+            // contents are mergeable through simple byte concatenation
+            self.content.extend_from_slice(&other.content);
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn as_block(&self) -> Block<'_> {
         Block {
             id: self.block.id,
@@ -692,32 +727,6 @@ impl InsertBlockData {
         })
     }
 
-    pub fn merge(&mut self, other: Self) -> bool {
-        if self.can_merge(&other) {
-            self.clock_len += other.clock_len;
-            // contents are mergeable through simple byte concatenation
-            self.content.extend_from_slice(&other.content);
-
-            self.set_right(other.right());
-
-            // other.right.left points to the last id, so we don't need to update it
-            true
-        } else {
-            false
-        }
-    }
-
-    pub fn can_merge(&self, other: &Self) -> bool {
-        self.block.id.client == other.block.id.client
-            && self.right == other.block.id
-            && self.block.id.clock + self.clock_len() == other.block.id.clock
-            && other.origin_left() == Some(&self.last_id())
-            && self.origin_right() == other.origin_right()
-            && self.is_deleted() == other.is_deleted()
-            && self.content_type == other.content_type
-            && self.content_type.is_mergeable()
-    }
-
     pub(crate) fn integrate(
         &mut self,
         db: &mut Database,
@@ -734,8 +743,8 @@ impl InsertBlockData {
                     SplitResult::Unchanged(left) => left.last_id(),
                     SplitResult::Split(left, _right) => left.last_id(), //TODO: *self = right; ?
                 };
-            self.set_left(Some(&left));
-            self.set_origin_left(left);
+            self.block.set_left(Some(&left));
+            self.block.set_origin_left(left);
         }
 
         if context.detect_conflict(self) {
@@ -751,7 +760,7 @@ impl InsertBlockData {
                 .or_else(|| context.right.as_ref().and_then(|block| block.key_hash()));
 
             if let Some(&key) = entry_key {
-                self.set_key_hash(Some(key))
+                self.block.set_key_hash(Some(key))
             }
         }
 
@@ -763,20 +772,20 @@ impl InsertBlockData {
                 .map(|block| block.parent)
                 .or_else(|| context.right.as_ref().map(|block| block.parent));
             if let Some(parent) = parent {
-                self.set_parent(parent);
+                self.block.set_parent(parent);
             }
         }
 
-        let parent_id = *self.header.parent();
+        let parent_id = *self.block.header.parent();
 
         // reconnect left/right + update parent map/start if necessary
         if let Some(left) = &mut context.left {
-            self.set_right(left.right());
+            self.block.set_right(left.right());
             left.set_right(Some(self.id()));
         } else {
             let right = if let Some(key) = self.entry_key() {
                 // add current block to the beginning of YMap entries
-                let mut right = db.entry(&parent_id, key)?;
+                let mut right = db.entry(parent_id, key)?;
                 let mut cursor = BlockCursor::new(db.new_cursor()?);
                 if let Some(()) = cursor.seek(right).optional()? {
                     // move until the left-most block
@@ -799,10 +808,10 @@ impl InsertBlockData {
                     return Err(crate::Error::BlockNotFound(parent_id));
                 }
             };
-            self.set_right(right.as_ref());
+            self.block.set_right(right.as_ref());
         }
 
-        if let Some(right) = self.right() {
+        if let Some(right) = self.block.right() {
             if context
                 .right
                 .as_ref()
@@ -816,7 +825,7 @@ impl InsertBlockData {
             right.set_left(Some(self.id()));
         } else if let Some(entry_key) = self.entry_key() {
             // set as current parent value if right === null and this is parentSub
-            db.set_entry(&parent_id, entry_key, self.id())?;
+            db.set_entry(parent_id, entry_key, self.id())?;
 
             // this is the current attribute value of parent. delete right
             if let Some(left) = context.left.as_mut() {
@@ -829,7 +838,7 @@ impl InsertBlockData {
             }
         }
 
-        if self.entry_key().is_none() && !self.is_deleted() {
+        if self.entry_key().is_none() && !self.block.is_deleted() {
             //TODO: adjust parent length
             //TODO: linked type joining
         }
@@ -841,7 +850,7 @@ impl InsertBlockData {
                 tx_state
                     .delete_set
                     .insert(self.block.id, self.block.clock_len());
-                self.set_deleted();
+                self.block.set_deleted();
             }
             BlockContent::Doc(doc_id) => {
                 /*TODO:
@@ -865,14 +874,14 @@ impl InsertBlockData {
         let parent_deleted = if let Some(parent_block) = context.parent.as_mut() {
             let parent = parent_block.as_block();
             let is_deleted = parent.id.is_nested() && parent.is_deleted();
-            tx_state.add_changed_type(parent.id, is_deleted, self.key_hash());
+            tx_state.add_changed_type(parent.id, is_deleted, self.block.key_hash());
             db.update_block(parent)?;
             is_deleted
         } else {
             true // parent GCed?
         };
 
-        if parent_deleted || (self.key_hash().is_some() && self.right().is_some()) {
+        if parent_deleted || (self.block.key_hash().is_some() && self.block.right().is_some()) {
             // if either parent is deleted or this block is not the last block in
             // a map-like structure, delete it
             tx_state.delete(db, &mut self.block, parent_deleted)?;
@@ -889,31 +898,15 @@ impl InsertBlockData {
     }
 
     pub(crate) fn init_content(&mut self, content: BlockContent) {
-        self.set_content_type(content.content_type());
+        self.block.set_content_type(content.content_type());
         self.content = BytesMut::from(content.body());
-    }
-}
-
-impl Deref for InsertBlockData {
-    type Target = BlockMut;
-
-    #[inline]
-    fn deref(&self) -> &Self::Target {
-        &self.block
-    }
-}
-
-impl DerefMut for InsertBlockData {
-    #[inline]
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.block
     }
 }
 
 impl Display for InsertBlockData {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let content = self.content().map_err(|_| std::fmt::Error)?;
-        write!(f, "{}, {} {}", self.id, self.header, content)
+        write!(f, "{}, {} {}", self.block.id, self.block.header, content)
     }
 }
 
@@ -994,6 +987,9 @@ impl Display for BlockHeader {
         if self.flags.contains(BlockFlags::ORIGIN_RIGHT) {
             write!(f, ", origin-r: {}", self.origin_right)?;
         }
+        if self.flags.contains(BlockFlags::HAS_START) {
+            write!(f, ", start: {}", self.start)?;
+        }
         write!(f, " - {}", self.content_type)?;
 
         Ok(())
@@ -1030,19 +1026,19 @@ mod test {
         let right = ID::new(CLIENT, 4.into());
         let o_right = ID::new(CLIENT, 4.into());
 
-        let mut block = block(1, 2, 3, 4, 13, 4, Some("key"));
-        block.set_content_type(ContentType::Deleted);
+        let mut insert = block(1, 2, 3, 4, 13, 4, Some("key"));
+        insert.block.set_content_type(ContentType::Deleted);
 
-        assert_eq!(block.left(), Some(&left));
-        assert_eq!(block.right(), Some(&right));
-        assert_eq!(block.origin_left(), Some(&o_left));
-        assert_eq!(block.origin_right(), Some(&o_right));
-        assert_eq!(block.parent, Some(PARENT.clone()));
+        assert_eq!(insert.block.left(), Some(&left));
+        assert_eq!(insert.block.right(), Some(&right));
+        assert_eq!(insert.block.origin_left(), Some(&o_left));
+        assert_eq!(insert.block.origin_right(), Some(&o_right));
+        assert_eq!(insert.parent, Some(PARENT.clone()));
 
-        assert_eq!(block.clock_len(), Clock::new(2));
-        let content = block.content().unwrap();
+        assert_eq!(insert.clock_len(), Clock::new(2));
+        let content = insert.content().unwrap();
         assert_eq!(content.content_type(), ContentType::Deleted);
-        assert_eq!(block.entry_key(), Some("key"));
+        assert_eq!(insert.entry_key(), Some("key"));
     }
 
     #[test]

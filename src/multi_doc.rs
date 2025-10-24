@@ -78,7 +78,9 @@ mod test {
         let mut tx = mdoc.transact_mut(&doc_id).unwrap();
         let mut decoder = DecoderV1::from_slice(update);
         tx.apply_update(&mut decoder).unwrap();
+        tx.commit(None).unwrap();
 
+        let mut tx = mdoc.transact_mut(&doc_id).unwrap();
         let txt: TextRef<_> = txt.mount_mut(&mut tx).unwrap();
         let actual = txt.to_string();
         assert_eq!(actual, "210");
