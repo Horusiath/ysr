@@ -1,8 +1,5 @@
 use crate::block::{
-    Block, BlockFlags, BlockHeader, BlockMut, InsertBlockData, CONTENT_TYPE_ATOM,
-    CONTENT_TYPE_BINARY, CONTENT_TYPE_DELETED, CONTENT_TYPE_DOC, CONTENT_TYPE_EMBED,
-    CONTENT_TYPE_FORMAT, CONTENT_TYPE_GC, CONTENT_TYPE_JSON, CONTENT_TYPE_NODE, CONTENT_TYPE_SKIP,
-    CONTENT_TYPE_STRING, ID,
+    BlockHeader, BlockMut, InsertBlockData, CONTENT_TYPE_GC, CONTENT_TYPE_SKIP, ID,
 };
 use crate::content::ContentType;
 use crate::id_set::IDSet;
@@ -285,6 +282,7 @@ const HAS_RIGHT_ID: u8 = 0b0100_0000;
 const HAS_PARENT_SUB: u8 = 0b0010_0000;
 
 #[repr(u8)]
+#[derive(Debug)]
 pub enum Carrier {
     GC(BlockRange) = 0,
     Skip(BlockRange) = 10,
@@ -358,6 +356,7 @@ impl Carrier {
     }
 }
 
+#[derive(Debug)]
 pub struct BlockRange {
     head: ID,
     len: Clock,

@@ -40,10 +40,10 @@ pub use types::{Mounted, Unmounted};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
-pub type U16 = zerocopy::U16<zerocopy::byteorder::LE>;
-pub type U32 = zerocopy::U32<zerocopy::byteorder::LE>;
-pub type U64 = zerocopy::U64<zerocopy::byteorder::LE>;
-pub type U128 = zerocopy::U128<zerocopy::byteorder::LE>;
+pub type U16 = zerocopy::U16<zerocopy::byteorder::BE>;
+pub type U32 = zerocopy::U32<zerocopy::byteorder::BE>;
+pub type U64 = zerocopy::U64<zerocopy::byteorder::BE>;
+pub type U128 = zerocopy::U128<zerocopy::byteorder::BE>;
 pub type Clock = U32;
 
 pub type DynError = Box<dyn std::error::Error + Send + Sync>;

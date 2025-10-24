@@ -1,6 +1,5 @@
-use crate::block::{Block, BlockFlags, BlockMut, InsertBlockData};
-use crate::content::BlockContentMut;
-use crate::node::{Node, NodeType};
+use crate::block::{BlockMut, InsertBlockData};
+use crate::node::NodeType;
 use crate::store::lmdb::store::SplitResult;
 use crate::store::lmdb::BlockStore;
 use crate::{Clock, Optional};
@@ -145,11 +144,10 @@ impl IntegrationContext {
                 } else {
                     break;
                 }
-                o = item.right().cloned();
             }
-
-            target.block.set_left(left.as_ref());
+            o = item.right().cloned();
         }
+        target.block.set_left(left.as_ref());
 
         Ok(())
     }

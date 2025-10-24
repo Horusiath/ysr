@@ -1,14 +1,11 @@
 use crate::block::{Block, BlockMut, InsertBlockData, ID};
-use crate::block_reader::{BlockRange, Carrier};
+use crate::block_reader::Carrier;
 use crate::content::{BlockContent, ContentIter, ContentType};
 use crate::id_set::IDSet;
 use crate::node::{Node, NodeID, NodeType};
-use crate::{ClientID, Clock, Error, Optional, StateVector, U32, U64};
-use genawaiter2::yield_;
-use lmdb_rs_m::core::MdbResult;
+use crate::{ClientID, Clock, Error, Optional, StateVector, U32};
 use lmdb_rs_m::{Cursor, Database, MdbError};
-use smallvec::{smallvec, ExtendFromSlice, SmallVec};
-use std::borrow::Cow;
+use smallvec::{ExtendFromSlice, SmallVec};
 use std::collections::{BTreeMap, VecDeque};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
@@ -99,7 +96,6 @@ impl<'tx> BlockStore<'tx> for Database<'tx> {
                 &insert.content.as_bytes(),
             )?;
         }
-
         // insert block entry key if any
         if let Some(key) = insert.entry.as_deref() {
             let key = unsafe { str::from_utf8_unchecked(key) };

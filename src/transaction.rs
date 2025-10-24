@@ -302,6 +302,7 @@ impl<'db> Transaction<'db> {
 
             while let Some(carrier) = stack_head {
                 if !carrier.is_skip() {
+                    println!("integrate {:?} - sv: {:?}", carrier, state.current_state);
                     let id = *carrier.id();
                     if state.current_state.contains(&id) {
                         // offset informs if current block partially overlaps with already integrated blocks

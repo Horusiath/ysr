@@ -7,6 +7,7 @@ fn main() {
     let dir = tempfile::tempdir().unwrap();
     let env = EnvBuilder::new()
         .max_dbs(1)
+        .map_size(10 * 1024 * 1024)
         .open(dir.path(), 0o777)
         .unwrap();
     let mdoc = MultiDoc::new(env, 1.into());
