@@ -1,6 +1,6 @@
 use lmdb_rs_m::EnvBuilder;
 use std::time::Instant;
-use ysr::{DecoderV1, MultiDoc};
+use ysr::{DecoderV1, MultiDoc, TextRef, Unmounted};
 
 fn main() {
     let data = std::fs::read("./examples/data/b4-update.bin").unwrap();
@@ -17,4 +17,10 @@ fn main() {
     tx.commit(None).unwrap();
     let end = start.elapsed();
     println!("applied {}B update in {:?}", data.len(), end);
+    let mut tx = mdoc.transact_mut("test").unwrap();
+    let txt: TextRef<_> = Unmounted::root("text").mount_mut(&mut tx).unwrap();
+    let str = txt.to_string();
+
+    let expected = std::fs::read_to_string("./examples/data/b4-string.txt").unwrap();
+    assert_eq!(str, expected);
 }

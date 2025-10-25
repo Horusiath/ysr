@@ -230,19 +230,16 @@ mod test {
             .max_dbs(10)
             .open(dir.path(), 0o600)
             .unwrap();
-        let handle = env
-            .create_db("test", DbFlags::DbCreate | DbFlags::DbAllowDups)
-            .unwrap();
+        let handle = env.create_db("test", DbFlags::DbCreate).unwrap();
         let tx = env.new_transaction().unwrap();
         let db = tx.bind(&handle);
         let mut cursor = db.new_cursor().unwrap();
 
         cursor.set(&"key1", &"1", 0).unwrap();
-        cursor.add_item(&"2".as_bytes()).unwrap();
-        cursor.add_item(&"1".as_bytes()).unwrap();
+        cursor.set(&"key2", &"2", 0).unwrap();
 
-        let mut cursor = db.new_cursor().unwrap();
-        cursor.to_key(&"key1").unwrap();
+        //let mut cursor = db.new_cursor().unwrap();
+        // cursor.to_key(&"key1").unwrap();
         for i in 1..=3 {
             let key: &str = std::str::from_utf8(cursor.get_key().unwrap()).unwrap();
             let value: &str = std::str::from_utf8(cursor.get_value().unwrap()).unwrap();

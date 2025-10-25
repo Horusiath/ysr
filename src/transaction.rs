@@ -60,59 +60,10 @@ impl TransactionState {
         db: &mut Database,
         block: &mut BlockMut,
         parent_deleted: bool,
-    ) -> crate::Result<()> {
-        if block.is_deleted() {
-            return Ok(());
-        }
-
-        println!("deleting block {}", block.id());
-        block.set_deleted();
-        db.update_block(block.as_block())?;
-        self.delete_set.insert(*block.id(), block.clock_len());
-        self.add_changed_type(*block.parent(), parent_deleted, block.key_hash());
-
-        match block.content_type() {
-            ContentType::Node => {
-                // iterate over list values of the node and delete them
-                let mut current = block.start().copied();
-                while let Some(id) = current {
-                    let mut block: BlockMut = db.fetch_block(id, true)?.into();
-                    if !block.is_deleted() {
-                        self.delete(db, &mut block, true)?;
-                    } else if block.id().clock < self.begin_state.get(&block.id().client) {
-                        // This will be gc'd later and we want to merge it if possible
-                        // We try to merge all deleted items after each transaction,
-                        // but we have no knowledge about that this needs to be merged
-                        // since it is not in transaction.ds. Hence we add it to transaction._mergeStructs
-                        self.merge_blocks.insert(*block.id());
-                    }
-                    current = block.right().copied();
-                }
-
-                //iterate over map entries of the node and delete them
-                let mut to_delete = Vec::new();
-                for result in db.entries(*block.parent())? {
-                    let (_, &entry_id) = result?;
-                    to_delete.push(entry_id);
-                }
-
-                for entry_id in to_delete {
-                    let mut entry_block: BlockMut = db.fetch_block(entry_id, true)?.into();
-                    if !entry_block.is_deleted() {
-                        self.delete(db, &mut entry_block, true)?;
-                    } else if entry_block.id().clock
-                        < self.begin_state.get(&entry_block.id().client)
-                    {
-                        // same as above
-                        self.merge_blocks.insert(*entry_block.id());
-                    }
-                }
-                self.changed.remove(block.id());
-            }
-            ContentType::Doc => { /*TODO: document delete events */ }
-            _ => { /* not used */ }
-        }
-        Ok(())
+    ) -> crate::Result<bool> {
+        let mut cursor = db.new_cursor()?;
+        cursor.to_key(&BlockKey::new(*block.id()).as_bytes())?;
+        cursor.delete_current(self, block, parent_deleted)
     }
 
     fn precommit<'db>(
@@ -302,7 +253,6 @@ impl<'db> Transaction<'db> {
 
             while let Some(carrier) = stack_head {
                 if !carrier.is_skip() {
-                    println!("integrate {:?} - sv: {:?}", carrier, state.current_state);
                     let id = *carrier.id();
                     if state.current_state.contains(&id) {
                         // offset informs if current block partially overlaps with already integrated blocks
@@ -368,26 +318,74 @@ impl<'db> Transaction<'db> {
 
     fn apply_delete(&mut self, delete_set: &IDSet) -> crate::Result<IDSet> {
         let mut unapplied = IDSet::default();
-        let (db, state) = self.split_mut();
-        for (client, ranges) in delete_set.iter() {
+        if delete_set.is_empty() {
+            return Ok(unapplied);
+        }
+        let (mut db, state) = self.split_mut();
+        // We can ignore the case of GC and Delete structs, because we are going to skip them
+        let mut cursor = db.new_cursor()?;
+        for (&client, ranges) in delete_set.iter() {
             let current_clock = state.current_state.get(&client);
 
             for range in ranges.iter() {
-                if range.start < current_clock {
+                let clock_start = range.start;
+                let clock_end = range.end;
+                if clock_start < current_clock {
                     // range exists within already integrated blocks
-                    if current_clock < range.end {
-                        // range only partially overlaps with already integrated blocks
-                        unapplied.insert(ID::new(*client, range.start), range.end - current_clock);
+                    if current_clock < clock_end {
+                        unapplied.insert(ID::new(client, clock_start), clock_end - current_clock);
                     }
 
                     // We can ignore the case of GC and Delete structs, because we are going to skip them
-                    let mut cursor = db.cursor()?;
+                    cursor.to_gte_key(&BlockKey::new(ID::new(client, clock_start)).as_bytes())?;
+                    if let Some(mut block) = cursor.get_block().optional()? {
+                        if block.id().client != client {
+                            continue; // we shoot over the current client range
+                        }
 
-                    todo!();
+                        if !block.is_deleted() && block.id().clock < clock_start {
+                            // split the first item if necessary
+                            let offset = clock_start - block.id().clock;
+                            let mut left: BlockMut = block.clone().into();
+                            if let Some(right) = left.split(offset) {
+                                cursor.replace(&left.header().as_bytes())?;
+                                cursor.set(
+                                    &BlockKey::new(*right.id()).as_bytes(),
+                                    &right.header().as_bytes(),
+                                    0,
+                                )?;
+                                block = cursor.get_block()?;
+                            }
+                        }
 
-                    todo!()
+                        while block.id().client == client && block.id().clock < clock_end {
+                            if !block.is_deleted() {
+                                if block.id().clock + block.clock_len() > clock_end {
+                                    let offset = clock_end - block.id().clock;
+                                    let mut left: BlockMut = block.clone().into();
+                                    if let Some(right) = left.split(offset) {
+                                        cursor.replace(&left.header().as_bytes())?;
+                                        cursor.set(
+                                            &BlockKey::new(*right.id()).as_bytes(),
+                                            &right.header().as_bytes(),
+                                            0,
+                                        )?;
+                                        cursor.to_prev_key()?;
+                                        block = cursor.get_block()?;
+                                    }
+                                }
+                                let mut block: BlockMut = block.into();
+                                cursor.delete_current(state, &mut block, false)?;
+                            }
+                            cursor.to_next_key()?;
+                            block = match cursor.get_block().optional()? {
+                                Some(b) => b,
+                                None => break,
+                            };
+                        }
+                    }
                 } else {
-                    unapplied.insert(ID::new(*client, range.start), range.end - range.start);
+                    unapplied.insert(ID::new(client, range.start), range.end - range.start);
                 }
             }
         }

@@ -54,7 +54,6 @@ where
         let block = borrowed
             .db()
             .get_or_insert_node(self.node.clone(), Cap::node_type())?;
-        println!("mounted node: {:?}", block);
         Ok(Mounted::new(block, tx))
     }
 

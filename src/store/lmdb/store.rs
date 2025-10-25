@@ -3,6 +3,7 @@ use crate::block_reader::Carrier;
 use crate::content::{BlockContent, ContentIter, ContentType};
 use crate::id_set::IDSet;
 use crate::node::{Node, NodeID, NodeType};
+use crate::transaction::TransactionState;
 use crate::{ClientID, Clock, Error, Optional, StateVector, U32};
 use lmdb_rs_m::{Cursor, Database, MdbError};
 use smallvec::{ExtendFromSlice, SmallVec};
@@ -23,7 +24,6 @@ pub trait BlockStore<'tx> {
     fn set_block_content(&mut self, id: ID, content: &BlockContent) -> crate::Result<()>;
 
     fn entry(&self, map: ID, entry_key: &str) -> crate::Result<ID>;
-    fn entries(&self, map: ID) -> crate::Result<Entries<'_>>;
     fn set_entry(&mut self, map: ID, entry_key: &str, value: &ID) -> crate::Result<()>;
 
     fn insert_pending_update(
@@ -78,10 +78,6 @@ impl<'tx> BlockStore<'tx> for Database<'tx> {
 
     /// Inserts a block into the store, updating the state vector as necessary.
     fn insert_block(&mut self, insert: &InsertBlockData) -> crate::Result<()> {
-        println!(
-            "inserting block: {:?} => {:?}",
-            insert.block, insert.content
-        );
         // insert block metadata
         self.set(
             &BlockKey::new(*insert.id()).as_bytes(),
@@ -110,7 +106,6 @@ impl<'tx> BlockStore<'tx> for Database<'tx> {
     }
 
     fn update_block(&mut self, block: Block<'_>) -> crate::Result<()> {
-        println!("updating block: {:?}", block);
         let key = BlockKey::new(*block.id());
         let mut cursor = self.new_cursor()?;
         cursor.to_key(&key.as_bytes())?;
@@ -249,11 +244,6 @@ impl<'tx> BlockStore<'tx> for Database<'tx> {
             Err(MdbError::NotFound) => Err(Error::NotFound),
             Err(e) => Err(Error::Lmdb(e)),
         }
-    }
-
-    fn entries(&self, map: ID) -> crate::Result<Entries<'_>> {
-        let cursor = self.new_cursor()?;
-        Ok(Entries::new(cursor, map))
     }
 
     fn set_entry(&mut self, map: ID, entry_key: &str, value: &ID) -> crate::Result<()> {
@@ -428,14 +418,14 @@ impl<'a> BlockCursor<'a> {
     }
 }
 
-pub struct Entries<'a> {
-    cursor: lmdb_rs_m::Cursor<'a>,
+pub struct Entries<'a, 'b> {
+    cursor: &'b mut lmdb_rs_m::Cursor<'a>,
     prefix: [u8; 9],
     init: bool,
 }
 
-impl<'a> Entries<'a> {
-    pub fn new(cursor: lmdb_rs_m::Cursor<'a>, node_id: NodeID) -> Self {
+impl<'a, 'b> Entries<'a, 'b> {
+    pub fn new(cursor: &'b mut lmdb_rs_m::Cursor<'a>, node_id: NodeID) -> Self {
         let mut prefix = [KEY_PREFIX_MAP, 0, 0, 0, 0, 0, 0, 0, 0];
         prefix[1..].copy_from_slice(node_id.as_bytes());
         Entries {
@@ -482,7 +472,7 @@ impl<'a> Entries<'a> {
     }
 }
 
-impl<'a> Iterator for Entries<'a> {
+impl<'a, 'b> Iterator for Entries<'a, 'b> {
     type Item = crate::Result<(&'a str, &'a ID)>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -586,6 +576,13 @@ impl MapBucketKey {
 
 pub trait CursorExt<'a> {
     fn get_block(&mut self) -> crate::Result<Block<'a>>;
+    fn entries(&mut self, node_id: NodeID) -> Entries<'a, '_>;
+    fn delete_current(
+        &mut self,
+        state: &mut TransactionState,
+        block: &mut BlockMut,
+        parent_deleted: bool,
+    ) -> crate::Result<bool>;
 }
 
 impl<'a> CursorExt<'a> for lmdb_rs_m::Cursor<'a> {
@@ -600,13 +597,81 @@ impl<'a> CursorExt<'a> for lmdb_rs_m::Cursor<'a> {
         let block = Block::new(*id, value)?;
         Ok(block)
     }
+
+    fn entries(&mut self, node_id: NodeID) -> Entries<'a, '_> {
+        Entries::new(self, node_id)
+    }
+
+    fn delete_current(
+        &mut self,
+        state: &mut TransactionState,
+        block: &mut BlockMut,
+        parent_deleted: bool,
+    ) -> crate::Result<bool> {
+        if block.is_deleted() {
+            return Ok(false);
+        }
+        // key to return cursor position to
+        let rollback_key: &[u8] = self.get_key()?;
+
+        block.set_deleted();
+        self.replace(&block.header().as_bytes())?;
+        state.delete_set.insert(*block.id(), block.clock_len());
+        state.add_changed_type(*block.parent(), parent_deleted, block.key_hash());
+
+        match block.content_type() {
+            ContentType::Node => {
+                // iterate over list values of the node and delete them
+                let mut current = block.start().copied();
+                while let Some(id) = current {
+                    self.to_key(&BlockKey::new(id).as_bytes())?;
+                    let mut block: BlockMut = self.get_block()?.into();
+                    if !self.delete_current(state, &mut block, true)?
+                        && block.id().clock < state.begin_state.get(&block.id().client)
+                    {
+                        // This will be gc'd later and we want to merge it if possible
+                        // We try to merge all deleted items after each transaction,
+                        // but we have no knowledge about that this needs to be merged
+                        // since it is not in transaction.ds. Hence we add it to transaction._mergeStructs
+                        state.merge_blocks.insert(*block.id());
+                    }
+                    current = block.right().copied();
+                }
+
+                //iterate over map entries of the node and delete them
+                let mut to_delete = Vec::new();
+                for result in self.entries(*block.parent()) {
+                    let (_, &entry_id) = result?;
+                    to_delete.push(entry_id);
+                }
+
+                for entry_id in to_delete {
+                    self.to_key(&BlockKey::new(entry_id).as_bytes())?;
+                    let mut block: BlockMut = self.get_block()?.into();
+                    if !self.delete_current(state, &mut block, true)?
+                        && entry_id.clock < state.begin_state.get(&entry_id.client)
+                    {
+                        // same as above
+                        state.merge_blocks.insert(entry_id);
+                    }
+                }
+                state.changed.remove(block.id());
+
+                // restore cursor position
+                self.to_key(&rollback_key)?;
+            }
+            ContentType::Doc => { /*TODO: document delete events */ }
+            _ => { /* not used */ }
+        }
+        Ok(true)
+    }
 }
 
 #[cfg(test)]
 mod test {
     use crate::block::{InsertBlockData, ID};
     use crate::node::Node;
-    use crate::store::lmdb::store::BlockStore;
+    use crate::store::lmdb::store::{BlockStore, CursorExt};
     use lmdb_rs_m::DbFlags;
     use std::collections::BTreeMap;
     use zerocopy::IntoBytes;
@@ -704,11 +769,13 @@ mod test {
         }
 
         let mut actual = BTreeMap::new();
-        let entries = db.entries(map.id()).unwrap();
+        let mut cursor = db.new_cursor().unwrap();
+        let entries = cursor.entries(map.id());
         for result in entries {
             let (k, v) = result.unwrap();
             actual.insert(k.to_string(), *v);
         }
+        drop(cursor);
 
         assert_eq!(actual, expected);
 

@@ -88,13 +88,11 @@ impl Chunk {
 impl<'tx, 'db> Display for TextRef<&'tx Transaction<'db>> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let mut next = self.block.start().cloned();
-        println!("{:?}::to_string start from {:?}", self.block, next);
         let db = self.tx.db();
         while let Some(id) = next {
             let Ok(block) = db.fetch_block(id, false) else {
                 return Err(std::fmt::Error);
             };
-            println!("to_string over {:?}", block);
             if block.is_countable() && !block.is_deleted() {
                 let content_type = block.header().content_type();
                 let BlockContent::Text(chunk) = db
