@@ -249,7 +249,12 @@ where
 {
     type Return = ();
 
-    fn prepare(
+    fn prepare(&self, insert: &mut InsertBlockData) -> crate::Result<()> {
+        insert.init_content(BlockContent::Node);
+        Ok(())
+    }
+
+    fn integrate(
         self,
         insert: &mut InsertBlockData,
         tx: &mut Transaction,
@@ -358,7 +363,7 @@ impl<'tref, 'db> TextCursor<&'tref mut Transaction<'db>> {
 
     pub fn insert<P: Prelim>(&mut self, prelim: P) -> crate::Result<P::Return> {
         let mut insert: InsertBlockData = todo!();
-        let result = prelim.prepare(&mut insert, &mut self.tx)?;
+        let result = prelim.integrate(&mut insert, &mut self.tx)?;
         let (mut db, state) = self.tx.split_mut();
         if self.offset != 0 {
             todo!("split block?");
@@ -390,12 +395,16 @@ impl<'a> StringPrelim<'a> {
 impl<'a> Prelim for StringPrelim<'a> {
     type Return = ();
 
-    fn prepare(
+    fn prepare(&self, insert: &mut InsertBlockData) -> crate::Result<()> {
+        insert.init_content(BlockContent::Text(self.data));
+        Ok(())
+    }
+
+    fn integrate(
         self,
         insert: &mut InsertBlockData,
         tx: &mut Transaction,
     ) -> crate::Result<Self::Return> {
-        insert.content = BytesMut::from(self.data.as_bytes());
         Ok(())
     }
 }

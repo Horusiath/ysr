@@ -2,9 +2,8 @@ use crate::block::InsertBlockData;
 use crate::lib0::Value;
 use crate::prelim::Prelim;
 use crate::{ListPrelim, MapPrelim, Out, Transaction};
-use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum In {
     Value(Value),
     List(ListPrelim),
@@ -35,11 +34,29 @@ where
 impl Prelim for In {
     type Return = Out;
 
-    fn prepare(
+    fn prepare(&self, insert: &mut InsertBlockData) -> crate::Result<()> {
+        match self {
+            In::Value(value) => value.prepare(insert),
+            In::List(list) => list.prepare(insert),
+            In::Map(map) => map.prepare(insert),
+        }
+    }
+
+    fn integrate(
         self,
         insert: &mut InsertBlockData,
         tx: &mut Transaction,
     ) -> crate::Result<Self::Return> {
-        todo!()
+        match self {
+            In::Value(value) => Ok(Out::Value(value)),
+            In::List(list) => {
+                list.integrate(insert, tx)?;
+                Ok(Out::Node(*insert.block.id()))
+            }
+            In::Map(map) => {
+                map.integrate(insert, tx)?;
+                Ok(Out::Node(*insert.block.id()))
+            }
+        }
     }
 }

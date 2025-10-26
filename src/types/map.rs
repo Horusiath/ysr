@@ -103,7 +103,7 @@ impl<'tx, 'db> MapRef<&'tx mut Transaction<'db>> {
     pub fn insert<K, V>(&mut self, key: K, value: V) -> crate::Result<()>
     where
         K: AsRef<str>,
-        V: serde::Serialize,
+        V: Prelim,
     {
         let node_id = *self.node_id();
         let db = self.tx.db();
@@ -125,8 +125,10 @@ impl<'tx, 'db> MapRef<&'tx mut Transaction<'db>> {
             Node::Nested(node_id),
             Some(key.as_ref()),
         );
+        value.prepare(&mut insert)?;
         let mut context = IntegrationContext::create(&mut insert, Clock::new(0), &mut db)?;
         insert.integrate(&mut db, state, &mut context)?;
+        value.integrate(&mut insert, &mut self.tx)?;
         Ok(())
     }
 
@@ -218,14 +220,17 @@ where
                 if cursor.to_next_key().optional()?.is_none() {
                     return Ok(None);
                 }
-                let key: &[u8] = cursor.get_key()?;
-                if !key.starts_with(self.prefix.as_ref()) {
-                    return Ok(None);
-                }
             }
         }
         match &mut self.state {
-            IterState::Init(c) => Ok(Some(c.deref_mut())),
+            IterState::Init(c) => {
+                let key: &[u8] = c.get_key()?;
+                if !key.starts_with(self.prefix.as_ref()) {
+                    Ok(None)
+                } else {
+                    Ok(Some(c.deref_mut()))
+                }
+            }
             _ => unreachable!(),
         }
     }
@@ -272,6 +277,7 @@ where
         };
 
         let rollback_key: &[u8] = cursor.get_key()?;
+        let key = unsafe { std::str::from_utf8_unchecked(&rollback_key[1 + 8 + 4..]) };
         let id = *ID::ref_from_bytes(cursor.get_value()?)
             .map_err(|_| crate::Error::InvalidMapping("ID"))?;
         cursor.to_key(&BlockKey::new(id))?;
@@ -281,7 +287,6 @@ where
             cursor.to_key(&rollback_key)?;
             self.move_next()
         } else {
-            let key = unsafe { std::str::from_utf8_unchecked(&rollback_key[1 + 8 + 4..]) };
             let content = match block.content_type() {
                 ContentType::Node => BlockContent::Node,
                 ContentType::Deleted => BlockContent::Deleted,
@@ -380,13 +385,18 @@ impl<'a> RawIter<'a> {
 }
 
 #[repr(transparent)]
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct MapPrelim(BTreeMap<String, In>);
 
 impl Prelim for MapPrelim {
     type Return = Unmounted<Map>;
 
-    fn prepare(
+    fn prepare(&self, insert: &mut InsertBlockData) -> crate::Result<()> {
+        insert.init_content(BlockContent::Node);
+        Ok(())
+    }
+
+    fn integrate(
         self,
         insert: &mut InsertBlockData,
         tx: &mut Transaction,
@@ -452,7 +462,7 @@ mod test {
 
         let mut m1 = map.mount_mut(&mut t1).unwrap();
 
-        m1.insert("number", 1).unwrap();
+        m1.insert("number", 1.1).unwrap();
         m1.insert("string", "hello Y").unwrap();
         m1.insert("object", {
             let mut v = HashMap::new();
@@ -467,7 +477,7 @@ mod test {
         m1.insert("boolean0", false).unwrap();
 
         let expected = lib0!({
-            "number": 1.0,
+            "number": 1.1,
             "string": "hello Y",
             "object": {
                 "key": {

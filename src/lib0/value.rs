@@ -1,6 +1,7 @@
 use crate::block::InsertBlockData;
+use crate::content::{BlockContent, ContentRef};
 use crate::prelim::Prelim;
-use crate::Transaction;
+use crate::{lib0, Transaction};
 use bytes::{Bytes, BytesMut};
 use serde::de::{Error, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -255,17 +256,5 @@ impl Display for Value {
                 write!(f, "{}", base64)
             }
         }
-    }
-}
-
-impl Prelim for Value {
-    type Return = ();
-
-    fn prepare(
-        self,
-        insert: &mut InsertBlockData,
-        tx: &mut Transaction,
-    ) -> crate::Result<Self::Return> {
-        todo!()
     }
 }

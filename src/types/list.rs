@@ -1,4 +1,5 @@
 use crate::block::InsertBlockData;
+use crate::content::BlockContent;
 use crate::lib0::Value;
 use crate::node::NodeType;
 use crate::prelim::Prelim;
@@ -46,14 +47,14 @@ impl<'tx, 'db> ListRef<&'tx Transaction<'db>> {
 impl<'tx, 'db> ListRef<&'tx mut Transaction<'db>> {
     pub fn insert<T>(&mut self, index: usize, value: T) -> crate::Result<()>
     where
-        T: Serialize,
+        T: Prelim,
     {
         todo!()
     }
 
     pub fn insert_range<T, I>(&mut self, index: usize, values: I) -> crate::Result<()>
     where
-        T: Serialize,
+        T: Prelim,
         I: IntoIterator<Item = T>,
     {
         todo!()
@@ -61,7 +62,7 @@ impl<'tx, 'db> ListRef<&'tx mut Transaction<'db>> {
 
     pub fn push_back<T>(&mut self, value: T) -> crate::Result<()>
     where
-        T: Serialize,
+        T: Prelim,
     {
         let len = self.len();
         self.insert(len, value)
@@ -69,7 +70,7 @@ impl<'tx, 'db> ListRef<&'tx mut Transaction<'db>> {
 
     pub fn push_front<T>(&mut self, value: T) -> crate::Result<()>
     where
-        T: Serialize,
+        T: Prelim,
     {
         self.insert(0, value)
     }
@@ -115,13 +116,18 @@ where
 }
 
 #[repr(transparent)]
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct ListPrelim(Vec<In>);
 
 impl Prelim for ListPrelim {
     type Return = Unmounted<List>;
 
-    fn prepare(
+    fn prepare(&self, insert: &mut InsertBlockData) -> crate::Result<()> {
+        insert.init_content(BlockContent::Node);
+        Ok(())
+    }
+
+    fn integrate(
         self,
         insert: &mut InsertBlockData,
         tx: &mut Transaction,

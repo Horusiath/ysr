@@ -216,35 +216,3 @@ impl<'de> Deserialize<'de> for ClientID {
         ClientID::try_from(value).map_err(serde::de::Error::custom)
     }
 }
-
-#[cfg(test)]
-mod test {
-    use lmdb_rs_m::core::MdbResult;
-    use lmdb_rs_m::{DbFlags, MdbError};
-    use tempfile::TempDir;
-
-    #[test]
-    fn lmdb_items() {
-        let dir = TempDir::new().unwrap();
-        let env = lmdb_rs_m::Environment::builder()
-            .max_dbs(10)
-            .open(dir.path(), 0o600)
-            .unwrap();
-        let handle = env.create_db("test", DbFlags::DbCreate).unwrap();
-        let tx = env.new_transaction().unwrap();
-        let db = tx.bind(&handle);
-        let mut cursor = db.new_cursor().unwrap();
-
-        cursor.set(&"key1", &"1", 0).unwrap();
-        cursor.set(&"key2", &"2", 0).unwrap();
-
-        //let mut cursor = db.new_cursor().unwrap();
-        // cursor.to_key(&"key1").unwrap();
-        for i in 1..=3 {
-            let key: &str = std::str::from_utf8(cursor.get_key().unwrap()).unwrap();
-            let value: &str = std::str::from_utf8(cursor.get_value().unwrap()).unwrap();
-            println!("key: {}, value: {}", key, value);
-            cursor.to_next_item().unwrap();
-        }
-    }
-}

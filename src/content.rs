@@ -265,7 +265,7 @@ impl<'a> Iterator for ContentIter<'a> {
         }
 
         let len =
-            u32::from_le_bytes([self.data[0], self.data[1], self.data[2], self.data[3]]) as usize;
+            u32::from_be_bytes([self.data[0], self.data[1], self.data[2], self.data[3]]) as usize;
         let slice = &self.data[4..4 + len];
         self.data = &self.data[4 + len..];
 
@@ -429,7 +429,7 @@ impl<'a> ContentFormat<'a> {
         if data.len() < 2 {
             return Err(crate::Error::EndOfBuffer);
         }
-        let key_len = u16::from_le_bytes([data[0], data[1]]) as usize;
+        let key_len = u16::from_be_bytes([data[0], data[1]]) as usize;
         if data.len() < 2 + key_len {
             return Err(crate::Error::EndOfBuffer);
         }
@@ -442,7 +442,7 @@ impl<'a> ContentFormat<'a> {
     }
 
     fn key_len(&self) -> usize {
-        u16::from_le_bytes([self.data[0], self.data[1]]) as usize
+        u16::from_be_bytes([self.data[0], self.data[1]]) as usize
     }
 
     pub fn key(&self) -> &'a str {
