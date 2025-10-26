@@ -87,18 +87,18 @@ impl IntegrationContext {
         let mut o = if let Some(left) = &self.left {
             left.right().cloned()
         } else if let Some(sub) = target.entry_key() {
-            let mut o = db.entry(*parent.id(), sub).optional()?;
+            let mut o = db.entry(*parent.id(), sub).optional()?.copied();
             while let Some(id) = o {
                 let item = db.fetch_block(id, true)?;
-                if let Some(left) = item.left() {
-                    o = Some(*left);
+                if let Some(&left) = item.left() {
+                    o = Some(left);
                     continue;
                 }
                 break;
             }
             o.clone()
         } else {
-            parent.start().cloned()
+            parent.start().copied()
         };
 
         let mut left = target.block.left().cloned();

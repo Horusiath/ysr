@@ -47,7 +47,7 @@ impl<'tx> BlockCursor<'tx> {
             }
         }
         let key = BlockKey::new(id);
-        match self.cursor.to_gte_key(&key.as_bytes()) {
+        match self.cursor.to_gte_key(&key) {
             Ok(()) => Ok(()),
             Err(MdbError::NotFound) => Err(crate::Error::BlockNotFound(id)),
             Err(e) => Err(crate::Error::from(e)),

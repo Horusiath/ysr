@@ -5,7 +5,7 @@ use crate::id_set::IDSet;
 use crate::node::{Node, NodeID};
 use crate::read::Decoder;
 use crate::state_vector::Snapshot;
-use crate::store::lmdb::store::{BlockKey, CursorExt, MapBucketKey};
+use crate::store::lmdb::store::{map_key, BlockKey, CursorExt, MapBucketKey};
 use crate::store::lmdb::BlockStore;
 use crate::write::WriteExt;
 use crate::{ClientID, Error, Optional, StateVector, U32};
@@ -62,7 +62,7 @@ impl TransactionState {
         parent_deleted: bool,
     ) -> crate::Result<bool> {
         let mut cursor = db.new_cursor()?;
-        cursor.to_key(&BlockKey::new(*block.id()).as_bytes())?;
+        cursor.to_key(&BlockKey::new(*block.id()))?;
         cursor.delete_current(self, block, parent_deleted)
     }
 
@@ -99,7 +99,7 @@ impl TransactionState {
             let before_clock = self.begin_state.get(client);
             if before_clock != clock {
                 let key = BlockKey::new(ID::new(*client, clock));
-                cursor.to_gte_key(&key.as_bytes())?;
+                cursor.to_gte_key(&key)?;
                 Self::merge_with_lefts(&mut cursor, &mut key_changes)?;
             }
         }
@@ -118,18 +118,18 @@ impl TransactionState {
     /// Expects that cursor is set within a block keyspace position.
     fn merge_with_lefts(
         cursor: &mut lmdb_rs_m::Cursor,
-        key_changes: &mut BTreeMap<MapBucketKey, (ID, ID)>,
+        key_changes: &mut BTreeMap<(NodeID, U32, ID), ID>,
     ) -> crate::Result<ID> {
         let mut right: BlockMut = cursor.get_block()?.into();
         cursor.to_prev_key()?;
         let mut left = cursor.get_block().optional()?.map(BlockMut::from);
         while let Some(curr) = &mut left {
             if curr.merge(right.as_block()) {
-                if let Some(parent_sub) = right.key_hash() {
+                if let Some(&parent_sub) = right.key_hash() {
                     let e = key_changes
-                        .entry(MapBucketKey::new(*right.parent(), *parent_sub))
-                        .or_insert((*right.id(), *curr.id()));
-                    e.1 = *curr.id();
+                        .entry((*right.parent(), parent_sub, *right.id()))
+                        .or_insert(*curr.id());
+                    *e = *curr.id();
                 }
                 cursor.del()?;
             } else {
@@ -337,7 +337,7 @@ impl<'db> Transaction<'db> {
                     }
 
                     // We can ignore the case of GC and Delete structs, because we are going to skip them
-                    cursor.to_gte_key(&BlockKey::new(ID::new(client, clock_start)).as_bytes())?;
+                    cursor.to_gte_key(&BlockKey::new(ID::new(client, clock_start)))?;
                     if let Some(mut block) = cursor.get_block().optional()? {
                         if block.id().client != client {
                             continue; // we shoot over the current client range
@@ -350,7 +350,7 @@ impl<'db> Transaction<'db> {
                             if let Some(right) = left.split(offset) {
                                 cursor.replace(&left.header().as_bytes())?;
                                 cursor.set(
-                                    &BlockKey::new(*right.id()).as_bytes(),
+                                    &BlockKey::new(*right.id()),
                                     &right.header().as_bytes(),
                                     0,
                                 )?;
@@ -366,7 +366,7 @@ impl<'db> Transaction<'db> {
                                     if let Some(right) = left.split(offset) {
                                         cursor.replace(&left.header().as_bytes())?;
                                         cursor.set(
-                                            &BlockKey::new(*right.id()).as_bytes(),
+                                            &BlockKey::new(*right.id()),
                                             &right.header().as_bytes(),
                                             0,
                                         )?;

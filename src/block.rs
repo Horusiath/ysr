@@ -785,7 +785,7 @@ impl InsertBlockData {
         } else {
             let right = if let Some(key) = self.entry_key() {
                 // add current block to the beginning of YMap entries
-                let mut right = db.entry(parent_id, key)?;
+                let mut right = *db.entry(parent_id, key)?;
                 let mut cursor = BlockCursor::new(db.new_cursor()?);
                 if let Some(()) = cursor.seek(right).optional()? {
                     // move until the left-most block

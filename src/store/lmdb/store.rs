@@ -5,8 +5,8 @@ use crate::id_set::IDSet;
 use crate::node::{Node, NodeID, NodeType};
 use crate::transaction::TransactionState;
 use crate::{ClientID, Clock, Error, Optional, StateVector, U32};
-use lmdb_rs_m::{Cursor, Database, MdbError};
-use smallvec::{ExtendFromSlice, SmallVec};
+use lmdb_rs_m::{Cursor, Database, MdbError, MdbValue, ToMdbValue};
+use smallvec::{smallvec, ExtendFromSlice, SmallVec};
 use std::collections::{BTreeMap, VecDeque};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
@@ -23,8 +23,8 @@ pub trait BlockStore<'tx> {
     fn block_content(&self, id: ID, kind: ContentType) -> crate::Result<BlockContent<'_>>;
     fn set_block_content(&mut self, id: ID, content: &BlockContent) -> crate::Result<()>;
 
-    fn entry(&self, map: ID, entry_key: &str) -> crate::Result<ID>;
-    fn set_entry(&mut self, map: ID, entry_key: &str, value: &ID) -> crate::Result<()>;
+    fn entry(&self, map: NodeID, entry_key: &str) -> crate::Result<&ID>;
+    fn set_entry(&mut self, map: NodeID, entry_key: &str, value: &ID) -> crate::Result<()>;
 
     fn insert_pending_update(
         &mut self,
@@ -79,16 +79,13 @@ impl<'tx> BlockStore<'tx> for Database<'tx> {
     /// Inserts a block into the store, updating the state vector as necessary.
     fn insert_block(&mut self, insert: &InsertBlockData) -> crate::Result<()> {
         // insert block metadata
-        self.set(
-            &BlockKey::new(*insert.id()).as_bytes(),
-            &insert.as_block().as_bytes(),
-        )?;
+        self.set(&BlockKey::new(*insert.id()), &insert.as_block().as_bytes())?;
         self.try_update_clock(insert.last_id())?;
 
         // insert block content if any
         if !insert.content.is_empty() {
             self.set(
-                &BlockContentKey::new(*insert.id()).as_bytes(),
+                &BlockContentKey::new(*insert.id()),
                 &insert.content.as_bytes(),
             )?;
         }
@@ -108,7 +105,7 @@ impl<'tx> BlockStore<'tx> for Database<'tx> {
     fn update_block(&mut self, block: Block<'_>) -> crate::Result<()> {
         let key = BlockKey::new(*block.id());
         let mut cursor = self.new_cursor()?;
-        cursor.to_key(&key.as_bytes())?;
+        cursor.to_key(&key)?;
         cursor.replace(&block.as_bytes())?;
         Ok(())
     }
@@ -118,7 +115,6 @@ impl<'tx> BlockStore<'tx> for Database<'tx> {
     /// is returned, otherwise the existing clock is returned.
     fn try_update_clock(&mut self, id: ID) -> crate::Result<Clock> {
         let key = StateVectorKey::new(id.client);
-        let key = key.as_bytes();
         match self.get(&key) {
             Ok(value) => {
                 let existing =
@@ -147,7 +143,7 @@ impl<'tx> BlockStore<'tx> for Database<'tx> {
                 let offset = id.clock - found_id.clock;
                 match cursor.split_at(offset) {
                     Ok(SplitResult::Split(left, right)) => {
-                        self.set(&BlockKey::new(*right.id()).as_bytes(), &right.as_bytes())?;
+                        self.set(&BlockKey::new(*right.id()), &right.as_bytes())?;
                         match left.content_type() {
                             ContentType::Json | ContentType::String | ContentType::Atom => {
                                 split_content(cursor.inner, &left, &right)?
@@ -166,7 +162,7 @@ impl<'tx> BlockStore<'tx> for Database<'tx> {
     /// Returns the state vector clock for a given client ID.
     fn clock(&self, client_id: ClientID) -> crate::Result<Option<Clock>> {
         let key = StateVectorKey::new(client_id);
-        match self.get(&key.as_bytes()) {
+        match self.get(&key) {
             Ok(value) => {
                 let clock =
                     Clock::ref_from_bytes(value).map_err(|_| Error::InvalidMapping("Clock"))?;
@@ -208,7 +204,7 @@ impl<'tx> BlockStore<'tx> for Database<'tx> {
     fn block_content(&self, id: ID, kind: ContentType) -> crate::Result<BlockContent<'_>> {
         let data: &[u8] = if !kind.is_empty() {
             let key = BlockContentKey::new(id);
-            self.get(&key.as_bytes())?
+            self.get(&key)?
         } else {
             &[]
         };
@@ -217,50 +213,25 @@ impl<'tx> BlockStore<'tx> for Database<'tx> {
 
     fn set_block_content(&mut self, id: ID, content: &BlockContent) -> crate::Result<()> {
         let key = BlockContentKey::new(id);
-        Ok(self.set(&key.as_bytes(), &content.body())?)
+        Ok(self.set(&key, &content.body())?)
     }
 
-    fn entry(&self, map: ID, entry_key: &str) -> crate::Result<ID> {
-        let key = MapBucketKey::from_key(map, entry_key);
-        let mut cursor = self.new_cursor()?;
-        match cursor.to_key(&key.as_bytes()) {
-            Ok(()) => {
-                let expected = entry_key.as_bytes();
-                loop {
-                    let bytes: &[u8] = cursor.get_value()?;
-                    let id = ID::ref_from_bytes(&bytes[..ID::SIZE])
-                        .map_err(|_| Error::InvalidMapping("ID"))?;
-                    let key = &bytes[ID::SIZE..];
-                    if key == expected {
-                        return Ok(*id);
-                    } else {
-                        if !cursor.to_next_key().is_ok() {
-                            break;
-                        }
-                    }
-                }
-                Err(Error::NotFound)
+    fn entry(&self, map: ID, entry_key: &str) -> crate::Result<&ID> {
+        let key = map_key(map, entry_key);
+        match self.get(&key.as_bytes()) {
+            Ok(value) => {
+                let id = ID::ref_from_bytes(value).map_err(|_| Error::InvalidMapping("ID"))?;
+                Ok(id)
             }
-            Err(MdbError::NotFound) => Err(Error::NotFound),
+            Err(lmdb_rs_m::MdbError::NotFound) => Err(Error::NotFound),
             Err(e) => Err(Error::Lmdb(e)),
         }
     }
 
-    fn set_entry(&mut self, map: ID, entry_key: &str, value: &ID) -> crate::Result<()> {
-        let entry_key = entry_key.as_bytes();
-        let key = MapBucketKey::from_key(map, entry_key);
-        let value = {
-            let mut buf = SmallVec::<[u8; 16]>::with_capacity(ID::SIZE + entry_key.len());
-            buf.extend_from_slice(value.as_bytes());
-            buf.extend_from_slice(entry_key.as_bytes());
-            buf
-        };
-        let mut cursor = self.new_cursor()?;
-        match cursor.to_key(&key.as_bytes()) {
-            Ok(()) => Ok(cursor.add_item(&value.as_bytes())?),
-            Err(MdbError::NotFound) => Ok(cursor.set(&key.as_bytes(), &value.as_bytes(), 0)?),
-            Err(e) => Err(Error::Lmdb(e)),
-        }
+    fn set_entry(&mut self, map: NodeID, entry_key: &str, value: &ID) -> crate::Result<()> {
+        let key = map_key(map, entry_key);
+        self.set(&key.as_bytes(), &value.as_bytes())?;
+        Ok(())
     }
 
     fn insert_pending_update(
@@ -324,7 +295,7 @@ impl<'a> BlockCursor<'a> {
     pub fn seek(&mut self, id: ID, direct: bool) -> crate::Result<Option<&ID>> {
         let key = BlockKey::new(id);
         // try to seek to the exact key first
-        match self.inner.to_gte_key(&key.as_bytes()) {
+        match self.inner.to_gte_key(&key) {
             Ok(()) => {
                 let key: &[u8] = self.inner.get_key()?;
                 if key[0] == KEY_PREFIX_BLOCK {
@@ -444,8 +415,10 @@ impl<'a, 'b> Entries<'a, 'b> {
             return Ok(None);
         }
         let value: &[u8] = cursor.get_value()?;
-        let id = ID::ref_from_bytes(&value[..ID::SIZE]).map_err(|_| Error::InvalidMapping("ID"))?;
-        let entry_key = unsafe { str::from_utf8_unchecked(&value[ID::SIZE..]) };
+        let id = ID::ref_from_bytes(&value).map_err(|_| Error::InvalidMapping("ID"))?;
+        // function `map_keys` puts key string after the keyspace tag, map id and hash of the key itself
+        const KEY_OFFSET: usize = 1 + size_of::<NodeID>() + size_of::<U32>();
+        let entry_key = unsafe { str::from_utf8_unchecked(&key[KEY_OFFSET..]) };
         Ok(Some((entry_key, id)))
     }
 
@@ -458,13 +431,9 @@ impl<'a, 'b> Entries<'a, 'b> {
             }
             self.init = true;
         } else {
-            match self.cursor.to_next_item() {
+            match self.cursor.to_next_key() {
                 Ok(_) => { /* ok */ }
-                Err(MdbError::NotFound) => match self.cursor.to_next_key() {
-                    Ok(_) => { /* ok */ }
-                    Err(MdbError::NotFound) => return Ok(None),
-                    Err(e) => return Err(Error::Lmdb(e)),
-                },
+                Err(MdbError::NotFound) => return Ok(None),
                 Err(e) => return Err(Error::Lmdb(e)),
             }
         }
@@ -517,6 +486,13 @@ impl BlockKey {
     }
 }
 
+impl ToMdbValue for BlockKey {
+    fn to_mdb_value(&self) -> MdbValue<'_> {
+        let ptr = std::ptr::from_ref(self) as *const _;
+        unsafe { MdbValue::new(ptr, size_of::<Self>()) }
+    }
+}
+
 #[repr(C, packed)]
 #[derive(FromBytes, IntoBytes, Immutable, KnownLayout, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BlockContentKey {
@@ -530,6 +506,13 @@ impl BlockContentKey {
             tag: KEY_PREFIX_CONTENT,
             id,
         }
+    }
+}
+
+impl ToMdbValue for BlockContentKey {
+    fn to_mdb_value(&self) -> MdbValue<'_> {
+        let ptr = std::ptr::from_ref(self) as *const _;
+        unsafe { MdbValue::new(ptr, size_of::<Self>()) }
     }
 }
 
@@ -549,29 +532,23 @@ impl StateVectorKey {
     }
 }
 
-#[repr(C, packed)]
-#[derive(
-    FromBytes, IntoBytes, Immutable, KnownLayout, PartialOrd, Ord, Clone, Copy, Debug, PartialEq, Eq,
-)]
-pub struct MapBucketKey {
-    tag: u8,
-    map: ID,
-    hash: U32,
+impl ToMdbValue for StateVectorKey {
+    fn to_mdb_value(&self) -> MdbValue<'_> {
+        let ptr = std::ptr::from_ref(self) as *const _;
+        unsafe { MdbValue::new(ptr, size_of::<Self>()) }
+    }
 }
 
-impl MapBucketKey {
-    pub fn new(map: ID, key_hash: U32) -> Self {
-        Self {
-            tag: KEY_PREFIX_MAP,
-            map,
-            hash: key_hash,
-        }
-    }
+pub type MapBucketKey = SmallVec<[u8; 24]>;
+pub fn map_key(map: NodeID, key: &str) -> MapBucketKey {
+    let hash: U32 = twox_hash::xxhash32::Hasher::oneshot(0, key.as_ref()).into();
+    let mut res = SmallVec::new();
+    res.push(KEY_PREFIX_MAP);
+    res.extend_from_slice(map.as_bytes());
+    res.extend_from_slice(hash.as_ref());
+    res.extend_from_slice(key.as_bytes());
 
-    pub fn from_key<P: AsRef<[u8]>>(map: ID, key: P) -> Self {
-        let hash: U32 = twox_hash::xxhash32::Hasher::oneshot(0, key.as_ref()).into();
-        Self::new(map, hash)
-    }
+    res
 }
 
 pub trait CursorExt<'a> {
@@ -624,7 +601,7 @@ impl<'a> CursorExt<'a> for lmdb_rs_m::Cursor<'a> {
                 // iterate over list values of the node and delete them
                 let mut current = block.start().copied();
                 while let Some(id) = current {
-                    self.to_key(&BlockKey::new(id).as_bytes())?;
+                    self.to_key(&BlockKey::new(id))?;
                     let mut block: BlockMut = self.get_block()?.into();
                     if !self.delete_current(state, &mut block, true)?
                         && block.id().clock < state.begin_state.get(&block.id().client)
@@ -646,7 +623,7 @@ impl<'a> CursorExt<'a> for lmdb_rs_m::Cursor<'a> {
                 }
 
                 for entry_id in to_delete {
-                    self.to_key(&BlockKey::new(entry_id).as_bytes())?;
+                    self.to_key(&BlockKey::new(entry_id))?;
                     let mut block: BlockMut = self.get_block()?.into();
                     if !self.delete_current(state, &mut block, true)?
                         && entry_id.clock < state.begin_state.get(&entry_id.client)
@@ -765,7 +742,7 @@ mod test {
 
         for (k, v) in &expected {
             let actual = db.entry(map.id(), k).unwrap();
-            assert_eq!(&actual, v);
+            assert_eq!(actual, v);
         }
 
         let mut actual = BTreeMap::new();
