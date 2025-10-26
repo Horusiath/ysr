@@ -10,8 +10,6 @@ use crate::store::lmdb::BlockStore;
 use crate::types::Capability;
 use crate::{lib0, Clock, Error, In, Mounted, Optional, Transaction, Unmounted};
 use lmdb_rs_m::{Database, MdbError};
-use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};

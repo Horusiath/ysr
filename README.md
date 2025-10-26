@@ -27,6 +27,29 @@ areas:
 
 **This work is still unstable and on-disk representation is sure to change!**
 
+## Progress
+
+- [x] lib0 v1 deserialization.
+- [ ] lib0 v2 deserialization.
+- [x] update application with conflict resolution
+    - [ ] support for move operations
+    - [ ] support for weak links
+- [x] block split/merge algorithms
+- [ ] update generation
+- [ ] collaborative Map
+    - [x] core API implemented
+    - [x] tests (code only)
+- [ ] collaborative List
+    - [ ] core API implemented
+    - [x] tests (code only)
+- [ ] collaborative Text
+    - [ ] core API implemented
+    - [x] tests (code only)
+- [ ] collaborative XmlElement/XmlFragment/XmlText
+    - [ ] core API implemented
+    - [ ] tests
+- [ ] Subdocuments
+
 ## Sponsors
 
 [![NLNET](https://nlnet.nl/image/logo_nlnet.svg)](https://nlnet.nl/)
