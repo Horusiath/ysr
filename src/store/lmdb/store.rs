@@ -5,9 +5,11 @@ use crate::id_set::IDSet;
 use crate::node::{Node, NodeID, NodeType};
 use crate::transaction::TransactionState;
 use crate::{ClientID, Clock, Error, Optional, StateVector, U32};
+use lmdb_rs_m::core::MdbResult;
 use lmdb_rs_m::{Cursor, Database, MdbError, MdbValue, ToMdbValue};
 use smallvec::{smallvec, ExtendFromSlice, SmallVec};
 use std::collections::{BTreeMap, VecDeque};
+use std::ops::{Deref, DerefMut};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 pub trait BlockStore<'tx> {
@@ -464,11 +466,11 @@ pub enum SplitResult {
     Split(BlockMut, BlockMut),
 }
 
-const KEY_PREFIX_META: u8 = 0x00;
-const KEY_PREFIX_STATE_VECTOR: u8 = 0x01;
-const KEY_PREFIX_BLOCK: u8 = 0x02;
-const KEY_PREFIX_MAP: u8 = 0x03;
-const KEY_PREFIX_CONTENT: u8 = 0x04;
+pub(crate) const KEY_PREFIX_META: u8 = 0x00;
+pub(crate) const KEY_PREFIX_STATE_VECTOR: u8 = 0x01;
+pub(crate) const KEY_PREFIX_BLOCK: u8 = 0x02;
+pub(crate) const KEY_PREFIX_MAP: u8 = 0x03;
+pub(crate) const KEY_PREFIX_CONTENT: u8 = 0x04;
 
 #[repr(C, packed)]
 #[derive(FromBytes, IntoBytes, Immutable, KnownLayout, Clone, Copy, Debug, PartialEq, Eq)]
@@ -641,6 +643,35 @@ impl<'a> CursorExt<'a> for lmdb_rs_m::Cursor<'a> {
             _ => { /* not used */ }
         }
         Ok(true)
+    }
+}
+
+/// A variant of MDB cursor that owns itself rather than being constrained to Database.
+pub struct OwnedCursor<'a> {
+    db: Box<Database<'a>>,
+    cursor: Cursor<'a>,
+}
+
+impl<'a> OwnedCursor<'a> {
+    pub fn new(db: Database<'a>) -> MdbResult<Self> {
+        let db = Box::new(db);
+        let cursor = db.new_cursor()?;
+        let cursor: Cursor<'a> = unsafe { std::mem::transmute(cursor) };
+        Ok(OwnedCursor { db, cursor })
+    }
+}
+
+impl<'a> Deref for OwnedCursor<'a> {
+    type Target = Cursor<'a>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.cursor
+    }
+}
+
+impl<'a> DerefMut for OwnedCursor<'a> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.cursor
     }
 }
 

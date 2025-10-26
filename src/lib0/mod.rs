@@ -107,6 +107,13 @@ where
     T::deserialize(&mut deserializer)
 }
 
+pub(crate) fn from_value<T>(value: &Value) -> Result<T, Error>
+where
+    T: DeserializeOwned,
+{
+    todo!()
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("I/O error: {0}")]

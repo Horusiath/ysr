@@ -1,14 +1,13 @@
-use crate::block::{BlockHeader, BlockMut, ID};
+use crate::block::{BlockMut, ID};
 use crate::block_reader::{BlockRange, Carrier, Update};
-use crate::content::ContentType;
 use crate::id_set::IDSet;
 use crate::node::{Node, NodeID};
 use crate::read::Decoder;
 use crate::state_vector::Snapshot;
-use crate::store::lmdb::store::{map_key, BlockKey, CursorExt, MapBucketKey};
+use crate::store::lmdb::store::{BlockKey, CursorExt};
 use crate::store::lmdb::BlockStore;
 use crate::write::WriteExt;
-use crate::{ClientID, Error, Optional, StateVector, U32};
+use crate::{ClientID, Clock, Optional, StateVector, U32};
 use bitflags::bitflags;
 use bytes::{Bytes, BytesMut};
 use lmdb_rs_m::{Database, DbHandle};
@@ -16,9 +15,10 @@ use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
 use std::io::Write;
-use zerocopy::{FromBytes, IntoBytes, TryFromBytes};
+use zerocopy::IntoBytes;
 
 pub(crate) struct TransactionState {
+    pub client_id: ClientID,
     pub begin_state: StateVector,
     pub current_state: StateVector,
     pub origin: Option<Origin>,
@@ -28,9 +28,10 @@ pub(crate) struct TransactionState {
 }
 
 impl TransactionState {
-    fn new(begin_state: StateVector, origin: Option<Origin>) -> Self {
+    fn new(client_id: ClientID, begin_state: StateVector, origin: Option<Origin>) -> Self {
         let current_state = begin_state.clone();
         TransactionState {
+            client_id,
             begin_state,
             current_state,
             origin,
@@ -39,6 +40,12 @@ impl TransactionState {
             merge_blocks: BTreeSet::default(),
         }
     }
+
+    pub fn next_id(&mut self) -> ID {
+        let clock = self.current_state.inc_by(self.client_id, Clock::new(1));
+        ID::new(self.client_id, clock)
+    }
+
     pub(crate) fn add_changed_type(
         &mut self,
         parent_id: NodeID,
@@ -151,6 +158,7 @@ impl TransactionState {
 
 pub struct Transaction<'db> {
     txn: lmdb_rs_m::Transaction<'db>,
+    client_id: ClientID,
     handle: DbHandle,
     state: Option<Box<TransactionState>>,
 }
@@ -160,13 +168,19 @@ impl<'db> Transaction<'db> {
         txn: lmdb_rs_m::Transaction<'db>,
         handle: DbHandle,
         origin: Option<Origin>,
+        client_id: ClientID,
     ) -> Self {
         let state = origin.map(|o| {
             let db = txn.bind(&handle);
             let begin_state = db.state_vector().unwrap();
-            Box::new(TransactionState::new(begin_state, Some(o)))
+            Box::new(TransactionState::new(client_id, begin_state, Some(o)))
         });
-        Self { txn, handle, state }
+        Self {
+            txn,
+            client_id,
+            handle,
+            state,
+        }
     }
 
     pub fn db(&self) -> Database<'_> {
@@ -182,7 +196,7 @@ impl<'db> Transaction<'db> {
         let db = self.txn.bind(&self.handle);
         let state = self.state.get_or_insert_with(|| {
             let begin_state = db.state_vector().unwrap();
-            Box::new(TransactionState::new(begin_state, None))
+            Box::new(TransactionState::new(self.client_id, begin_state, None))
         });
         (db, state)
     }

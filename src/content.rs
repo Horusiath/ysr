@@ -1,11 +1,13 @@
 use crate::block::{
-    CONTENT_TYPE_ATOM, CONTENT_TYPE_BINARY, CONTENT_TYPE_DELETED, CONTENT_TYPE_DOC,
+    Block, CONTENT_TYPE_ATOM, CONTENT_TYPE_BINARY, CONTENT_TYPE_DELETED, CONTENT_TYPE_DOC,
     CONTENT_TYPE_EMBED, CONTENT_TYPE_FORMAT, CONTENT_TYPE_JSON, CONTENT_TYPE_NODE,
-    CONTENT_TYPE_STRING, ID,
+    CONTENT_TYPE_STRING,
 };
-use crate::node::NodeType;
-use crate::{lib0, Clock};
+use crate::lib0::Value;
+use crate::{lib0, Unmounted};
+use bytes::Bytes;
 use serde::de::DeserializeOwned;
+use serde::Deserialize;
 use std::fmt::{Debug, Display, Formatter};
 use std::io::Cursor;
 use std::marker::PhantomData;
@@ -357,7 +359,7 @@ impl<'a, E> ContentRef<'a, E> {
 
     pub fn iter<D>(&self) -> Iter<'a, E, D>
     where
-        D: DeserializeOwned,
+        D: Deserialize<'a>,
     {
         Iter {
             inner: self.inner.clone(),
@@ -463,6 +465,78 @@ impl<'a> Debug for ContentFormat<'a> {
 impl<'a> Display for ContentFormat<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "\"{}\"={:?}", self.key(), self.value())
+    }
+}
+
+pub trait TryFromContent: Sized {
+    fn try_from_content(block: Block<'_>, content: BlockContent<'_>) -> crate::Result<Self>;
+}
+
+impl TryFromContent for lib0::Value {
+    fn try_from_content(block: Block<'_>, content: BlockContent<'_>) -> crate::Result<Self> {
+        match content {
+            BlockContent::Deleted => Err(crate::Error::NotFound),
+            BlockContent::Json(value) => {
+                let value = value
+                    .iter::<Self>()
+                    .next()
+                    .ok_or(crate::Error::NotFound)??;
+                Ok(value)
+            }
+            BlockContent::Atom(value) => {
+                let value = value
+                    .iter::<Self>()
+                    .next()
+                    .ok_or(crate::Error::NotFound)??;
+                Ok(value)
+            }
+            BlockContent::Binary(value) | BlockContent::Embed(value) => {
+                Ok(Value::ByteArray(Bytes::copy_from_slice(value)))
+            }
+            BlockContent::Text(value) => Ok(Value::String(value.into())),
+            _ => Err(crate::Error::InvalidMapping("Value")),
+        }
+    }
+}
+
+impl TryFromContent for String {
+    fn try_from_content(block: Block<'_>, content: BlockContent<'_>) -> crate::Result<Self> {
+        match content {
+            BlockContent::Text(str) => Ok(str.into()),
+            BlockContent::Deleted => Err(crate::Error::NotFound),
+            BlockContent::Json(value) => {
+                let value = value
+                    .iter::<Self>()
+                    .next()
+                    .ok_or(crate::Error::NotFound)??;
+                Ok(value)
+            }
+            BlockContent::Atom(value) => {
+                let value = value
+                    .iter::<Self>()
+                    .next()
+                    .ok_or(crate::Error::NotFound)??;
+                Ok(value)
+            }
+            BlockContent::Binary(value) | BlockContent::Embed(value) => {
+                let str = std::str::from_utf8(value)
+                    .map_err(|e| crate::Error::InvalidMapping("String"))?;
+                Ok(str.to_string())
+            }
+            _ => Err(crate::Error::InvalidMapping("String")),
+        }
+    }
+}
+
+impl<T> TryFromContent for Unmounted<T> {
+    fn try_from_content(block: Block<'_>, _content: BlockContent<'_>) -> crate::Result<Self> {
+        if block.is_deleted() {
+            return Err(crate::Error::NotFound);
+        } else if block.content_type() == ContentType::Node {
+            Ok(Unmounted::nested(*block.id()))
+        } else {
+            Err(crate::Error::InvalidMapping("Unmounted"))
+        }
     }
 }
 
