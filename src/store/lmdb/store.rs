@@ -28,6 +28,8 @@ pub trait BlockStore<'tx> {
     fn entry(&self, map: NodeID, entry_key: &str) -> crate::Result<&ID>;
     fn set_entry(&mut self, map: NodeID, entry_key: &str, value: &ID) -> crate::Result<()>;
 
+    fn intern_string(&mut self, string: &str, alias: U32) -> crate::Result<()>;
+
     fn insert_pending_update(
         &mut self,
         missing_sv: &StateVector,
@@ -43,10 +45,11 @@ pub trait BlockStore<'tx> {
         match self.fetch_block(node.id(), true) {
             Ok(block) => Ok(block.into()),
             Err(crate::Error::BlockNotFound(_)) => {
-                if node.is_root() {
+                if let Node::Root(name) = &node {
                     // since root nodes live forever, we can create it if it does not exist
-                    let data = InsertBlockData::new_node(node, node_type);
+                    let data = InsertBlockData::new_node(&node, node_type);
                     self.insert_block(&data)?;
+                    self.intern_string(name, data.id().clock)?;
                     Ok(data.block)
                 } else {
                     // nested nodes are not created automatically, if we didn't find it, we return an error
@@ -232,7 +235,14 @@ impl<'tx> BlockStore<'tx> for Database<'tx> {
 
     fn set_entry(&mut self, map: NodeID, entry_key: &str, value: &ID) -> crate::Result<()> {
         let key = map_key(map, entry_key);
-        self.set(&key.as_bytes(), &value.as_bytes())?;
+        self.set(&value.as_bytes(), &key.as_bytes())?;
+        Ok(())
+    }
+
+    fn intern_string(&mut self, string: &str, alias: U32) -> crate::Result<()> {
+        let mut key: SmallVec<[u8; 5]> = smallvec![KEY_PREFIX_INTERN_STR];
+        key.extend_from_slice(alias.as_bytes());
+        self.set(&key.as_bytes(), &string.as_bytes())?;
         Ok(())
     }
 
@@ -467,10 +477,11 @@ pub enum SplitResult {
 }
 
 pub(crate) const KEY_PREFIX_META: u8 = 0x00;
-pub(crate) const KEY_PREFIX_STATE_VECTOR: u8 = 0x01;
-pub(crate) const KEY_PREFIX_BLOCK: u8 = 0x02;
-pub(crate) const KEY_PREFIX_MAP: u8 = 0x03;
-pub(crate) const KEY_PREFIX_CONTENT: u8 = 0x04;
+pub(crate) const KEY_PREFIX_INTERN_STR: u8 = 0x01;
+pub(crate) const KEY_PREFIX_STATE_VECTOR: u8 = 0x02;
+pub(crate) const KEY_PREFIX_BLOCK: u8 = 0x03;
+pub(crate) const KEY_PREFIX_MAP: u8 = 0x04;
+pub(crate) const KEY_PREFIX_CONTENT: u8 = 0x05;
 
 #[repr(C, packed)]
 #[derive(FromBytes, IntoBytes, Immutable, KnownLayout, Clone, Copy, Debug, PartialEq, Eq)]
@@ -553,6 +564,31 @@ pub fn map_key(map: NodeID, key: &str) -> MapBucketKey {
     res
 }
 
+#[repr(C, packed)]
+#[derive(FromBytes, IntoBytes, Immutable, KnownLayout, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MapBucketHashKey {
+    tag: u8,
+    node_id: NodeID,
+    hash: U32,
+}
+
+impl MapBucketHashKey {
+    pub fn new(node_id: NodeID, hash: U32) -> Self {
+        MapBucketHashKey {
+            tag: KEY_PREFIX_MAP,
+            node_id,
+            hash,
+        }
+    }
+}
+
+impl ToMdbValue for MapBucketHashKey {
+    fn to_mdb_value(&self) -> MdbValue<'_> {
+        let ptr = std::ptr::from_ref(self) as *const _;
+        unsafe { MdbValue::new(ptr, size_of::<Self>()) }
+    }
+}
+
 pub trait CursorExt<'a> {
     fn get_block(&mut self) -> crate::Result<Block<'a>>;
     fn entries(&mut self, node_id: NodeID) -> Entries<'a, '_>;
@@ -562,6 +598,7 @@ pub trait CursorExt<'a> {
         block: &mut BlockMut,
         parent_deleted: bool,
     ) -> crate::Result<bool>;
+    fn content(&mut self, block: ID, length: Clock) -> crate::Result<&[u8]>;
 }
 
 impl<'a> CursorExt<'a> for lmdb_rs_m::Cursor<'a> {
@@ -643,6 +680,12 @@ impl<'a> CursorExt<'a> for lmdb_rs_m::Cursor<'a> {
             _ => { /* not used */ }
         }
         Ok(true)
+    }
+
+    fn content(&mut self, block: ID, length: Clock) -> crate::Result<&[u8]> {
+        let key = BlockContentKey::new(block);
+        self.to_key(&key)?;
+        Ok(self.get_value()?)
     }
 }
 

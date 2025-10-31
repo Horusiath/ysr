@@ -60,6 +60,21 @@ impl ContentType {
             _ => false,
         }
     }
+
+    #[inline]
+    pub fn has_content(self) -> bool {
+        match self {
+            ContentType::Deleted => false,
+            ContentType::Json => true,
+            ContentType::Binary => true,
+            ContentType::String => true,
+            ContentType::Embed => true,
+            ContentType::Format => true,
+            ContentType::Node => false,
+            ContentType::Atom => true,
+            ContentType::Doc => true,
+        }
+    }
 }
 
 impl Display for ContentType {

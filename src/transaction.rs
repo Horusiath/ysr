@@ -1,21 +1,25 @@
-use crate::block::{BlockMut, ID};
+use crate::block::{Block, BlockMut, ID};
 use crate::block_reader::{BlockRange, Carrier, Update};
+use crate::content::{ContentFormat, ContentIter, ContentType};
 use crate::id_set::IDSet;
 use crate::node::{Node, NodeID};
 use crate::read::Decoder;
 use crate::state_vector::Snapshot;
-use crate::store::lmdb::store::{BlockKey, CursorExt};
+use crate::store::lmdb::store::{
+    map_key, BlockKey, CursorExt, MapBucketHashKey, KEY_PREFIX_BLOCK, KEY_PREFIX_INTERN_STR,
+};
 use crate::store::lmdb::BlockStore;
-use crate::write::WriteExt;
-use crate::{ClientID, Clock, Optional, StateVector, U32};
+use crate::write::{Encode, Encoder, EncoderV1, WriteExt};
+use crate::{lib0, ClientID, Clock, Optional, StateVector, U32};
 use bitflags::bitflags;
 use bytes::{Bytes, BytesMut};
 use lmdb_rs_m::{Database, DbHandle};
+use smallvec::{smallvec, SmallVec};
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
 use std::io::Write;
-use zerocopy::IntoBytes;
+use zerocopy::{FromBytes, IntoBytes};
 
 pub(crate) struct TransactionState {
     pub client_id: ClientID,
@@ -220,25 +224,232 @@ impl<'db> Transaction<'db> {
         since: &StateVector,
         writer: &mut W,
     ) -> crate::Result<()> {
+        let mut writer = EncoderV1::new(writer);
         // wrote updates
         let current_state = self.state_vector()?;
-        let diff = current_state.clear_present(since);
-        writer.write_var(diff.len() as u64)?;
-        let mut buf = BytesMut::new();
-        for (&client_id, &clock) in diff.iter().rev() {
-            let up_to = current_state.get(&client_id);
-            let range = BlockRange::new(ID::new(client_id, clock), up_to - clock);
-            /*let mut cursor = self.inner.block_range(range)?;
-            buf.clear();
-            let blocks_count = Self::write_updates(&mut cursor, &mut buf)?;
-            writer.write_var(blocks_count)?;
-            writer.write_var(client_id.get())?;
-            writer.write_var(clock.get())?;
-            writer.write_all(&buf)?;*/
+        let db = self.db();
+        let mut block_cursor = db.new_cursor()?;
+        // in order to build delete set we need to go through all the blocks anyway
+        if block_cursor
+            .to_gte_key(&[KEY_PREFIX_BLOCK].as_slice())
+            .optional()? // MdbError::NotFound - there are no blocks
+            .is_none()
+        {
+            writer.write_var(0)?; // no blocks
+            writer.write_var(0)?; // no elements in delete set
+            return Ok(());
+        }
+
+        let mut current_client = ClientID::MAX_VALUE;
+        let mut min_state = Clock::new(0);
+        let mut max_state = Clock::new(0);
+
+        // we need 2 passes: in the first pass, we go through all the blocks, construct delete set
+        // and determine number of blocks we're going to encode (required by lib0 v1 encoding)
+        let mut blocks = BTreeMap::new();
+        let mut ds = IDSet::default();
+        let mut client_block_count: Option<usize> = None;
+        let mut first_block_clock = None;
+        while let Some(block) = block_cursor.get_block().optional()? {
+            let id = block.id();
+            let len = block.clock_len();
+
+            // we moved to blocks in the next client, we need to update range
+            if current_client != id.client {
+                if let Some(count) = client_block_count.take() {
+                    blocks.insert(current_client, (count, first_block_clock.take().unwrap()));
+                }
+
+                current_client = id.client;
+                min_state = since.get(&current_client);
+                max_state = current_state.get(&current_client);
+            }
+
+            if block.is_deleted() {
+                ds.insert(*id, len);
+            }
+
+            // check if block overlaps with the range we're interested in
+            if id.clock < max_state && id.clock + len > min_state {
+                if first_block_clock.is_none() {
+                    first_block_clock = Some(id.clock);
+                }
+                *client_block_count.get_or_insert_default() += 1;
+            }
+
+            // move to next block
+            if block_cursor.to_next_key().optional()?.is_none() {
+                break;
+            }
+        }
+
+        if let Some(count) = client_block_count.take() {
+            blocks.insert(current_client, (count, first_block_clock.take().unwrap()));
+        }
+
+        // on the second pass we go through blocks we're going to serialize
+        // we don't cache them in memory as we don't know how much memory can we spare and how big
+        // the document is. Hopefully LMDB will be able to cache it all.
+        let mut content_cursor = db.new_cursor()?;
+
+        writer.write_var(blocks.len())?;
+        for (client_id, (block_count, first_clock)) in blocks {
+            writer.write_var(block_count)?;
+            writer.write_client(client_id)?;
+            let clock = since.get(&client_id);
+            writer.write_var(clock)?;
+
+            block_cursor.to_key(&BlockKey::new(ID::new(client_id, first_clock)))?;
+            let block = block_cursor.get_block()?;
+            // write first block
+            Self::write_block(
+                &block,
+                clock - block.id().clock,
+                &mut content_cursor,
+                &mut writer,
+            )?;
+            // write rest of the blocks
+            for _ in 1..block_count {
+                block_cursor.to_next_key()?;
+                let block = block_cursor.get_block()?;
+                Self::write_block(&block, Clock::new(0), &mut content_cursor, &mut writer)?;
+            }
         }
 
         // write delete set
-        todo!()
+        ds.encode_with(&mut writer)?;
+
+        Ok(())
+    }
+
+    fn write_block<E: Encoder>(
+        block: &Block<'_>,
+        offset: Clock,
+        cursor: &mut lmdb_rs_m::Cursor<'_>,
+        writer: &mut E,
+    ) -> crate::Result<()> {
+        let id = block.id();
+        let origin_left = if offset > Clock::new(0) {
+            Some(ID::new(id.client, id.clock + offset + 1))
+        } else {
+            block.origin_left().copied()
+        };
+        let origin_right = block.origin_right().copied();
+        let info = block.info_flags();
+        writer.write_info(info)?;
+        if let Some(origin_left) = &origin_left {
+            writer.write_left_id(origin_left)?;
+        }
+        if let Some(origin_right) = &origin_right {
+            writer.write_right_id(origin_right)?;
+        }
+        if info & 0b1100_0000 == 0 {
+            // left/right origins were not provided
+            let parent_id = block.parent();
+            if parent_id.is_root() {
+                let parent_name = Self::parent_name(cursor, parent_id)?;
+                writer.write_parent_info(true)?;
+                writer.write_string(parent_name)?;
+            } else {
+                writer.write_parent_info(false)?;
+                writer.write_left_id(parent_id)?;
+            }
+            if let Some(key_hash) = block.key_hash() {
+                let entry_key = Self::entry_key_for(cursor, *parent_id, *key_hash, block.id())?;
+                writer.write_string(entry_key)?;
+            }
+        }
+
+        let content_type = block.content_type();
+        match content_type {
+            ContentType::Deleted => {
+                writer.write_len(block.clock_len().into())?;
+            }
+            ContentType::Binary => {
+                let content = cursor.content(*block.id(), block.clock_len())?;
+                writer.write_bytes(content)?;
+            }
+            ContentType::String => {
+                let content = cursor.content(*block.id(), block.clock_len())?;
+                let content = unsafe { std::str::from_utf8_unchecked(content) };
+                writer.write_string(content)?;
+            }
+            ContentType::Embed => {
+                let content = cursor.content(*block.id(), block.clock_len())?;
+                let json: serde_json::Value = serde_json::from_slice(content)?;
+                writer.write_json(&json)?;
+            }
+            ContentType::Format => {
+                let content = cursor.content(*block.id(), block.clock_len())?;
+                let content = ContentFormat::new(content)?;
+                writer.write_key(content.key())?;
+                let json: serde_json::Value = serde_json::from_slice(content.value())?;
+                writer.write_json(&json)?;
+            }
+            ContentType::Node => {
+                writer.write_type_ref(*block.node_type().unwrap() as u8)?;
+            }
+            ContentType::Atom => {
+                writer.write_len(block.clock_len().into())?;
+                let content = cursor.content(*block.id(), block.clock_len())?;
+                let content = ContentIter::new(content);
+                for atom in content {
+                    let atom: lib0::Value = lib0::from_slice(atom)?;
+                    writer.write_any(&atom)?;
+                }
+            }
+            ContentType::Json => {
+                writer.write_len(block.clock_len().into())?;
+                let content = cursor.content(*block.id(), block.clock_len())?;
+                let content = ContentIter::new(content);
+                for json in content {
+                    let json: serde_json::Value = serde_json::from_slice(json)?;
+                    writer.write_json(&json)?;
+                }
+            }
+            ContentType::Doc => {
+                let content = cursor.content(*block.id(), block.clock_len())?;
+                todo!()
+            }
+        }
+
+        Ok(())
+    }
+
+    fn entry_key_for<'a>(
+        cursor: &mut lmdb_rs_m::Cursor<'a>,
+        parent_id: NodeID,
+        key_hash: U32,
+        block_id: &ID,
+    ) -> crate::Result<&'a str> {
+        let bucket_key = MapBucketHashKey::new(parent_id, key_hash);
+        cursor.to_gte_key(&bucket_key)?;
+        while {
+            let key: &[u8] = cursor.get_key()?;
+            if key.starts_with(bucket_key.as_bytes()) {
+                let value = ID::ref_from_bytes(cursor.get_value()?)
+                    .map_err(|_| crate::Error::InvalidMapping("ID"))?;
+                if value == block_id {
+                    let entry_key = unsafe {
+                        std::str::from_utf8_unchecked(&key[size_of::<MapBucketHashKey>()..])
+                    };
+                    return Ok(entry_key);
+                }
+                true
+            } else {
+                false
+            }
+        } {}
+
+        Err(crate::Error::NotFound)
+    }
+
+    fn parent_name<'a>(cursor: &mut lmdb_rs_m::Cursor<'a>, id: &NodeID) -> crate::Result<&'a str> {
+        let mut key: SmallVec<[u8; 5]> = smallvec![KEY_PREFIX_INTERN_STR];
+        key.extend_from_slice(id.clock.as_bytes());
+        cursor.to_key(&key.as_bytes())?;
+        let str = unsafe { std::str::from_utf8_unchecked(cursor.get_value()?) };
+        Ok(str)
     }
 
     fn write_updates(

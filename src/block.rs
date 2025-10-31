@@ -386,6 +386,14 @@ impl<'a> Block<'a> {
         }
     }
 
+    pub(crate) fn info_flags(&self) -> u8 {
+        let mut info = self.content_type as u8 | (self.flags.0 & 0b1100_0000); // has left & right origin
+        if self.key_hash != U32::new(0) {
+            info |= 0b0010_0000;
+        }
+        info
+    }
+
     pub fn id(&self) -> &ID {
         &self.id
     }
@@ -600,7 +608,7 @@ impl InsertBlockData {
         BlockContent::new(self.block.content_type(), &self.content)
     }
 
-    pub(crate) fn new_node(node: Node, kind: NodeType) -> Self {
+    pub(crate) fn new_node(node: &Node, kind: NodeType) -> Self {
         let id = node.id();
         Self {
             block: BlockMut::new(
