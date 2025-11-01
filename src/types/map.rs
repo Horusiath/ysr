@@ -276,8 +276,7 @@ where
 
         let rollback_key: &[u8] = cursor.get_key()?;
         let key = unsafe { std::str::from_utf8_unchecked(&rollback_key[1 + 8 + 4..]) };
-        let id = *ID::ref_from_bytes(cursor.get_value()?)
-            .map_err(|_| crate::Error::InvalidMapping("ID"))?;
+        let id = *ID::parse(cursor.get_value()?)?;
         cursor.to_key(&BlockKey::new(id))?;
         let block = cursor.get_block()?;
 
@@ -374,7 +373,7 @@ impl<'a> RawIter<'a> {
     pub fn block_id(&mut self) -> crate::Result<Option<&'a ID>> {
         if let Some(cursor) = &mut self.cursor {
             let value: &[u8] = cursor.get_value()?;
-            let id = ID::ref_from_bytes(value).map_err(|_| crate::Error::InvalidMapping("ID"))?;
+            let id = ID::parse(value)?;
             Ok(Some(id))
         } else {
             Ok(None)

@@ -12,7 +12,7 @@ use crate::store::lmdb::BlockStore;
 use crate::write::{Encode, Encoder, EncoderV1, WriteExt};
 use crate::{lib0, ClientID, Clock, Optional, StateVector, U32};
 use bitflags::bitflags;
-use bytes::{Bytes, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use lmdb_rs_m::{Database, DbHandle};
 use smallvec::{smallvec, SmallVec};
 use std::collections::btree_map::Entry;
@@ -213,10 +213,10 @@ impl<'db> Transaction<'db> {
         todo!()
     }
 
-    pub fn diff_update(&self, since: &StateVector) -> crate::Result<Vec<u8>> {
-        let mut buf = Vec::new();
+    pub fn diff_update(&self, since: &StateVector) -> crate::Result<Bytes> {
+        let mut buf = BytesMut::new().writer();
         self.diff_update_with(since, &mut buf)?;
-        Ok(buf)
+        Ok(buf.into_inner().freeze())
     }
 
     pub fn diff_update_with<W: Write>(
@@ -296,11 +296,11 @@ impl<'db> Transaction<'db> {
         for (client_id, (block_count, first_clock)) in blocks {
             writer.write_var(block_count)?;
             writer.write_client(client_id)?;
-            let clock = since.get(&client_id);
-            writer.write_var(clock)?;
 
             block_cursor.to_key(&BlockKey::new(ID::new(client_id, first_clock)))?;
             let block = block_cursor.get_block()?;
+            let clock = since.get(&client_id).max(block.id().clock);
+            writer.write_var(clock)?;
             // write first block
             Self::write_block(
                 &block,
@@ -427,8 +427,7 @@ impl<'db> Transaction<'db> {
         while {
             let key: &[u8] = cursor.get_key()?;
             if key.starts_with(bucket_key.as_bytes()) {
-                let value = ID::ref_from_bytes(cursor.get_value()?)
-                    .map_err(|_| crate::Error::InvalidMapping("ID"))?;
+                let value = ID::parse(cursor.get_value()?)?;
                 if value == block_id {
                     let entry_key = unsafe {
                         std::str::from_utf8_unchecked(&key[size_of::<MapBucketHashKey>()..])

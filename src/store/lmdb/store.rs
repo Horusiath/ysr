@@ -192,18 +192,20 @@ impl<'tx> BlockStore<'tx> for Database<'tx> {
         }
 
         loop {
-            cursor.to_next_key()?;
             let key: &[u8] = cursor.get_key()?;
             if key[0] != KEY_PREFIX_STATE_VECTOR {
                 break;
             }
 
             let value: &[u8] = cursor.get_value()?;
-            let client_id = ClientID::ref_from_bytes(&key[1..])
-                .map_err(|_| Error::InvalidMapping("ClientID"))?;
+            let client_id = *ClientID::parse(&key[1..])?;
             let clock =
-                Clock::ref_from_bytes(&value).map_err(|_| Error::InvalidMapping("Clock"))?;
-            state_vector.insert(*client_id, *clock);
+                *Clock::ref_from_bytes(&value).map_err(|_| Error::InvalidMapping("Clock"))?;
+            if client_id != ClientID::MAX_VALUE {
+                state_vector.insert(client_id, clock);
+            }
+
+            cursor.to_next_key()?;
         }
 
         Ok(StateVector::new(state_vector))
@@ -228,7 +230,7 @@ impl<'tx> BlockStore<'tx> for Database<'tx> {
         let key = map_key(map, entry_key);
         match self.get(&key.as_bytes()) {
             Ok(value) => {
-                let id = ID::ref_from_bytes(value).map_err(|_| Error::InvalidMapping("ID"))?;
+                let id = ID::parse(value)?;
                 Ok(id)
             }
             Err(lmdb_rs_m::MdbError::NotFound) => Err(Error::NotFound),
@@ -320,8 +322,7 @@ impl<'a> BlockCursor<'a> {
                 let key: &[u8] = self.inner.get_key()?;
                 if key[0] == KEY_PREFIX_BLOCK {
                     // the nearest >= key is a block, check if it's the one we're looking for
-                    let current_id =
-                        ID::ref_from_bytes(&key[1..]).map_err(|_| Error::InvalidMapping("ID"))?;
+                    let current_id = ID::parse(&key[1..])?;
                     if current_id == &id {
                         return Ok(Some(current_id)); // found the block directly
                     } else if direct {
@@ -347,8 +348,7 @@ impl<'a> BlockCursor<'a> {
         if self.prev()? {
             let key: &[u8] = self.inner.get_key()?;
             if key[0] == KEY_PREFIX_BLOCK {
-                let current_id =
-                    ID::ref_from_bytes(&key[1..]).map_err(|_| Error::InvalidMapping("ID"))?;
+                let current_id = ID::parse(&key[1..])?;
                 if current_id.client == id.client {
                     // client IDs match, check clock range
                     let value = self.inner.get_value()?;
@@ -400,7 +400,7 @@ impl<'a> BlockCursor<'a> {
         if key[0] != KEY_PREFIX_BLOCK {
             return Ok(None);
         }
-        let id = ID::ref_from_bytes(&key[1..]).map_err(|_| Error::InvalidMapping("ID"))?;
+        let id = ID::parse(&key[1..])?;
         Ok(Some(id))
     }
 
@@ -435,7 +435,7 @@ impl<'a, 'b> Entries<'a, 'b> {
             return Ok(None);
         }
         let value: &[u8] = cursor.get_value()?;
-        let id = ID::ref_from_bytes(&value).map_err(|_| Error::InvalidMapping("ID"))?;
+        let id = ID::parse(&value)?;
         // function `map_keys` puts key string after the keyspace tag, map id and hash of the key itself
         const KEY_OFFSET: usize = 1 + size_of::<NodeID>() + size_of::<U32>();
         let entry_key = unsafe { str::from_utf8_unchecked(&key[KEY_OFFSET..]) };
@@ -615,7 +615,7 @@ impl<'a> CursorExt<'a> for lmdb_rs_m::Cursor<'a> {
         if key[0] != KEY_PREFIX_BLOCK {
             return Err(crate::Error::NotFound);
         }
-        let id = ID::ref_from_bytes(&key[1..]).map_err(|_| Error::InvalidMapping("ID"))?;
+        let id = ID::parse(&key[1..])?;
 
         let block = Block::new(*id, value)?;
         Ok(block)

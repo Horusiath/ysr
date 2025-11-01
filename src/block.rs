@@ -45,6 +45,10 @@ impl ID {
     pub const fn new(client: ClientID, clock: Clock) -> Self {
         Self { client, clock }
     }
+
+    pub fn parse(bytes: &[u8]) -> crate::Result<&Self> {
+        Self::ref_from_bytes(bytes).map_err(|_| Error::InvalidMapping("ID"))
+    }
 }
 
 impl Debug for ID {

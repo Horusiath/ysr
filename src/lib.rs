@@ -161,6 +161,10 @@ impl ClientID {
     pub const unsafe fn new_unchecked(id: u32) -> Self {
         Self(U32::new(id))
     }
+
+    pub fn parse(bytes: &[u8]) -> crate::Result<&Self> {
+        Self::ref_from_bytes(bytes).map_err(|_| Error::InvalidMapping("ClientID"))
+    }
 }
 
 impl std::fmt::Display for ClientID {

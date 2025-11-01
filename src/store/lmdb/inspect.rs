@@ -80,14 +80,13 @@ impl<'a> Entry<'a> {
                 Ok(Entry::InternString(hash, str))
             }
             KEY_PREFIX_STATE_VECTOR => {
-                let client = ClientID::ref_from_bytes(key)
-                    .map_err(|_| crate::Error::InvalidMapping("ClientID"))?;
+                let client = ClientID::parse(key)?;
                 let clock = Clock::ref_from_bytes(value)
                     .map_err(|_| crate::Error::InvalidMapping("Clock"))?;
                 Ok(Entry::StateVector(client, clock))
             }
             KEY_PREFIX_BLOCK => {
-                let id = ID::ref_from_bytes(key).map_err(|_| crate::Error::InvalidMapping("ID"))?;
+                let id = ID::parse(key)?;
                 let header = BlockHeader::try_ref_from_bytes(value)
                     .map_err(|_| crate::Error::InvalidMapping("BlockHeader"))?;
                 Ok(Entry::Block(id, header))
@@ -98,12 +97,11 @@ impl<'a> Entry<'a> {
                 let key = &key[size_of::<NodeID>() + size_of::<U32>()..];
                 let key = std::str::from_utf8(key)
                     .map_err(|_| crate::Error::InvalidMapping("MapEntry"))?;
-                let id =
-                    ID::ref_from_bytes(value).map_err(|_| crate::Error::InvalidMapping("ID"))?;
+                let id = ID::parse(value)?;
                 Ok(Entry::MapEntry(node_id, key, id))
             }
             KEY_PREFIX_CONTENT => {
-                let id = ID::ref_from_bytes(key).map_err(|_| crate::Error::InvalidMapping("ID"))?;
+                let id = ID::parse(key)?;
                 Ok(Entry::Content(id, value))
             }
             other => unimplemented!("unknown store keyspace tag: {}", other),
