@@ -3,6 +3,7 @@ use crate::block_reader::Carrier;
 use crate::content::{BlockContent, ContentIter, ContentType};
 use crate::id_set::IDSet;
 use crate::node::{Node, NodeID, NodeType};
+use crate::store::lmdb::inspect::DocInspector;
 use crate::transaction::TransactionState;
 use crate::{ClientID, Clock, Error, Optional, StateVector, U32};
 use lmdb_rs_m::core::MdbResult;
@@ -59,6 +60,8 @@ pub trait BlockStore<'tx> {
             Err(e) => Err(e),
         }
     }
+
+    fn inspect(&self) -> crate::Result<DocInspector<'_>>;
 }
 
 impl<'tx> BlockStore<'tx> for Database<'tx> {
@@ -253,6 +256,11 @@ impl<'tx> BlockStore<'tx> for Database<'tx> {
         pending_delete_set: &IDSet,
     ) -> crate::Result<()> {
         todo!()
+    }
+
+    fn inspect(&self) -> crate::Result<DocInspector<'_>> {
+        let cursor = self.new_cursor()?;
+        Ok(DocInspector::new(cursor))
     }
 }
 

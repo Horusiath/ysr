@@ -981,7 +981,7 @@ impl Display for BlockHeader {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "parent: {}", self.parent)?;
         if let Some(key) = self.key_hash() {
-            write!(f, ", hash_key: \"{}\"", key)?;
+            write!(f, ", hash_key: {}", key)?;
         }
         if self.flags.contains(BlockFlags::COUNTABLE) || self.flags.contains(BlockFlags::DELETED) {
             write!(f, ", clock-len: {}", self.clock_len)?;
