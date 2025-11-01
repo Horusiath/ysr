@@ -3,7 +3,9 @@ use super::store::{
     KEY_PREFIX_STATE_VECTOR,
 };
 use crate::block::{BlockHeader, ID};
-use crate::{ClientID, Clock, U32};
+use crate::content::ContentIter;
+use crate::node::NodeID;
+use crate::{lib0, ClientID, Clock, U32};
 use lmdb_rs_m::MdbError;
 use std::fmt::{Debug, Display};
 use zerocopy::{FromBytes, TryFromBytes};
@@ -60,7 +62,7 @@ pub enum Entry<'a> {
     InternString(&'a U32, &'a str) = KEY_PREFIX_INTERN_STR,
     StateVector(&'a ClientID, &'a Clock) = KEY_PREFIX_STATE_VECTOR,
     Block(&'a ID, &'a BlockHeader) = KEY_PREFIX_BLOCK,
-    MapEntry(&'a str, &'a ID) = KEY_PREFIX_MAP,
+    MapEntry(&'a NodeID, &'a str, &'a ID) = KEY_PREFIX_MAP,
     Content(&'a ID, &'a [u8]) = KEY_PREFIX_CONTENT,
 }
 
@@ -91,12 +93,14 @@ impl<'a> Entry<'a> {
                 Ok(Entry::Block(id, header))
             }
             KEY_PREFIX_MAP => {
-                let key = &key[size_of::<U32>()..];
+                let node_id = NodeID::ref_from_bytes(&key[..size_of::<NodeID>()])
+                    .map_err(|_| crate::Error::InvalidMapping("NodeID"))?;
+                let key = &key[size_of::<NodeID>() + size_of::<U32>()..];
                 let key = std::str::from_utf8(key)
                     .map_err(|_| crate::Error::InvalidMapping("MapEntry"))?;
                 let id =
                     ID::ref_from_bytes(value).map_err(|_| crate::Error::InvalidMapping("ID"))?;
-                Ok(Entry::MapEntry(key, id))
+                Ok(Entry::MapEntry(node_id, key, id))
             }
             KEY_PREFIX_CONTENT => {
                 let id = ID::ref_from_bytes(key).map_err(|_| crate::Error::InvalidMapping("ID"))?;
@@ -130,16 +134,44 @@ impl<'a> Display for Entry<'a> {
             Entry::Block(id, header) => {
                 write!(f, "block: {} => {}", id, header)
             }
-            Entry::MapEntry(key, id) => {
-                write!(f, "map-entry: {} => {}", key, id)
+            Entry::MapEntry(node, key, id) => {
+                write!(f, "map-entry: {}:{} => {}", node, key, id)
             }
             Entry::Content(id, content) => {
                 write!(f, "content: {} => ", id)?;
-                fmt_bytes(f, content)?;
-                Ok(())
+                if try_fmt_objects(f, content).is_err() {
+                    fmt_bytes(f, content)
+                } else {
+                    Ok(())
+                }
             }
         }
     }
+}
+
+fn try_fmt_objects(f: &mut std::fmt::Formatter<'_>, bytes: &[u8]) -> std::fmt::Result {
+    // try to read length of first elem - if it's fitting the overal content size, this could
+    // potentially be an object
+    if bytes.len() <= 4 {
+        return Err(std::fmt::Error);
+    }
+
+    let len = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    if (len as usize) > bytes.len() - 4 {
+        return Err(std::fmt::Error);
+    }
+
+    let mut i = ContentIter::new(bytes);
+    for slice in i {
+        if let Ok(atom) = lib0::from_slice::<lib0::Value>(slice) {
+            write!(f, "lib0:{}", atom)?;
+        } else if let Ok(json) = serde_json::from_slice::<serde_json::Value>(slice) {
+            write!(f, "json:{}", json)?;
+        } else {
+            return Err(std::fmt::Error);
+        }
+    }
+    Ok(())
 }
 
 fn fmt_bytes(f: &mut std::fmt::Formatter<'_>, bytes: &[u8]) -> std::fmt::Result {

@@ -238,7 +238,7 @@ impl<'tx> BlockStore<'tx> for Database<'tx> {
 
     fn set_entry(&mut self, map: NodeID, entry_key: &str, value: &ID) -> crate::Result<()> {
         let key = map_key(map, entry_key);
-        self.set(&value.as_bytes(), &key.as_bytes())?;
+        self.set(&key.as_bytes(), &value.as_bytes())?;
         Ok(())
     }
 
@@ -568,7 +568,6 @@ pub fn map_key(map: NodeID, key: &str) -> MapBucketKey {
     res.extend_from_slice(map.as_bytes());
     res.extend_from_slice(hash.as_ref());
     res.extend_from_slice(key.as_bytes());
-
     res
 }
 

@@ -1,7 +1,7 @@
 use crate::block::{Block, BlockMut, InsertBlockData, ID};
 use crate::content::{BlockContent, ContentType, TryFromContent};
 use crate::integrate::IntegrationContext;
-use crate::node::{Node, NodeType};
+use crate::node::{Node, NodeID, NodeType};
 use crate::prelim::Prelim;
 use crate::store::lmdb::store::{
     map_key, BlockContentKey, BlockKey, CursorExt, OwnedCursor, KEY_PREFIX_MAP,
@@ -56,7 +56,7 @@ impl<'tx, 'db> MapRef<&'tx Transaction<'db>> {
     }
 
     fn map_prefix(&self) -> [u8; 9] {
-        let mut prefix = [0u8; 9];
+        let mut prefix = [0u8; 1 + size_of::<NodeID>()];
         prefix[0] = KEY_PREFIX_MAP;
         prefix[1..].copy_from_slice(&self.node_id().as_bytes());
         prefix
@@ -495,7 +495,7 @@ mod test {
         let mut t2 = d2.transact_mut("test").unwrap();
         t2.apply_update(&mut DecoderV1::from_slice(&update))
             .unwrap();
-        let mut m2 = map.mount_mut(&mut t2).unwrap();
+        let m2 = map.mount_mut(&mut t2).unwrap();
 
         let v2 = m2.to_value().unwrap();
         assert_eq!(v2, expected);
