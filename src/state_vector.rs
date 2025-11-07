@@ -56,13 +56,14 @@ impl StateVector {
     }
 
     /// Updates a state vector observed clock sequence number for a given `client` by incrementing
-    /// it by a given `delta`.
+    /// it by a given `delta`. Returns clock value prior the increment.
     pub fn inc_by(&mut self, client: ClientID, delta: Clock) -> Clock {
         let e = self.0.entry(client).or_default();
+        let value = *e;
         if delta > 0 {
             *e = *e + delta;
         }
-        *e
+        value
     }
 
     /// Updates a state vector observed clock sequence number for a given `client` by setting it to

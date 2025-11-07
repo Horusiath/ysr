@@ -2,7 +2,6 @@ use crate::lib0::Value;
 use bytes::Bytes;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::io::Cursor;

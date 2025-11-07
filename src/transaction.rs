@@ -248,16 +248,18 @@ impl<'db> Transaction<'db> {
         // and determine number of blocks we're going to encode (required by lib0 v1 encoding)
         let mut blocks = BTreeMap::new();
         let mut ds = IDSet::default();
-        let mut client_block_count: Option<usize> = None;
-        let mut first_block_clock = None;
+        let mut client_block_count = 0;
+        let mut first_block_clock = Clock::new(0);
         while let Some(block) = block_cursor.get_block().optional()? {
             let id = block.id();
             let len = block.clock_len();
 
             // we moved to blocks in the next client, we need to update range
             if current_client != id.client {
-                if let Some(count) = client_block_count.take() {
-                    blocks.insert(current_client, (count, first_block_clock.take().unwrap()));
+                if client_block_count != 0 {
+                    blocks.insert(current_client, (client_block_count, first_block_clock));
+                    client_block_count = 0;
+                    first_block_clock = Clock::new(0);
                 }
 
                 current_client = id.client;
@@ -270,11 +272,11 @@ impl<'db> Transaction<'db> {
             }
 
             // check if block overlaps with the range we're interested in
-            if id.clock < max_state && id.clock + len > min_state {
-                if first_block_clock.is_none() {
-                    first_block_clock = Some(id.clock);
+            if id.clock <= max_state && id.clock + len > min_state {
+                if client_block_count == 0 {
+                    first_block_clock = id.clock;
                 }
-                *client_block_count.get_or_insert_default() += 1;
+                client_block_count += 1;
             }
 
             // move to next block
@@ -283,8 +285,8 @@ impl<'db> Transaction<'db> {
             }
         }
 
-        if let Some(count) = client_block_count.take() {
-            blocks.insert(current_client, (count, first_block_clock.take().unwrap()));
+        if client_block_count != 0 {
+            blocks.insert(current_client, (client_block_count, first_block_clock));
         }
 
         // on the second pass we go through blocks we're going to serialize
@@ -389,22 +391,12 @@ impl<'db> Transaction<'db> {
             ContentType::Node => {
                 writer.write_type_ref(*block.node_type().unwrap() as u8)?;
             }
-            ContentType::Atom => {
+            ContentType::Atom | ContentType::Json => {
                 writer.write_len(block.clock_len().into())?;
                 let content = cursor.content(*block.id(), block.clock_len())?;
                 let content = ContentIter::new(content);
                 for atom in content {
-                    let atom: lib0::Value = lib0::from_slice(atom)?;
-                    writer.write_any(&atom)?;
-                }
-            }
-            ContentType::Json => {
-                writer.write_len(block.clock_len().into())?;
-                let content = cursor.content(*block.id(), block.clock_len())?;
-                let content = ContentIter::new(content);
-                for json in content {
-                    let json: serde_json::Value = serde_json::from_slice(json)?;
-                    writer.write_json(&json)?;
+                    writer.write_all(atom)?;
                 }
             }
             ContentType::Doc => {

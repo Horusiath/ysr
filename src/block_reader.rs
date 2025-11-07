@@ -140,8 +140,8 @@ impl Update {
                 let deleted_len = decoder.read_len()?;
                 block.set_clock_len(deleted_len);
             }
-            ContentType::Json => block.set_clock_len(copy_content(decoder, &mut w)?),
-            ContentType::Atom => block.set_clock_len(copy_content(decoder, &mut w)?),
+            ContentType::Json => block.set_clock_len(copy_json(decoder, &mut w)?),
+            ContentType::Atom => block.set_clock_len(copy_lib0(decoder, &mut w)?),
             ContentType::Binary => {
                 let len = decoder.read_len()?;
                 block.set_clock_len(1.into());
@@ -265,15 +265,17 @@ impl<'a, D: Decoder> Iterator for BlockReader<'a, D> {
     }
 }
 
-fn copy_content<D: Decoder, W: Write>(decoder: &mut D, writer: &mut W) -> crate::Result<Clock> {
+fn copy_lib0<D: Decoder, W: Write>(decoder: &mut D, writer: &mut W) -> crate::Result<Clock> {
     let count = decoder.read_len()?;
-    let mut buf = Vec::new();
     for _ in 0u64..count.into() {
-        decoder.read_bytes(&mut buf)?;
-        writer.write_u32(buf.len() as u32)?;
-        writer.write_all(&buf)?;
+        crate::lib0::copy(decoder, writer)?;
     }
     Ok(count.into())
+}
+
+fn copy_json<D: Decoder, W: Write>(decoder: &mut D, writer: &mut W) -> crate::Result<Clock> {
+    let count = decoder.read_len()?;
+    todo!()
 }
 
 const CARRIER_INFO: u8 = 0b0001_1111;

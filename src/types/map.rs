@@ -441,13 +441,35 @@ impl FromIterator<(String, In)> for MapPrelim {
 mod test {
     use crate::lib0::Value;
     use crate::read::DecoderV1;
-    use crate::store::lmdb::BlockStore;
+
     use crate::test_util::{multi_doc, sync};
     use crate::{
         lib0, In, List, ListPrelim, ListRef, Map, MapPrelim, Optional, StateVector, Unmounted,
     };
     use serde::Deserialize;
     use std::collections::HashMap;
+
+    #[test]
+    fn basic() {
+        let map: Unmounted<Map> = Unmounted::root("map");
+
+        let (d1, _) = multi_doc(1);
+        let (d2, _) = multi_doc(2);
+
+        let mut t1 = d1.transact_mut("test").unwrap();
+
+        let mut m1 = map.mount_mut(&mut t1).unwrap();
+        m1.insert("number", 1.1).unwrap();
+
+        let update = t1.diff_update(&StateVector::default()).unwrap();
+        t1.commit(None).unwrap();
+
+        let mut t2 = d2.transact_mut("test").unwrap();
+        t2.apply_update(&mut DecoderV1::from_slice(&update))
+            .unwrap();
+        let m2 = map.mount_mut(&mut t2).unwrap();
+        assert_eq!(m2.to_value().unwrap(), lib0!({"number": 1.1}));
+    }
 
     #[test]
     fn map_basic() {
