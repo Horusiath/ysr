@@ -30,6 +30,7 @@ pub use multi_doc::MultiDoc;
 pub use output::Out;
 pub use read::DecoderV1;
 use serde::{Deserialize, Serialize};
+use smallvec::CollectionAllocErr;
 pub use state_vector::StateVector;
 use std::collections::TryReserveError;
 pub use transaction::Transaction;
@@ -55,8 +56,8 @@ pub enum Error {
     IO(#[from] std::io::Error),
     #[error("expected more data, reached end of buffer")]
     EndOfBuffer,
-    #[error("operation tried to allocate too much memory: {0}")]
-    OutOfMemory(#[from] TryReserveError),
+    #[error("operation tried to allocate too much memory")]
+    OutOfMemory,
     #[error("index is out of range of expected type")]
     OutOfRange,
     #[error("provided key is longer than 255 bytes")]
@@ -81,6 +82,18 @@ pub enum Error {
     ClientIDOutOfRange,
     #[error("LMDB error: {0}")]
     Lmdb(#[from] lmdb_rs_m::MdbError),
+}
+
+impl From<TryReserveError> for Error {
+    fn from(_: TryReserveError) -> Self {
+        Self::OutOfMemory
+    }
+}
+
+impl From<CollectionAllocErr> for Error {
+    fn from(_: CollectionAllocErr) -> Self {
+        Self::OutOfMemory
+    }
 }
 
 impl Error {

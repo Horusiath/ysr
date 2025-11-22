@@ -3,7 +3,7 @@ use super::store::{
     KEY_PREFIX_STATE_VECTOR,
 };
 use crate::block::{BlockHeader, ID};
-use crate::content::ContentIter;
+use crate::content::BlockContentRef;
 use crate::node::NodeID;
 use crate::{lib0, ClientID, Clock, U32};
 use lmdb_rs_m::MdbError;
@@ -137,39 +137,11 @@ impl<'a> Display for Entry<'a> {
             }
             Entry::Content(id, content) => {
                 write!(f, "content: {} => ", id)?;
-                if try_fmt_objects(f, content).is_err() {
-                    fmt_bytes(f, content)
-                } else {
-                    Ok(())
-                }
+                let content = BlockContentRef::new(content).map_err(|_| std::fmt::Error)?;
+                Display::fmt(&content, f)
             }
         }
     }
-}
-
-fn try_fmt_objects(f: &mut std::fmt::Formatter<'_>, bytes: &[u8]) -> std::fmt::Result {
-    // try to read length of first elem - if it's fitting the overal content size, this could
-    // potentially be an object
-    if bytes.len() <= 4 {
-        return Err(std::fmt::Error);
-    }
-
-    let len = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-    if (len as usize) > bytes.len() - 4 {
-        return Err(std::fmt::Error);
-    }
-
-    let mut i = ContentIter::new(bytes);
-    for slice in i {
-        if let Ok(atom) = lib0::from_slice::<lib0::Value>(slice) {
-            write!(f, "lib0:{}", atom)?;
-        } else if let Ok(json) = serde_json::from_slice::<serde_json::Value>(slice) {
-            write!(f, "json:{}", json)?;
-        } else {
-            return Err(std::fmt::Error);
-        }
-    }
-    Ok(())
 }
 
 fn fmt_bytes(f: &mut std::fmt::Formatter<'_>, bytes: &[u8]) -> std::fmt::Result {

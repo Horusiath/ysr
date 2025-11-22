@@ -1,5 +1,5 @@
 use crate::block::{BlockMut, InsertBlockData, ID};
-use crate::content::BlockContent;
+use crate::content::{BlockContent, BlockContentRef, ContentType};
 use crate::integrate::IntegrationContext;
 use crate::lib0::Value;
 use crate::node::NodeType;
@@ -8,10 +8,9 @@ use crate::state_vector::Snapshot;
 use crate::store::lmdb::BlockStore;
 use crate::types::Capability;
 use crate::{Clock, In, Mounted, Out, Transaction};
-use bytes::BytesMut;
 use genawaiter2::yield_;
 use serde::{Deserialize, Serialize};
-use smallvec::SmallVec;
+use smallvec::smallvec;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
@@ -95,9 +94,10 @@ impl<'tx, 'db> Display for TextRef<&'tx Transaction<'db>> {
             };
             if block.is_countable() && !block.is_deleted() {
                 let content_type = block.header().content_type();
-                let BlockContent::Text(chunk) = db
+                let Some(chunk) = db
                     .block_content(id, content_type)
                     .map_err(|_| std::fmt::Error)?
+                    .as_text()
                 else {
                     continue;
                 };
@@ -250,7 +250,8 @@ where
     type Return = ();
 
     fn prepare(&self, insert: &mut InsertBlockData) -> crate::Result<()> {
-        insert.init_content(BlockContent::Node);
+        let block = insert.as_block_mut();
+        block.set_content_type(ContentType::Format);
         Ok(())
     }
 
@@ -396,7 +397,10 @@ impl<'a> Prelim for StringPrelim<'a> {
     type Return = ();
 
     fn prepare(&self, insert: &mut InsertBlockData) -> crate::Result<()> {
-        insert.init_content(BlockContent::Text(self.data));
+        let block = insert.as_block_mut();
+        block.set_content_type(ContentType::String);
+        let data = BlockContent::string(self.data);
+        insert.content = smallvec![data];
         Ok(())
     }
 

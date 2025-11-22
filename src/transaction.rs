@@ -1,16 +1,16 @@
 use crate::block::{Block, BlockMut, ID};
-use crate::block_reader::{BlockRange, Carrier, Update};
-use crate::content::{ContentFormat, ContentIter, ContentType};
+use crate::block_reader::{Carrier, Update};
+use crate::content::{ContentFormat, ContentType};
 use crate::id_set::IDSet;
 use crate::node::{Node, NodeID};
 use crate::read::Decoder;
 use crate::state_vector::Snapshot;
 use crate::store::lmdb::store::{
-    map_key, BlockKey, CursorExt, MapBucketHashKey, KEY_PREFIX_BLOCK, KEY_PREFIX_INTERN_STR,
+    BlockContentKey, BlockKey, CursorExt, MapBucketHashKey, KEY_PREFIX_BLOCK, KEY_PREFIX_INTERN_STR,
 };
 use crate::store::lmdb::BlockStore;
 use crate::write::{Encode, Encoder, EncoderV1, WriteExt};
-use crate::{lib0, ClientID, Clock, Optional, StateVector, U32};
+use crate::{ClientID, Clock, Optional, StateVector, U32};
 use bitflags::bitflags;
 use bytes::{BufMut, Bytes, BytesMut};
 use lmdb_rs_m::{Database, DbHandle};
@@ -19,7 +19,7 @@ use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
 use std::io::Write;
-use zerocopy::{FromBytes, IntoBytes};
+use zerocopy::IntoBytes;
 
 pub(crate) struct TransactionState {
     pub client_id: ClientID,
@@ -368,39 +368,37 @@ impl<'db> Transaction<'db> {
                 writer.write_len(block.clock_len().into())?;
             }
             ContentType::Binary => {
-                let content = cursor.content(*block.id(), block.clock_len())?;
+                let content = cursor.content(*block.id())?;
                 writer.write_bytes(content)?;
             }
             ContentType::String => {
-                let content = cursor.content(*block.id(), block.clock_len())?;
+                let content = cursor.content(*block.id())?;
                 let content = unsafe { std::str::from_utf8_unchecked(content) };
                 writer.write_string(content)?;
             }
             ContentType::Embed => {
-                let content = cursor.content(*block.id(), block.clock_len())?;
+                let content = cursor.content(*block.id())?;
                 let json: serde_json::Value = serde_json::from_slice(content)?;
                 writer.write_json(&json)?;
             }
             ContentType::Format => {
-                let content = cursor.content(*block.id(), block.clock_len())?;
-                let content = ContentFormat::new(content)?;
-                writer.write_key(content.key())?;
-                let json: serde_json::Value = serde_json::from_slice(content.value())?;
-                writer.write_json(&json)?;
+                let content = cursor.content(*block.id())?;
+                writer.write_all(content)?; // format is stored in the same shape
             }
             ContentType::Node => {
                 writer.write_type_ref(*block.node_type().unwrap() as u8)?;
             }
             ContentType::Atom | ContentType::Json => {
                 writer.write_len(block.clock_len().into())?;
-                let content = cursor.content(*block.id(), block.clock_len())?;
-                let content = ContentIter::new(content);
-                for atom in content {
-                    writer.write_all(atom)?;
+                cursor.to_key(&BlockContentKey::new(*block.id()))?;
+                for _ in 0..block.clock_len().get() {
+                    let value: &[u8] = cursor.get_value()?;
+                    writer.write_all(&value[1..])?; // skip 1st byte (content_type)
+                    cursor.to_next_key()?;
                 }
             }
             ContentType::Doc => {
-                let content = cursor.content(*block.id(), block.clock_len())?;
+                let content = cursor.content(*block.id())?;
                 todo!()
             }
         }

@@ -1,8 +1,8 @@
 use crate::block::InsertBlockData;
-use crate::content::{BlockContent, ContentRef};
+use crate::content::{BlockContent, ContentType};
 use crate::{lib0, Transaction};
 use serde::Serialize;
-use smallvec::{smallvec, SmallVec};
+use smallvec::smallvec;
 
 pub trait Prelim {
     type Return;
@@ -23,11 +23,9 @@ where
     type Return = ();
 
     fn prepare(&self, insert: &mut InsertBlockData) -> crate::Result<()> {
-        let mut buf: SmallVec<[u8; 16]> = smallvec![0, 0, 0, 0];
-        lib0::to_writer(&mut buf, self)?;
-        let len = (buf.len() - 4) as u32;
-        buf[0..4].copy_from_slice(&len.to_be_bytes());
-        insert.init_content(BlockContent::Atom(ContentRef::new(&buf)));
+        let mut content = BlockContent::new(ContentType::Atom);
+        lib0::to_writer(&mut content, self)?;
+        insert.content = smallvec![content];
         Ok(())
     }
 

@@ -1,7 +1,7 @@
 use crate::block::{
     BlockHeader, BlockMut, InsertBlockData, CONTENT_TYPE_GC, CONTENT_TYPE_SKIP, ID,
 };
-use crate::content::ContentType;
+use crate::content::{BlockContent, ContentType};
 use crate::id_set::IDSet;
 use crate::integrate::IntegrationContext;
 use crate::node::{Node, NodeID, NodeType};
@@ -15,7 +15,6 @@ use smallvec::SmallVec;
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt::{Display, Formatter};
 use std::io::{Read, Write};
-use zerocopy::IntoBytes;
 
 #[derive(Default)]
 pub struct Update {
@@ -133,41 +132,55 @@ impl Update {
     fn read_content(
         block: &mut BlockHeader,
         decoder: &mut impl Decoder,
-    ) -> crate::Result<BytesMut> {
-        let mut w = BytesMut::new().writer();
+    ) -> crate::Result<SmallVec<[BlockContent; 1]>> {
+        let mut result = SmallVec::new();
         match block.content_type() {
             ContentType::Deleted => {
                 let deleted_len = decoder.read_len()?;
                 block.set_clock_len(deleted_len);
             }
-            ContentType::Json => block.set_clock_len(copy_json(decoder, &mut w)?),
-            ContentType::Atom => block.set_clock_len(copy_lib0(decoder, &mut w)?),
+            ContentType::Json => block.set_clock_len(copy_json(decoder, &mut result)?),
+            ContentType::Atom => block.set_clock_len(copy_lib0(decoder, &mut result)?),
             ContentType::Binary => {
+                let mut w = BlockContent::new(ContentType::Binary);
+
                 let len = decoder.read_len()?;
                 block.set_clock_len(1.into());
                 std::io::copy(&mut decoder.take(len.into()), &mut w)?;
+
+                result.push(w)
             }
             ContentType::String => {
+                let mut w = BlockContent::new(ContentType::String);
+
                 let len = decoder.read_len()?;
                 block.set_clock_len(len);
                 std::io::copy(&mut decoder.take(len.into()), &mut w)?;
+
+                result.push(w)
             }
             ContentType::Embed => {
+                let mut w = BlockContent::new(ContentType::Embed);
+
                 block.set_clock_len(1.into());
                 let json = decoder.read_json::<serde_json::Value>()?;
                 serde_json::to_writer(&mut w, &json)?;
+
+                result.push(w)
             }
             ContentType::Format => {
+                let mut w = BlockContent::new(ContentType::Format);
+
                 block.set_clock_len(1.into());
-                let mut buf: SmallVec<[u8; 16]> = SmallVec::new();
-                decoder.read_string(&mut buf)?;
-                if buf.len() > u8::MAX as usize {
-                    return Err(crate::Error::KeyTooLong);
-                }
-                w.write_u8(buf.len() as u8)?;
-                w.write_all(&buf)?;
-                let value: () = decoder.read_json()?;
-                serde_json::to_writer(&mut w, &value)?;
+                let key_len: u64 = decoder.read_var()?;
+                w.write_var(key_len)?;
+                std::io::copy(&mut decoder.take(key_len), &mut w)?;
+
+                let value_len: u64 = decoder.read_var()?;
+                w.write_var(value_len)?;
+                std::io::copy(&mut decoder.take(value_len), &mut w)?;
+
+                result.push(w)
             }
             ContentType::Node => {
                 block.set_clock_len(1.into());
@@ -176,11 +189,12 @@ impl Update {
                 block.set_node_type(node_type);
             }
             ContentType::Doc => {
+                let mut w = BlockContent::new(ContentType::Doc);
                 block.set_clock_len(1.into());
                 todo!()
             }
         }
-        Ok(w.into_inner())
+        Ok(result)
     }
 }
 
@@ -265,17 +279,33 @@ impl<'a, D: Decoder> Iterator for BlockReader<'a, D> {
     }
 }
 
-fn copy_lib0<D: Decoder, W: Write>(decoder: &mut D, writer: &mut W) -> crate::Result<Clock> {
+fn copy_lib0<D: Decoder>(
+    decoder: &mut D,
+    res: &mut SmallVec<[BlockContent; 1]>,
+) -> crate::Result<Clock> {
     let count = decoder.read_len()?;
+    res.try_reserve(count.get() as usize)?;
     for _ in 0u64..count.into() {
-        crate::lib0::copy(decoder, writer)?;
+        let mut content = BlockContent::new(ContentType::Atom);
+        crate::lib0::copy(decoder, &mut content)?;
+        res.push(content);
     }
-    Ok(count.into())
+    Ok(count)
 }
 
-fn copy_json<D: Decoder, W: Write>(decoder: &mut D, writer: &mut W) -> crate::Result<Clock> {
+fn copy_json<D: Decoder>(
+    decoder: &mut D,
+    res: &mut SmallVec<[BlockContent; 1]>,
+) -> crate::Result<Clock> {
     let count = decoder.read_len()?;
-    todo!()
+    res.try_reserve(count.get() as usize)?;
+    for _ in 0u64..count.into() {
+        let mut content = BlockContent::new(ContentType::Atom);
+        let value: serde_json::Value = serde_json::from_reader(&mut *decoder)?;
+        serde_json::to_writer(&mut content, &value)?;
+        res.push(content);
+    }
+    Ok(count)
 }
 
 const CARRIER_INFO: u8 = 0b0001_1111;
@@ -398,7 +428,7 @@ impl Display for BlockRange {
 mod test {
     use crate::block::ID;
     use crate::block_reader::{BlockReader, Carrier};
-    use crate::content::BlockContent;
+    use crate::content::BlockContentRef;
     use crate::read::DecoderV1;
     use crate::ClientID;
     use std::io::Cursor;
@@ -419,9 +449,7 @@ mod test {
         assert_eq!(n.id(), &ID::new(CLIENT, 0.into()));
         assert_eq!(n.block.origin_right(), None);
         assert_eq!(n.block.origin_left(), None);
-        let BlockContent::Text(text) =
-            BlockContent::new(n.block.content_type(), &n.content).unwrap()
-        else {
+        let Some(text) = n.content.iter().next().unwrap().as_text() else {
             unreachable!()
         };
         assert_eq!(text, "0");
@@ -432,9 +460,7 @@ mod test {
         };
         assert_eq!(n.id(), &ID::new(CLIENT, 1.into()));
         assert_eq!(n.block.origin_right(), Some(&ID::new(CLIENT, 0.into())));
-        let BlockContent::Text(text) =
-            BlockContent::new(n.block.content_type(), &n.content).unwrap()
-        else {
+        let Some(text) = n.content.iter().next().unwrap().as_text() else {
             unreachable!()
         };
         assert_eq!(text, "1");
@@ -444,9 +470,7 @@ mod test {
             unreachable!()
         };
         assert_eq!(n.id(), &ID::new(CLIENT, 2.into()));
-        let BlockContent::Text(text) =
-            BlockContent::new(n.block.content_type(), &n.content).unwrap()
-        else {
+        let Some(text) = n.content.iter().next().unwrap().as_text() else {
             unreachable!()
         };
         assert_eq!(text, "2");

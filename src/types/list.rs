@@ -1,5 +1,5 @@
 use crate::block::InsertBlockData;
-use crate::content::BlockContent;
+use crate::content::{BlockContentRef, ContentType};
 use crate::lib0::Value;
 use crate::node::NodeType;
 use crate::prelim::Prelim;
@@ -123,7 +123,9 @@ impl Prelim for ListPrelim {
     type Return = Unmounted<List>;
 
     fn prepare(&self, insert: &mut InsertBlockData) -> crate::Result<()> {
-        insert.init_content(BlockContent::Node);
+        let block = insert.as_block_mut();
+        block.set_content_type(ContentType::Node);
+        block.set_node_type(NodeType::List);
         Ok(())
     }
 

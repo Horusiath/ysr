@@ -1,12 +1,12 @@
 use crate::lib0::{
-    ExpectedString, Tag, Value, TAG_ARRAY, TAG_BIGINT, TAG_BYTE_ARRAY, TAG_FALSE, TAG_FLOAT32,
-    TAG_FLOAT64, TAG_INTEGER, TAG_NULL, TAG_OBJECT, TAG_STRING, TAG_TRUE, TAG_UNDEFINED,
+    ExpectedString, Tag, Value, TAG_ARRAY, TAG_BYTE_ARRAY, TAG_FALSE, TAG_FLOAT32, TAG_FLOAT64,
+    TAG_NULL, TAG_OBJECT, TAG_STRING, TAG_TRUE, TAG_UNDEFINED,
 };
 use crate::read::ReadExt;
-use serde::de::{DeserializeSeed, Error, MapAccess, SeqAccess, Unexpected, Visitor};
-use serde::{de, Deserialize};
+use serde::de;
+use serde::de::{DeserializeSeed, Error, SeqAccess, Unexpected, Visitor};
 use smallvec::SmallVec;
-use std::io::{Cursor, Read};
+use std::io::Read;
 
 const DEFAULT_INLINE_STRING_SIZE: usize = 16;
 

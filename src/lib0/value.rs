@@ -1,5 +1,5 @@
 use crate::block::InsertBlockData;
-use crate::content::{BlockContent, ContentRef};
+use crate::content::{BlockContentRef, ContentRef};
 use crate::prelim::Prelim;
 use crate::{lib0, Transaction};
 use bytes::{Bytes, BytesMut};

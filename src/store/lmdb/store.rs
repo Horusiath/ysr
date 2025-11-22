@@ -1,6 +1,6 @@
 use crate::block::{Block, BlockMut, InsertBlockData, ID};
 use crate::block_reader::Carrier;
-use crate::content::{BlockContent, ContentIter, ContentType};
+use crate::content::{BlockContentRef, ContentType};
 use crate::id_set::IDSet;
 use crate::node::{Node, NodeID, NodeType};
 use crate::store::lmdb::inspect::DocInspector;
@@ -23,8 +23,8 @@ pub trait BlockStore<'tx> {
     fn clock(&self, client_id: ClientID) -> crate::Result<Option<Clock>>;
     fn state_vector(&self) -> crate::Result<StateVector>;
 
-    fn block_content(&self, id: ID, kind: ContentType) -> crate::Result<BlockContent<'_>>;
-    fn set_block_content(&mut self, id: ID, content: &BlockContent) -> crate::Result<()>;
+    fn block_content(&self, id: ID, kind: ContentType) -> crate::Result<BlockContentRef<'_>>;
+    fn set_block_content(&mut self, id: ID, content: &BlockContentRef) -> crate::Result<()>;
 
     fn entry(&self, map: NodeID, entry_key: &str) -> crate::Result<&ID>;
     fn set_entry(&mut self, map: NodeID, entry_key: &str, value: &ID) -> crate::Result<()>;
@@ -92,10 +92,11 @@ impl<'tx> BlockStore<'tx> for Database<'tx> {
 
         // insert block content if any
         if !insert.content.is_empty() {
-            self.set(
-                &BlockContentKey::new(*insert.id()),
-                &insert.content.as_bytes(),
-            )?;
+            let mut id = *insert.id();
+            for content in insert.content.iter() {
+                self.set(&BlockContentKey::new(id), content)?;
+                id.clock += 1;
+            }
         }
         // insert block entry key if any
         if let Some(key) = insert.entry.as_deref() {
@@ -211,17 +212,17 @@ impl<'tx> BlockStore<'tx> for Database<'tx> {
         Ok(StateVector::new(state_vector))
     }
 
-    fn block_content(&self, id: ID, kind: ContentType) -> crate::Result<BlockContent<'_>> {
+    fn block_content(&self, id: ID, kind: ContentType) -> crate::Result<BlockContentRef<'_>> {
         let data: &[u8] = if !kind.is_empty() {
             let key = BlockContentKey::new(id);
             self.get(&key)?
         } else {
             &[]
         };
-        BlockContent::new(kind, data)
+        BlockContentRef::new(data)
     }
 
-    fn set_block_content(&mut self, id: ID, content: &BlockContent) -> crate::Result<()> {
+    fn set_block_content(&mut self, id: ID, content: &BlockContentRef) -> crate::Result<()> {
         let key = BlockContentKey::new(id);
         Ok(self.set(&key, &content.body())?)
     }
@@ -292,13 +293,7 @@ fn split_content(mut cursor: Cursor<'_>, left: &BlockMut, right: &BlockMut) -> c
             cursor.set(&right_id.as_bytes(), &right_content.as_bytes(), 0)?;
         }
         ContentType::Json | ContentType::Atom => {
-            let i = ContentIter::new(left_content);
-            let r = i.slice(offset).unwrap().len();
-            let (left_content, right_content) = left_content.split_at(r);
-            cursor.del()?;
-            cursor.set(&left_id.as_bytes(), &left_content.as_bytes(), 0)?;
-            let right_id = BlockContentKey::new(*right.id());
-            cursor.set(&right_id.as_bytes(), &right_content.as_bytes(), 0)?;
+            /* atoms and JSON are already kept split over multiple entries */
         }
         _ => unreachable!("unexpected content type"),
     }
@@ -605,7 +600,7 @@ pub trait CursorExt<'a> {
         block: &mut BlockMut,
         parent_deleted: bool,
     ) -> crate::Result<bool>;
-    fn content(&mut self, block: ID, length: Clock) -> crate::Result<&[u8]>;
+    fn content(&mut self, block: ID) -> crate::Result<&[u8]>;
 }
 
 impl<'a> CursorExt<'a> for lmdb_rs_m::Cursor<'a> {
@@ -689,10 +684,11 @@ impl<'a> CursorExt<'a> for lmdb_rs_m::Cursor<'a> {
         Ok(true)
     }
 
-    fn content(&mut self, block: ID, length: Clock) -> crate::Result<&[u8]> {
+    fn content(&mut self, block: ID) -> crate::Result<&[u8]> {
         let key = BlockContentKey::new(block);
         self.to_key(&key)?;
-        Ok(self.get_value()?)
+        let value: &[u8] = self.get_value()?;
+        Ok(&value[1..])
     }
 }
 

@@ -4,13 +4,18 @@ use crate::block::{
     CONTENT_TYPE_STRING,
 };
 use crate::lib0::Value;
+use crate::write::WriteExt;
 use crate::{lib0, Unmounted};
 use bytes::Bytes;
+use lmdb_rs_m::{MdbValue, ToMdbValue};
 use serde::de::DeserializeOwned;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use smallvec::{smallvec, ExtendFromSlice, SmallVec};
+use std::ffi::c_void;
 use std::fmt::{Debug, Display, Formatter};
-use std::io::Cursor;
+use std::io::{Cursor, Write};
 use std::marker::PhantomData;
+use std::ops::{Deref, DerefMut};
 use zerocopy::{Immutable, IntoBytes, KnownLayout, TryFromBytes};
 
 #[repr(u8)]
@@ -112,179 +117,285 @@ impl TryFrom<u8> for ContentType {
     }
 }
 
-#[repr(u8)]
-#[derive(Debug, PartialEq)]
-pub(crate) enum BlockContent<'a> {
-    Deleted = CONTENT_TYPE_DELETED,
-    Json(ContentRef<'a, JsonEncoding>) = CONTENT_TYPE_JSON,
-    Atom(ContentRef<'a, AtomEncoding>) = CONTENT_TYPE_ATOM,
-    Binary(&'a [u8]) = CONTENT_TYPE_BINARY,
-    Embed(&'a [u8]) = CONTENT_TYPE_EMBED,
-    Text(&'a str) = CONTENT_TYPE_STRING,
-    Node = CONTENT_TYPE_NODE,
-    Format(ContentFormat<'a>) = CONTENT_TYPE_FORMAT,
-    Doc(&'a [u8]) = CONTENT_TYPE_DOC,
-    // to be supported..
-    // Move(&'a Move) = CONTENT_TYPE_MOVE,
-}
-
-impl<'a> BlockContent<'a> {
-    pub fn new(content_type: ContentType, data: &'a [u8]) -> crate::Result<Self> {
-        Ok(match content_type {
-            ContentType::Deleted => BlockContent::Deleted,
-            ContentType::Json => BlockContent::Json(ContentRef::new(data)),
-            ContentType::Binary => BlockContent::Binary(data),
-            ContentType::String => BlockContent::Text(unsafe { str::from_utf8_unchecked(data) }),
-            ContentType::Embed => BlockContent::Embed(data),
-            ContentType::Format => BlockContent::Format(ContentFormat::new(data)?),
-            ContentType::Node => BlockContent::Node,
-            ContentType::Atom => BlockContent::Atom(ContentRef::new(data)),
-            ContentType::Doc => BlockContent::Doc(data),
-        })
-    }
-
-    #[inline]
-    pub fn content_type(&self) -> ContentType {
-        match self {
-            Self::Deleted => ContentType::Deleted,
-            Self::Atom(_) => ContentType::Atom,
-            Self::Binary(_) => ContentType::Binary,
-            Self::Doc(_) => ContentType::Doc,
-            Self::Embed(_) => ContentType::Embed,
-            Self::Format(_) => ContentType::Format,
-            Self::Node => ContentType::Node,
-            Self::Text(_) => ContentType::String,
-            Self::Json(_) => ContentType::Json,
-        }
-    }
-
-    pub fn body(&self) -> &[u8] {
-        match self {
-            Self::Deleted => &[],
-            Self::Json(jsons) => jsons.inner.body(),
-            Self::Atom(atoms) => atoms.inner.body(),
-            Self::Binary(bin) => bin,
-            Self::Embed(bin) => bin,
-            Self::Text(text) => text.as_bytes(),
-            Self::Node => &[],
-            Self::Format(format) => format.body(),
-            Self::Doc(doc) => doc,
-        }
-    }
-}
-
-impl<'a> Display for BlockContent<'a> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Deleted => write!(f, "deleted"),
-            Self::Json(jsons) => write!(f, "{}", jsons),
-            Self::Atom(atoms) => write!(f, "{}", atoms),
-            Self::Binary(bin) => write!(f, "binary({})", simple_base64::encode(bin)),
-            Self::Embed(bin) => write!(f, "embed({})", simple_base64::encode(bin)),
-            Self::Text(text) => write!(f, "'{}'", text),
-            Self::Node => write!(f, "node"),
-            Self::Format(format) => write!(f, "{}", format),
-            Self::Doc(doc) => todo!("Display::fmt(doc)"),
-        }
-    }
-}
-
-#[repr(u8)]
-#[derive(Debug, PartialEq)]
-pub(crate) enum BlockContentMut<'a> {
-    Deleted = CONTENT_TYPE_DELETED,
-    Json(ContentRef<'a, JsonEncoding>) = CONTENT_TYPE_JSON,
-    Atom(ContentRef<'a, AtomEncoding>) = CONTENT_TYPE_ATOM,
-    Binary(&'a [u8]) = CONTENT_TYPE_BINARY,
-    Embed(&'a [u8]) = CONTENT_TYPE_EMBED,
-    Text(&'a str) = CONTENT_TYPE_STRING,
-    Node = CONTENT_TYPE_NODE,
-    Format(ContentFormat<'a>) = CONTENT_TYPE_FORMAT,
-    Doc(&'a [u8]) = CONTENT_TYPE_DOC,
-    // to be supported..
-    // Move(&'a Move) = CONTENT_TYPE_MOVE,
-}
-
-impl<'a> BlockContentMut<'a> {
-    #[inline]
-    pub fn content_type(&self) -> ContentType {
-        match self {
-            Self::Deleted => ContentType::Deleted,
-            Self::Atom(_) => ContentType::Atom,
-            Self::Binary(_) => ContentType::Binary,
-            Self::Doc(_) => ContentType::Doc,
-            Self::Embed(_) => ContentType::Embed,
-            Self::Format(_) => ContentType::Format,
-            Self::Node => ContentType::Node,
-            Self::Text(_) => ContentType::String,
-            Self::Json(_) => ContentType::Json,
-        }
-    }
-}
-
-impl<'a> Display for BlockContentMut<'a> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Deleted => write!(f, "deleted"),
-            Self::Json(jsons) => write!(f, "{}", jsons),
-            Self::Atom(atoms) => write!(f, "{}", atoms),
-            Self::Binary(bin) => write!(f, "binary({})", simple_base64::encode(bin)),
-            Self::Embed(bin) => write!(f, "embed({})", simple_base64::encode(bin)),
-            Self::Text(text) => write!(f, "'{}'", text),
-            Self::Node => write!(f, "node"),
-            Self::Format(format) => write!(f, "{}", format),
-            Self::Doc(doc) => todo!("Display::fmt(doc)"),
-        }
-    }
-}
+pub type InlineBytes = SmallVec<[u8; 16]>;
 
 #[derive(Clone, PartialEq)]
-pub struct ContentIter<'a> {
+pub struct BlockContent {
+    data: InlineBytes,
+}
+
+impl BlockContent {
+    pub fn from_bytes<D: Into<InlineBytes>>(data: D) -> crate::Result<Self> {
+        let data = data.into();
+        let _ = ContentType::try_from(data[0])?;
+        Ok(BlockContent { data })
+    }
+
+    pub fn new(content_type: ContentType) -> Self {
+        BlockContent {
+            data: smallvec![content_type as u8],
+        }
+    }
+
+    pub fn deleted() -> Self {
+        BlockContentRef::DELETED.to_owned()
+    }
+
+    pub fn node() -> Self {
+        BlockContentRef::NODE.to_owned()
+    }
+
+    pub fn atom<S>(value: &S) -> crate::Result<Self>
+    where
+        S: Serialize,
+    {
+        let mut content = BlockContent::new(ContentType::Atom);
+        lib0::to_writer(&mut content, value)?;
+        Ok(content)
+    }
+
+    pub fn json<S>(value: &S) -> crate::Result<Self>
+    where
+        S: Serialize,
+    {
+        let mut content = BlockContent::new(ContentType::Json);
+        serde_json::to_writer(&mut content, value)?;
+        Ok(content)
+    }
+
+    pub fn binary<A: AsRef<[u8]>>(value: A) -> Self {
+        let mut content = BlockContent::new(ContentType::Binary);
+        content.data.extend_from_slice(value.as_ref());
+        content
+    }
+
+    pub fn embed<A: AsRef<[u8]>>(value: A) -> Self {
+        let mut content = BlockContent::new(ContentType::Embed);
+        content.data.extend_from_slice(value.as_ref());
+        content
+    }
+
+    pub fn string<S: AsRef<str>>(value: S) -> Self {
+        let mut content = BlockContent::new(ContentType::String);
+        content.data.extend_from_slice(value.as_ref().as_bytes());
+        content
+    }
+
+    pub fn format<K, V>(key: K, value: V) -> Self
+    where
+        K: AsRef<str>,
+        V: AsRef<[u8]>,
+    {
+        let key = key.as_ref();
+        let value = value.as_ref();
+        let mut content = BlockContent::new(ContentType::Format);
+        content.write_var(key.len()).unwrap();
+        content.write_string(key).unwrap();
+        content.write_var(value.len()).unwrap();
+        content.write_all(value).unwrap();
+        content
+    }
+
+    pub fn as_ref(&self) -> BlockContentRef<'_> {
+        BlockContentRef { data: &self.data }
+    }
+
+    #[inline]
+    pub fn content_type(&self) -> ContentType {
+        ContentType::try_from(self.data[0]).unwrap()
+    }
+
+    #[inline]
+    pub fn body(&self) -> &[u8] {
+        &self.data[1..]
+    }
+
+    pub fn as_text(&self) -> Option<&str> {
+        if self.content_type() == ContentType::String {
+            Some(unsafe { std::str::from_utf8_unchecked(self.body()) })
+        } else {
+            None
+        }
+    }
+
+    pub fn as_format(&self) -> Option<ContentFormat<'_>> {
+        if self.content_type() == ContentType::Format {
+            ContentFormat::new(self.body()).ok()
+        } else {
+            None
+        }
+    }
+
+    pub fn as_json(&self) -> Option<ContentRef<'_, JsonEncoding>> {
+        if self.content_type() == ContentType::Json {
+            Some(ContentRef::new(self.body()))
+        } else {
+            None
+        }
+    }
+
+    pub fn as_atom(&self) -> Option<ContentRef<'_, AtomEncoding>> {
+        if self.content_type() == ContentType::Atom {
+            Some(ContentRef::new(self.body()))
+        } else {
+            None
+        }
+    }
+}
+
+impl Deref for BlockContent {
+    type Target = InlineBytes;
+
+    fn deref(&self) -> &Self::Target {
+        &self.data
+    }
+}
+
+impl DerefMut for BlockContent {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.data
+    }
+}
+
+impl std::io::Write for BlockContent {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.data.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    #[inline]
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    #[inline]
+    fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
+        self.data.extend_from_slice(buf);
+        Ok(())
+    }
+}
+
+impl ToMdbValue for BlockContent {
+    fn to_mdb_value(&self) -> MdbValue<'_> {
+        let data = self.data.as_ptr() as *const c_void;
+        let len = self.data.len();
+        unsafe { MdbValue::new(data, len) }
+    }
+}
+
+impl Debug for BlockContent {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+
+impl Display for BlockContent {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        Display::fmt(&self.as_ref(), f)
+    }
+}
+
+impl<'a> From<BlockContentRef<'a>> for BlockContent {
+    #[inline]
+    fn from(b: BlockContentRef<'a>) -> Self {
+        b.to_owned()
+    }
+}
+
+#[repr(transparent)]
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub struct BlockContentRef<'a> {
     data: &'a [u8],
 }
 
-impl<'a> ContentIter<'a> {
-    pub fn new(data: &'a [u8]) -> Self {
-        Self { data }
+impl BlockContentRef<'static> {
+    pub const DELETED: Self = BlockContentRef {
+        data: &[ContentType::Deleted as u8],
+    };
+    pub const NODE: Self = BlockContentRef {
+        data: &[ContentType::Node as u8],
+    };
+}
+
+impl<'a> BlockContentRef<'a> {
+    pub fn new(data: &'a [u8]) -> Result<Self, crate::Error> {
+        let _ = ContentType::try_from(data[0])?;
+        Ok(BlockContentRef { data })
     }
 
-    fn body(&self) -> &'a [u8] {
-        self.data
+    #[inline]
+    pub fn content_type(&self) -> ContentType {
+        ContentType::try_from(self.data[0]).unwrap()
     }
 
-    pub fn get(&self, mut index: usize) -> Option<&'a [u8]> {
-        let mut iter = self.clone();
-        while index > 0 {
-            iter.next()?;
-            index -= 1;
+    #[inline]
+    pub fn body(&self) -> &'a [u8] {
+        &self.data[1..]
+    }
+
+    pub fn to_owned(self) -> BlockContent {
+        BlockContent {
+            data: self.data.into(),
         }
-        iter.next()
     }
 
-    pub fn slice(&self, mut index: usize) -> Option<&'a [u8]> {
-        let mut iter = self.clone();
-        while index > 0 {
-            iter.next()?;
-            index -= 1;
+    pub fn as_text(&self) -> Option<&'a str> {
+        if self.content_type() == ContentType::String {
+            Some(unsafe { std::str::from_utf8_unchecked(self.body()) })
+        } else {
+            None
         }
-        Some(iter.data)
+    }
+
+    pub fn as_format(&self) -> Option<ContentFormat<'a>> {
+        if self.content_type() == ContentType::Format {
+            ContentFormat::new(self.body()).ok()
+        } else {
+            None
+        }
+    }
+
+    pub fn as_json(&self) -> Option<ContentRef<'a, JsonEncoding>> {
+        if self.content_type() == ContentType::Json {
+            Some(ContentRef::new(self.body()))
+        } else {
+            None
+        }
+    }
+
+    pub fn as_atom(&self) -> Option<ContentRef<'a, AtomEncoding>> {
+        if self.content_type() == ContentType::Atom {
+            Some(ContentRef::new(self.body()))
+        } else {
+            None
+        }
     }
 }
 
-impl<'a> Iterator for ContentIter<'a> {
-    type Item = &'a [u8];
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.data.is_empty() {
-            return None;
+impl<'a> Display for BlockContentRef<'a> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let body = self.body();
+        match self.content_type() {
+            ContentType::Deleted => write!(f, "deleted"),
+            ContentType::Json => write!(f, "{}", ContentRef::<'_, JsonEncoding>::new(body)),
+            ContentType::Atom => write!(f, "{}", ContentRef::<'_, AtomEncoding>::new(body)),
+            ContentType::Binary => write!(f, "binary({})", simple_base64::encode(body)),
+            ContentType::Embed => write!(f, "embed({})", simple_base64::encode(body)),
+            ContentType::String => {
+                write!(f, "'{}'", unsafe { std::str::from_utf8_unchecked(body) })
+            }
+            ContentType::Node => write!(f, "node"),
+            ContentType::Format => write!(f, "{}", ContentFormat::new(body).unwrap()),
+            ContentType::Doc => todo!("Display::fmt(doc)"),
         }
+    }
+}
 
-        let len =
-            u32::from_be_bytes([self.data[0], self.data[1], self.data[2], self.data[3]]) as usize;
-        let slice = &self.data[4..4 + len];
-        self.data = &self.data[4 + len..];
-
-        Some(slice)
+impl<'a> ToMdbValue for BlockContentRef<'a> {
+    fn to_mdb_value(&self) -> MdbValue<'_> {
+        let data = self.data.as_ptr() as *const c_void;
+        let len = self.data.len();
+        unsafe { MdbValue::new(data, len) }
     }
 }
 
@@ -359,28 +470,25 @@ impl Encoding for AtomEncoding {
 
 #[derive(Clone, PartialEq)]
 pub struct ContentRef<'a, E> {
-    inner: ContentIter<'a>,
+    inner: &'a [u8],
     _encoding: PhantomData<E>,
 }
 
 impl<'a, E> ContentRef<'a, E> {
-    pub fn new(slice: &'a [u8]) -> Self {
-        let inner = ContentIter::new(slice);
+    pub fn new(inner: &'a [u8]) -> Self {
         Self {
             inner,
             _encoding: PhantomData::default(),
         }
     }
+}
 
-    pub fn iter<D>(&self) -> Iter<'a, E, D>
+impl<'a, E: Encoding> ContentRef<'a, E> {
+    pub fn value<T>(&self) -> crate::Result<T>
     where
-        D: Deserialize<'a>,
+        T: DeserializeOwned,
     {
-        Iter {
-            inner: self.inner.clone(),
-            _deserializer: PhantomData::default(),
-            _target_type: PhantomData::default(),
-        }
+        E::deserialize(self.inner)
     }
 }
 
@@ -398,39 +506,7 @@ where
     E: Encoding,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let mut i = self.inner.clone().into_iter();
-        write!(f, "[")?;
-        if let Some(res) = i.next() {
-            E::fmt(res, f)?;
-        }
-        while let Some(res) = i.next() {
-            E::fmt(res, f)?;
-        }
-
-        write!(f, "]")
-    }
-}
-
-pub struct Iter<'a, E, D> {
-    inner: ContentIter<'a>,
-    _deserializer: PhantomData<E>,
-    _target_type: PhantomData<D>,
-}
-
-impl<'a, E, D> Iterator for Iter<'a, E, D>
-where
-    E: Encoding,
-    D: DeserializeOwned,
-{
-    type Item = crate::Result<D>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let slice = self.inner.next()?;
-
-        match E::deserialize(slice) {
-            Ok(data) => Some(Ok(data)),
-            Err(e) => Some(Err(e)),
-        }
+        E::fmt(self.inner, f)
     }
 }
 
@@ -484,67 +560,32 @@ impl<'a> Display for ContentFormat<'a> {
 }
 
 pub trait TryFromContent: Sized {
-    fn try_from_content(block: Block<'_>, content: BlockContent<'_>) -> crate::Result<Self>;
+    fn try_from_content(block: Block<'_>, content: BlockContentRef<'_>) -> crate::Result<Self>;
 }
 
 impl TryFromContent for lib0::Value {
-    fn try_from_content(block: Block<'_>, content: BlockContent<'_>) -> crate::Result<Self> {
-        match content {
-            BlockContent::Deleted => Err(crate::Error::NotFound),
-            BlockContent::Json(value) => {
-                let value = value
-                    .iter::<Self>()
-                    .next()
-                    .ok_or(crate::Error::NotFound)??;
-                Ok(value)
-            }
-            BlockContent::Atom(value) => {
-                let value = value
-                    .iter::<Self>()
-                    .next()
-                    .ok_or(crate::Error::NotFound)??;
-                Ok(value)
-            }
-            BlockContent::Binary(value) | BlockContent::Embed(value) => {
-                Ok(Value::ByteArray(Bytes::copy_from_slice(value)))
-            }
-            BlockContent::Text(value) => Ok(Value::String(value.into())),
-            _ => Err(crate::Error::InvalidMapping("Value")),
+    fn try_from_content(block: Block<'_>, content: BlockContentRef<'_>) -> crate::Result<Self> {
+        if let Some(atom) = content.as_atom() {
+            atom.value()
+        } else if let Some(json) = content.as_json() {
+            json.value()
+        } else {
+            Err(crate::Error::InvalidMapping("Value"))
         }
     }
 }
 
 impl TryFromContent for String {
-    fn try_from_content(block: Block<'_>, content: BlockContent<'_>) -> crate::Result<Self> {
-        match content {
-            BlockContent::Text(str) => Ok(str.into()),
-            BlockContent::Deleted => Err(crate::Error::NotFound),
-            BlockContent::Json(value) => {
-                let value = value
-                    .iter::<Self>()
-                    .next()
-                    .ok_or(crate::Error::NotFound)??;
-                Ok(value)
-            }
-            BlockContent::Atom(value) => {
-                let value = value
-                    .iter::<Self>()
-                    .next()
-                    .ok_or(crate::Error::NotFound)??;
-                Ok(value)
-            }
-            BlockContent::Binary(value) | BlockContent::Embed(value) => {
-                let str = std::str::from_utf8(value)
-                    .map_err(|e| crate::Error::InvalidMapping("String"))?;
-                Ok(str.to_string())
-            }
-            _ => Err(crate::Error::InvalidMapping("String")),
-        }
+    fn try_from_content(block: Block<'_>, content: BlockContentRef<'_>) -> crate::Result<Self> {
+        let str = content
+            .as_text()
+            .ok_or(crate::Error::InvalidMapping("String"))?;
+        Ok(str.into())
     }
 }
 
 impl<T> TryFromContent for Unmounted<T> {
-    fn try_from_content(block: Block<'_>, _content: BlockContent<'_>) -> crate::Result<Self> {
+    fn try_from_content(block: Block<'_>, _content: BlockContentRef<'_>) -> crate::Result<Self> {
         if block.is_deleted() {
             return Err(crate::Error::NotFound);
         } else if block.content_type() == ContentType::Node {
@@ -552,29 +593,5 @@ impl<T> TryFromContent for Unmounted<T> {
         } else {
             Err(crate::Error::InvalidMapping("Unmounted"))
         }
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use crate::content::{ContentRef, JsonEncoding};
-    use bytes::{BufMut, BytesMut};
-    use serde_json::json;
-
-    #[test]
-    fn iter() {
-        let alice = json!({"name": "Alice"}).to_string();
-        let bob = json!({"name": "Bob"}).to_string();
-        let mut data = BytesMut::new();
-        data.put_u32_le(alice.len() as u32);
-        data.put_slice(alice.as_bytes());
-        data.put_u32_le(bob.len() as u32);
-        data.put_slice(bob.as_bytes());
-
-        let content: ContentRef<'_, JsonEncoding> = ContentRef::new(&data);
-        let mut iter = content.iter::<serde_json::Value>();
-        assert_eq!(iter.next().unwrap().unwrap(), json!({"name": "Alice"}));
-        assert_eq!(iter.next().unwrap().unwrap(), json!({"name": "Bob"}));
-        assert!(iter.next().is_none());
     }
 }

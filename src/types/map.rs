@@ -1,5 +1,5 @@
 use crate::block::{Block, BlockMut, InsertBlockData, ID};
-use crate::content::{BlockContent, ContentType, TryFromContent};
+use crate::content::{BlockContentRef, ContentType, TryFromContent};
 use crate::integrate::IntegrationContext;
 use crate::node::{Node, NodeID, NodeType};
 use crate::prelim::Prelim;
@@ -285,11 +285,11 @@ where
             self.move_next()
         } else {
             let content = match block.content_type() {
-                ContentType::Node => BlockContent::Node,
-                ContentType::Deleted => BlockContent::Deleted,
+                ContentType::Node => BlockContentRef::NODE,
+                ContentType::Deleted => BlockContentRef::DELETED,
                 content_type => {
                     cursor.to_key(&BlockContentKey::new(*block.id()))?;
-                    BlockContent::new(content_type, cursor.get_value()?)?
+                    BlockContentRef::new(cursor.get_value()?)?
                 }
             };
             let value = T::try_from_content(block, content)?;
@@ -389,7 +389,9 @@ impl Prelim for MapPrelim {
     type Return = Unmounted<Map>;
 
     fn prepare(&self, insert: &mut InsertBlockData) -> crate::Result<()> {
-        insert.init_content(BlockContent::Node);
+        let block = insert.as_block_mut();
+        block.set_content_type(ContentType::Node);
+        block.set_node_type(NodeType::Map);
         Ok(())
     }
 
