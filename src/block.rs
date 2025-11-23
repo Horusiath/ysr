@@ -1,5 +1,5 @@
 use crate::block_cursor::BlockCursor;
-use crate::content::{BlockContent, ContentType};
+use crate::content::{BlockContent, BlockContentRef, ContentType};
 use crate::integrate::IntegrationContext;
 use crate::node::{Node, NodeID, NodeType};
 use crate::store::lmdb::store::SplitResult;
@@ -16,6 +16,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use smallvec::{smallvec, SmallVec};
 use std::fmt::{Debug, Display, Formatter};
 use std::io::Write;
+use std::mem::offset_of;
 use std::ops::{Deref, DerefMut};
 use zerocopy::{CastError, FromBytes, Immutable, IntoBytes, KnownLayout, TryFromBytes};
 
@@ -49,6 +50,16 @@ impl ID {
 
     pub fn parse(bytes: &[u8]) -> crate::Result<&Self> {
         Self::ref_from_bytes(bytes).map_err(|_| Error::InvalidMapping("ID"))
+    }
+
+    #[inline]
+    pub fn into_bytes(self) -> [u8; Self::SIZE] {
+        unsafe { std::mem::transmute(self) }
+    }
+
+    #[inline]
+    pub fn from_bytes(bytes: [u8; Self::SIZE]) -> Self {
+        unsafe { std::mem::transmute(bytes) }
     }
 }
 
@@ -116,11 +127,15 @@ pub struct BlockHeader {
     /// Flags that define the block's state, including presence/absence of other fields like
     /// neighbor blocks or origins.
     flags: BlockFlags,
-    /// Flags that define the block's content type.
-    content_type: ContentType,
     /// Used only when [ContentType::Node] is set. Defines the type of the node.
     node_type: NodeType,
-    _padding: [u8; 1], // not used atm. we could use it to i.e. navigate XML element tags
+    /// If inline content is used, this is its length in bytes.
+    inline_content_len: u8,
+    /// Flags that define the block's content type.
+    content_type: ContentType,
+    /// If the content is small, it doesn't exist in a separate space.
+    /// Instead, we put it directly here.
+    inline_content: [u8; 8],
     /// NodeID of the parent node collection that contains this block.
     parent: NodeID,
     /// XX Hash of the key if provided, 0 otherwise.
@@ -133,8 +148,6 @@ pub struct BlockHeader {
     origin_left: ID,
     /// ID of the right neighbor block at the point of insertion (if such existed).
     origin_right: ID,
-    /// Used only when [ContentType::Node] is set for list-like block. Defines the first block.
-    start: ID,
 }
 impl BlockHeader {
     pub const SIZE: usize = size_of::<BlockHeader>();
@@ -145,14 +158,14 @@ impl BlockHeader {
             flags: BlockFlags::default(),
             content_type: ContentType::Deleted,
             node_type: NodeType::default(),
-            _padding: [0; 1],
+            inline_content_len: 0,
             parent: NodeID::default(),
             key_hash: U32::new(0),
             left: ID::default(),
             right: ID::default(),
             origin_left: ID::default(),
             origin_right: ID::default(),
-            start: ID::default(),
+            inline_content: [0; 8],
         }
     }
 
@@ -188,14 +201,14 @@ impl BlockHeader {
             flags,
             content_type: ContentType::Deleted,
             node_type: NodeType::Unknown,
-            _padding: [0; 1],
+            inline_content_len: 0,
             parent,
             key_hash,
             left: left.copied().unwrap_or_default(),
             right: right.copied().unwrap_or_default(),
             origin_left: origin_left.copied().unwrap_or_default(),
             origin_right: origin_right.copied().unwrap_or_default(),
-            start: ID::new(ClientID::default(), Clock::new(0)),
+            inline_content: [0; 8],
         }
     }
 
@@ -302,7 +315,8 @@ impl BlockHeader {
 
     pub fn start(&self) -> Option<&ID> {
         if self.flags.contains(BlockFlags::INLINE_CONTENT) {
-            Some(&self.start)
+            let id = ID::ref_from_bytes(&self.inline_content).unwrap();
+            Some(id)
         } else {
             None
         }
@@ -312,7 +326,7 @@ impl BlockHeader {
         match id {
             Some(id) => {
                 self.flags |= BlockFlags::INLINE_CONTENT;
-                self.start = *id;
+                self.inline_content = id.into_bytes();
             }
             None => {
                 self.flags -= BlockFlags::INLINE_CONTENT;
@@ -374,6 +388,33 @@ impl BlockHeader {
 
     pub fn is_countable(&self) -> bool {
         self.flags.contains(BlockFlags::COUNTABLE)
+    }
+
+    pub fn set_inline_content(&mut self, content: BlockContentRef) -> bool {
+        if content.can_inline() {
+            let body = content.body();
+            let len = body.len();
+            self.inline_content_len = len as u8;
+            self.content_type = content.content_type();
+            self.inline_content[..len].copy_from_slice(body);
+            self.flags |= BlockFlags::INLINE_CONTENT;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn try_content(&self) -> Option<BlockContentRef<'_>> {
+        if self.flags.contains(BlockFlags::INLINE_CONTENT) {
+            let start = offset_of!(BlockHeader, content_type);
+            let bytes = self.as_bytes();
+            let len = self.inline_content_len as usize;
+            // field content_type (1 byte) is immediately followed by inline_content (8 bytes)
+            let content = BlockContentRef::new(&bytes[start..(start + len + 1)]).unwrap();
+            Some(content)
+        } else {
+            None
+        }
     }
 }
 
@@ -487,14 +528,14 @@ impl BlockMut {
                 flags,
                 content_type: self.content_type,
                 node_type: Default::default(),
-                _padding: [0; 1],
+                inline_content_len: 0,
                 parent: self.parent,
                 key_hash: self.key_hash,
                 left,
                 right,
                 origin_left: left,
                 origin_right: self.origin_right,
-                start: Default::default(), // nodes are not splittable
+                inline_content: Default::default(), // nodes are not splittable
             };
             Some(Self::new(self.right, right))
         }
@@ -625,14 +666,14 @@ impl InsertBlockData {
                     flags: BlockFlags::COUNTABLE,
                     content_type: ContentType::Node,
                     node_type: kind,
-                    _padding: [0; 1],
+                    inline_content_len: 0,
                     parent: id,
                     key_hash: Default::default(),
                     left: Default::default(),
                     right: Default::default(),
                     origin_left: Default::default(),
                     origin_right: Default::default(),
-                    start: Default::default(),
+                    inline_content: Default::default(),
                 },
             ),
             parent: None,
@@ -1015,8 +1056,8 @@ impl Display for BlockHeader {
         if self.flags.contains(BlockFlags::ORIGIN_RIGHT) {
             write!(f, ", origin-r: {}", self.origin_right)?;
         }
-        if self.flags.contains(BlockFlags::INLINE_CONTENT) {
-            write!(f, ", start: {}", self.start)?;
+        if let Some(content) = self.try_content() {
+            write!(f, ", start: {}", content)?;
         }
         write!(f, " - {}", self.content_type)?;
 
@@ -1027,10 +1068,11 @@ impl Display for BlockHeader {
 #[cfg(test)]
 mod test {
     use crate::block::{InsertBlockData, ID};
-    use crate::content::{BlockContent, ContentType};
-    use crate::node::Node;
-    use crate::{lib0, ClientID, Clock};
+    use crate::content::{BlockContent, BlockContentRef, ContentType};
+    use crate::node::{Node, NodeID};
+    use crate::{lib0, BlockHeader, BlockMut, ClientID, Clock};
     use serde::{Deserialize, Serialize};
+    use serde_json::json;
     use smallvec::SmallVec;
     use zerocopy::IntoBytes;
 
@@ -1310,6 +1352,30 @@ mod test {
         assert!(b.merge(right));
 
         assert_eq!(b, expected);
+    }
+
+    #[test]
+    fn inline_content() {
+        // content exactly 8 bytes long
+        let mut block = BlockHeader::empty();
+        let expected = BlockContent::node(&NodeID::new(1.into(), 2.into()));
+        assert!(block.set_inline_content(expected.as_ref()));
+        let actual = block.try_content().unwrap();
+        assert_eq!(actual, expected.as_ref());
+
+        // content under 8 bytes
+        let mut block = BlockHeader::empty();
+        let expected = BlockContent::string("string");
+        assert!(block.set_inline_content(expected.as_ref()));
+        let actual = block.try_content().unwrap();
+        assert_eq!(actual, expected.as_ref());
+
+        // content over 8 bytes
+        let mut block = BlockHeader::empty();
+        let expected = BlockContent::json(&json!({"users":[1,2,3,4,5,6]})).unwrap();
+        assert!(!block.set_inline_content(expected.as_ref()));
+        let actual = block.try_content();
+        assert!(actual.is_none());
     }
 
     #[derive(Debug, Eq, PartialEq, Serialize, Deserialize)]

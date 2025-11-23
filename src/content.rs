@@ -4,6 +4,7 @@ use crate::block::{
     CONTENT_TYPE_STRING,
 };
 use crate::lib0::Value;
+use crate::node::NodeID;
 use crate::write::WriteExt;
 use crate::{lib0, Unmounted};
 use bytes::Bytes;
@@ -141,8 +142,10 @@ impl BlockContent {
         BlockContentRef::DELETED.to_owned()
     }
 
-    pub fn node() -> Self {
-        BlockContentRef::NODE.to_owned()
+    pub fn node(node_id: &NodeID) -> Self {
+        let mut content = Self::new(ContentType::Node);
+        content.data.extend_from_slice(node_id.as_bytes());
+        content
     }
 
     pub fn atom<S>(value: &S) -> crate::Result<Self>
@@ -369,6 +372,11 @@ impl<'a> BlockContentRef<'a> {
         } else {
             None
         }
+    }
+
+    #[inline]
+    pub fn can_inline(&self) -> bool {
+        self.data.len() <= 9
     }
 }
 

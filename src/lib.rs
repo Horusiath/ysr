@@ -23,7 +23,7 @@ mod prelim;
 mod test_util;
 mod update;
 
-use crate::block::ID;
+pub use crate::block::{Block, BlockHeader, BlockMut, ID};
 pub use input::In;
 use lmdb_rs_m::MdbError;
 pub use multi_doc::MultiDoc;
