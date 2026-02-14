@@ -1,11 +1,13 @@
 use crate::block::InsertBlockData;
 use crate::content::{BlockContent, ContentType};
-use crate::{lib0, Transaction};
+use crate::{lib0, Clock, Transaction};
 use serde::Serialize;
 use smallvec::smallvec;
 
 pub trait Prelim {
     type Return;
+
+    fn clock_len(&self) -> Clock;
 
     fn prepare(&self, insert: &mut InsertBlockData) -> crate::Result<()>;
 
@@ -22,10 +24,14 @@ where
 {
     type Return = ();
 
+    #[inline]
+    fn clock_len(&self) -> Clock {
+        Clock::new(1)
+    }
+
     fn prepare(&self, insert: &mut InsertBlockData) -> crate::Result<()> {
-        let mut content = BlockContent::new(ContentType::Atom);
-        lib0::to_writer(&mut content, self)?;
-        insert.content = smallvec![content];
+        insert.block.set_content_type(ContentType::Atom);
+        insert.content = BlockContent::atom([self])?;
         Ok(())
     }
 

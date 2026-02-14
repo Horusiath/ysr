@@ -1,7 +1,7 @@
 use crate::block::InsertBlockData;
 use crate::lib0::Value;
 use crate::prelim::Prelim;
-use crate::{ListPrelim, MapPrelim, Out, Transaction};
+use crate::{Clock, ListPrelim, MapPrelim, Out, Transaction};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum In {
@@ -33,6 +33,11 @@ where
 
 impl Prelim for In {
     type Return = Out;
+
+    #[inline]
+    fn clock_len(&self) -> Clock {
+        Clock::new(1)
+    }
 
     fn prepare(&self, insert: &mut InsertBlockData) -> crate::Result<()> {
         match self {

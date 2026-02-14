@@ -2,7 +2,7 @@ use crate::block::{Block, BlockMut, InsertBlockData, ID};
 use crate::block_reader::Carrier;
 use crate::content::{BlockContentRef, ContentType};
 use crate::id_set::IDSet;
-use crate::node::{Node, NodeID, NodeType};
+use crate::node::{Named, Node, NodeID, NodeType};
 use crate::store::lmdb::inspect::DocInspector;
 use crate::transaction::TransactionState;
 use crate::{ClientID, Clock, Error, Optional, StateVector, U32};
@@ -46,7 +46,7 @@ pub trait BlockStore<'tx> {
         match self.fetch_block(node.id(), true) {
             Ok(block) => Ok(block.into()),
             Err(crate::Error::BlockNotFound(_)) => {
-                if let Node::Root(name) = &node {
+                if let Node::Root(Named::Name(name)) = &node {
                     // since root nodes live forever, we can create it if it does not exist
                     let data = InsertBlockData::new_node(&node, node_type);
                     self.insert_block(&data)?;
@@ -93,8 +93,8 @@ impl<'tx> BlockStore<'tx> for Database<'tx> {
         // insert block content if any
         if !insert.content.is_empty() {
             let mut id = *insert.id();
-            for content in insert.content.iter() {
-                self.set(&BlockContentKey::new(id), content)?;
+            for content in insert.content.items() {
+                self.set(&BlockContentKey::new(id), &content.as_bytes())?;
                 id.clock += 1;
             }
         }

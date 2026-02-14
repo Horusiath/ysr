@@ -3,25 +3,23 @@ use crate::block::{
     CONTENT_TYPE_EMBED, CONTENT_TYPE_FORMAT, CONTENT_TYPE_JSON, CONTENT_TYPE_NODE,
     CONTENT_TYPE_STRING,
 };
-use crate::lib0::Value;
 use crate::node::NodeID;
 use crate::write::WriteExt;
 use crate::{lib0, Unmounted};
-use bytes::Bytes;
 use lmdb_rs_m::{MdbValue, ToMdbValue};
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use smallvec::{smallvec, ExtendFromSlice, SmallVec};
 use std::ffi::c_void;
 use std::fmt::{Debug, Display, Formatter};
 use std::io::{Cursor, Write};
 use std::marker::PhantomData;
-use std::ops::{Deref, DerefMut};
+use std::mem::offset_of;
 use zerocopy::{Immutable, IntoBytes, KnownLayout, TryFromBytes};
 
 #[repr(u8)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq, TryFromBytes, KnownLayout, Immutable, IntoBytes)]
-pub(crate) enum ContentType {
+pub enum ContentType {
     Deleted = CONTENT_TYPE_DELETED,
     Json = CONTENT_TYPE_JSON,
     Binary = CONTENT_TYPE_BINARY,
@@ -118,24 +116,93 @@ impl TryFrom<u8> for ContentType {
     }
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, PartialEq, Eq, TryFromBytes, KnownLayout, Immutable, IntoBytes)]
+pub struct InlineContent {
+    pub len: u8,
+    pub content_type: ContentType,
+    pub data: [u8; 8],
+}
+
+impl InlineContent {
+    pub fn new(content_type: ContentType) -> Self {
+        InlineContent {
+            len: 0,
+            content_type,
+            data: [0; 8],
+        }
+    }
+
+    #[inline]
+    pub fn data(&self) -> &[u8] {
+        &self.data[..self.len as usize]
+    }
+
+    pub fn copy_from(&mut self, content: BlockContentRef) -> bool {
+        if content.data.len() > 9 {
+            return false;
+        }
+        let data = &content.data[1..];
+        self.len = data.len() as u8;
+        self.data[0..data.len()].copy_from_slice(data);
+        let content_type = ContentType::try_from(content.data[0]).unwrap();
+        self.content_type = content_type;
+        true
+    }
+
+    pub fn set_data(&mut self, data: &[u8]) -> Result<(), crate::Error> {
+        if data.len() > 8 {
+            return Err(crate::Error::ValueTooLarge);
+        }
+        self.data[..data.len()].copy_from_slice(data);
+        Ok(())
+    }
+
+    pub fn as_ref(&self) -> BlockContentRef<'_> {
+        let data = self.data();
+        BlockContentRef::new(self.content_type, data)
+    }
+}
 pub type InlineBytes = SmallVec<[u8; 16]>;
 
 #[derive(Clone, PartialEq)]
 pub struct BlockContent {
-    data: InlineBytes,
+    /// A list of buffers to be written as data content.
+    /// - For most cases it's a single buffer with first byte marking [ContentType] and remaining
+    ///   bytes having a content bytes.
+    /// - In some cases a single block can contain multiple elements i.e. in
+    ///   [ContentType::Atom]/[ContentType::Json] cases. In such case this field may contain more
+    ///   than one element. Each element starting with [ContentType] followed by content data.
+    /// - In case when content is empty it's just a single byte marking the [ContentType].
+    data: SmallVec<[InlineBytes; 1]>,
 }
 
 impl BlockContent {
-    pub fn from_bytes<D: Into<InlineBytes>>(data: D) -> crate::Result<Self> {
-        let data = data.into();
-        let _ = ContentType::try_from(data[0])?;
-        Ok(BlockContent { data })
+    pub fn multipart(data: SmallVec<[InlineBytes; 1]>) -> Self {
+        Self { data }
     }
 
-    pub fn new(content_type: ContentType) -> Self {
-        BlockContent {
-            data: smallvec![content_type as u8],
+    pub fn new(content_type: ContentType, data: &[u8]) -> Self {
+        let mut buf = SmallVec::with_capacity(data.len() + 1);
+        buf.push(content_type as u8);
+        buf.extend_from_slice(data);
+        Self {
+            data: smallvec![buf],
         }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    #[inline]
+    pub fn items(&self) -> &[InlineBytes] {
+        &self.data
     }
 
     pub fn deleted() -> Self {
@@ -143,45 +210,49 @@ impl BlockContent {
     }
 
     pub fn node(node_id: &NodeID) -> Self {
-        let mut content = Self::new(ContentType::Node);
-        content.data.extend_from_slice(node_id.as_bytes());
-        content
-    }
-
-    pub fn atom<S>(value: &S) -> crate::Result<Self>
-    where
-        S: Serialize,
-    {
-        let mut content = BlockContent::new(ContentType::Atom);
-        lib0::to_writer(&mut content, value)?;
-        Ok(content)
-    }
-
-    pub fn json<S>(value: &S) -> crate::Result<Self>
-    where
-        S: Serialize,
-    {
-        let mut content = BlockContent::new(ContentType::Json);
-        serde_json::to_writer(&mut content, value)?;
-        Ok(content)
+        Self::new(ContentType::Node, node_id.as_bytes())
     }
 
     pub fn binary<A: AsRef<[u8]>>(value: A) -> Self {
-        let mut content = BlockContent::new(ContentType::Binary);
-        content.data.extend_from_slice(value.as_ref());
-        content
+        Self::new(ContentType::Binary, value.as_ref())
     }
 
     pub fn embed<A: AsRef<[u8]>>(value: A) -> Self {
-        let mut content = BlockContent::new(ContentType::Embed);
-        content.data.extend_from_slice(value.as_ref());
-        content
+        Self::new(ContentType::Embed, value.as_ref())
     }
 
     pub fn string<S: AsRef<str>>(value: S) -> Self {
-        let mut content = BlockContent::new(ContentType::String);
-        content.data.extend_from_slice(value.as_ref().as_bytes());
-        content
+        Self::new(ContentType::String, value.as_ref().as_bytes())
+    }
+
+    pub fn atom<'a, I, S>(atoms: I) -> crate::Result<Self>
+    where
+        I: IntoIterator<Item = &'a S>,
+        S: Serialize + 'a,
+    {
+        let mut data = SmallVec::new();
+        for value in atoms {
+            let mut buf = smallvec![ContentType::Atom as u8];
+            lib0::to_writer(&mut buf, value)?;
+            data.push(buf);
+        }
+
+        Ok(Self { data })
+    }
+
+    pub fn json<'a, I, S>(atoms: I) -> crate::Result<Self>
+    where
+        I: IntoIterator<Item = &'a S>,
+        S: Serialize + 'a,
+    {
+        let mut data = SmallVec::new();
+        for value in atoms {
+            let mut buf = smallvec![ContentType::Atom as u8];
+            serde_json::to_writer(&mut buf, value)?;
+            data.push(buf);
+        }
+
+        Ok(Self { data })
     }
 
     pub fn format<K, V>(key: K, value: V) -> Self
@@ -191,31 +262,44 @@ impl BlockContent {
     {
         let key = key.as_ref();
         let value = value.as_ref();
-        let mut content = BlockContent::new(ContentType::Format);
+        let mut content = SmallVec::with_capacity(key.len() + value.len() + 3);
         content.write_var(key.len()).unwrap();
         content.write_string(key).unwrap();
         content.write_var(value.len()).unwrap();
         content.write_all(value).unwrap();
-        content
+        Self {
+            data: smallvec![content],
+        }
     }
 
     pub fn as_ref(&self) -> BlockContentRef<'_> {
-        BlockContentRef { data: &self.data }
+        let head = &self.data[0];
+        let content_type = ContentType::try_from(head[0]).unwrap();
+        BlockContentRef {
+            content_type,
+            data: &head[1..],
+        }
     }
 
     #[inline]
     pub fn content_type(&self) -> ContentType {
-        ContentType::try_from(self.data[0]).unwrap()
+        let head = &self.data[0];
+        ContentType::try_from(head[0]).unwrap()
     }
 
     #[inline]
-    pub fn body(&self) -> &[u8] {
-        &self.data[1..]
+    pub fn body(&self) -> Option<&[u8]> {
+        if self.data.len() == 1 {
+            Some(&self.data[0][1..])
+        } else {
+            None
+        }
     }
 
     pub fn as_text(&self) -> Option<&str> {
         if self.content_type() == ContentType::String {
-            Some(unsafe { std::str::from_utf8_unchecked(self.body()) })
+            let body = self.body()?;
+            Some(unsafe { std::str::from_utf8_unchecked(body) })
         } else {
             None
         }
@@ -223,66 +307,80 @@ impl BlockContent {
 
     pub fn as_format(&self) -> Option<ContentFormat<'_>> {
         if self.content_type() == ContentType::Format {
-            ContentFormat::new(self.body()).ok()
+            let body = self.body()?;
+            ContentFormat::new(body).ok()
         } else {
             None
         }
     }
 
-    pub fn as_json(&self) -> Option<ContentRef<'_, JsonEncoding>> {
+    pub fn as_json(&self) -> ContentIter<'_, JsonEncoding> {
         if self.content_type() == ContentType::Json {
-            Some(ContentRef::new(self.body()))
+            ContentIter::new(&self.data)
         } else {
-            None
+            ContentIter::new(&[])
         }
     }
 
-    pub fn as_atom(&self) -> Option<ContentRef<'_, AtomEncoding>> {
-        if self.content_type() == ContentType::Atom {
-            Some(ContentRef::new(self.body()))
+    pub fn as_atom(&self) -> ContentIter<'_, AtomEncoding> {
+        if self.content_type() == ContentType::Json {
+            ContentIter::new(&self.data)
         } else {
-            None
+            ContentIter::new(&[])
         }
     }
-}
 
-impl Deref for BlockContent {
-    type Target = InlineBytes;
-
-    fn deref(&self) -> &Self::Target {
-        &self.data
+    pub fn merge(&mut self, other: BlockContent) -> bool {
+        if self.content_type() != other.content_type() {
+            return false;
+        }
+        match other.content_type() {
+            ContentType::Atom | ContentType::Json => {
+                self.data.extend(other.data);
+            }
+            ContentType::String => self.data[0].extend_from_slice(&other.data[0][1..]),
+            _ => { /* not used */ }
+        }
+        true
     }
-}
 
-impl DerefMut for BlockContent {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.data
-    }
-}
-
-impl std::io::Write for BlockContent {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.data.extend_from_slice(buf);
-        Ok(buf.len())
+    pub fn split(&mut self, mut offset: usize) -> Option<BlockContent> {
+        match self.content_type() {
+            ContentType::String => {
+                let content = &self.data[0][1..];
+                let str = unsafe { std::str::from_utf8_unchecked(content) };
+                let mut byte_offset = 0;
+                for c in str.chars() {
+                    if offset == 0 {
+                        break;
+                    }
+                    offset -= 1;
+                    let utf8_len = c.len_utf8();
+                    byte_offset += utf8_len;
+                }
+                let new_content = BlockContent::string(&str[byte_offset..]);
+                self.data[0].drain((1 + byte_offset)..);
+                Some(new_content)
+            }
+            ContentType::Atom | ContentType::Json => {
+                let data = self.data.drain(offset..).collect();
+                Some(BlockContent { data })
+            }
+            _ => None,
+        }
     }
 
     #[inline]
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-
-    #[inline]
-    fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
-        self.data.extend_from_slice(buf);
-        Ok(())
+    pub fn head_mut(&mut self) -> &mut InlineBytes {
+        &mut self.data[0]
     }
 }
 
-impl ToMdbValue for BlockContent {
-    fn to_mdb_value(&self) -> MdbValue<'_> {
-        let data = self.data.as_ptr() as *const c_void;
-        let len = self.data.len();
-        unsafe { MdbValue::new(data, len) }
+impl Default for BlockContent {
+    fn default() -> Self {
+        Self {
+            data: SmallVec::new(),
+        }
     }
 }
 
@@ -305,40 +403,94 @@ impl<'a> From<BlockContentRef<'a>> for BlockContent {
     }
 }
 
-#[repr(transparent)]
+pub struct BlockWriter {
+    buf: InlineBytes,
+}
+
+impl BlockWriter {
+    pub fn new(content_type: ContentType) -> Self {
+        BlockWriter {
+            buf: smallvec![content_type as u8],
+        }
+    }
+
+    #[inline]
+    pub fn into_inner(self) -> InlineBytes {
+        self.buf
+    }
+}
+
+impl std::io::Write for BlockWriter {
+    #[inline]
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.buf.write(buf)
+    }
+
+    #[inline]
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.buf.flush()
+    }
+
+    #[inline]
+    fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
+        self.buf.write_all(buf)
+    }
+}
+
+impl From<BlockWriter> for BlockContent {
+    fn from(value: BlockWriter) -> Self {
+        BlockContent {
+            data: smallvec![value.buf],
+        }
+    }
+}
+
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct BlockContentRef<'a> {
+    content_type: ContentType,
     data: &'a [u8],
 }
 
 impl BlockContentRef<'static> {
     pub const DELETED: Self = BlockContentRef {
-        data: &[ContentType::Deleted as u8],
+        content_type: ContentType::Deleted,
+        data: &[],
     };
     pub const NODE: Self = BlockContentRef {
-        data: &[ContentType::Node as u8],
+        content_type: ContentType::Node,
+        data: &[],
     };
 }
 
 impl<'a> BlockContentRef<'a> {
-    pub fn new(data: &'a [u8]) -> Result<Self, crate::Error> {
-        let _ = ContentType::try_from(data[0])?;
-        Ok(BlockContentRef { data })
+    pub fn from_slice(data: &'a [u8]) -> crate::Result<Self> {
+        let content_type = ContentType::try_from(data[0])?;
+        Ok(BlockContentRef {
+            content_type,
+            data: &data[1..],
+        })
+    }
+
+    pub fn new(content_type: ContentType, data: &'a [u8]) -> Self {
+        BlockContentRef { content_type, data }
     }
 
     #[inline]
     pub fn content_type(&self) -> ContentType {
-        ContentType::try_from(self.data[0]).unwrap()
+        self.content_type
     }
 
     #[inline]
     pub fn body(&self) -> &'a [u8] {
-        &self.data[1..]
+        &self.data
     }
 
     pub fn to_owned(self) -> BlockContent {
+        let mut buf = SmallVec::with_capacity(1 + self.data.len());
+        buf.push(self.content_type as u8);
+        buf.extend_from_slice(self.data);
         BlockContent {
-            data: self.data.into(),
+            data: smallvec![buf],
         }
     }
 
@@ -376,7 +528,16 @@ impl<'a> BlockContentRef<'a> {
 
     #[inline]
     pub fn can_inline(&self) -> bool {
-        self.data.len() <= 9
+        self.data.len() <= 8
+    }
+
+    pub fn split(&self, offset: usize) -> (BlockContentRef<'a>, BlockContentRef<'a>) {
+        let content_type = self.content_type();
+        let (left, right) = self.data.split_at(offset);
+        (
+            BlockContentRef::new(content_type, left),
+            BlockContentRef::new(content_type, right),
+        )
     }
 }
 
@@ -404,6 +565,34 @@ impl<'a> ToMdbValue for BlockContentRef<'a> {
         let data = self.data.as_ptr() as *const c_void;
         let len = self.data.len();
         unsafe { MdbValue::new(data, len) }
+    }
+}
+
+pub struct ContentIter<'a, E> {
+    data: &'a [InlineBytes],
+    encoding: PhantomData<E>,
+}
+
+impl<'a, E> ContentIter<'a, E> {
+    pub fn new(data: &'a [InlineBytes]) -> Self {
+        Self {
+            data,
+            encoding: PhantomData,
+        }
+    }
+}
+
+impl<'a, E> Iterator for ContentIter<'a, E> {
+    type Item = ContentRef<'a, E>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.data.is_empty() {
+            None
+        } else {
+            let elem = ContentRef::new(&self.data[0][1..]);
+            self.data = &self.data[1..];
+            Some(elem)
+        }
     }
 }
 
@@ -601,5 +790,20 @@ impl<T> TryFromContent for Unmounted<T> {
         } else {
             Err(crate::Error::InvalidMapping("Unmounted"))
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::content::{BlockContent, ContentType, InlineContent};
+
+    #[test]
+    fn inline_content_to_block_content() {
+        let content = BlockContent::string("hello");
+        let mut inline_content = InlineContent::new(ContentType::Deleted);
+        assert!(inline_content.copy_from(content.as_ref()));
+        let content2 = inline_content.as_ref();
+
+        assert_eq!(content.as_ref(), content2);
     }
 }

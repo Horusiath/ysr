@@ -9,18 +9,23 @@ pub type NodeID = ID;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Node<'a> {
-    Root(Cow<'a, str>),
+    Root(Named<'a>),
     Nested(ID),
 }
 
 impl<'a> Node<'a> {
     #[inline]
-    pub fn root<S>(name: S) -> Self
+    pub fn root_named<S>(name: S) -> Self
     where
         S: Into<Cow<'a, str>>,
     {
-        Node::Root(name.into())
+        Node::Root(Named::Name(name.into()))
     }
+    #[inline]
+    pub fn root_hashed(node_id: NodeID) -> Self {
+        Node::Root(Named::Hash(node_id))
+    }
+
     #[inline]
     pub const fn nested(id: ID) -> Self {
         Node::Nested(id)
@@ -37,24 +42,56 @@ impl<'a> Node<'a> {
     }
 
     pub fn as_str(&self) -> Option<&str> {
-        if let Node::Root(name) = self {
-            Some(name)
-        } else {
-            None
+        match self {
+            Node::Root(Named::Name(name)) => Some(name),
+            _ => None,
         }
     }
 
     pub fn id(&self) -> NodeID {
         match self {
-            Node::Root(name) => NodeID::from_root(name.as_bytes()),
+            Node::Root(name) => name.node_id(),
             Node::Nested(id) => *id,
         }
     }
 
     pub fn to_owned(self) -> Node<'static> {
         match self {
-            Node::Root(name) => Node::Root(Cow::Owned(name.into_owned())),
+            Node::Root(name) => Node::Root(name.into_owned()),
             Node::Nested(id) => Node::Nested(id),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum Named<'a> {
+    Name(Cow<'a, str>),
+    Hash(NodeID),
+}
+
+impl Named<'static> {
+    pub fn new_hashed(name: &str) -> Self {
+        let hash = NodeID::from_root(name.as_bytes());
+        Self::Hash(hash)
+    }
+}
+
+impl<'a> Named<'a> {
+    pub fn into_owned(self) -> Named<'static> {
+        match self {
+            Named::Name(cow) => Named::Name(Cow::Owned(cow.into_owned())),
+            Named::Hash(hash) => Named::Hash(hash),
+        }
+    }
+
+    pub fn as_hashed(&self) -> Named<'static> {
+        Named::Hash(self.node_id())
+    }
+
+    pub fn node_id(&self) -> NodeID {
+        match self {
+            Named::Hash(id) => *id,
+            Named::Name(name) => NodeID::from_root(name.as_bytes()),
         }
     }
 }

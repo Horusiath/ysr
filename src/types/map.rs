@@ -388,6 +388,11 @@ pub struct MapPrelim(BTreeMap<String, In>);
 impl Prelim for MapPrelim {
     type Return = Unmounted<Map>;
 
+    #[inline]
+    fn clock_len(&self) -> Clock {
+        Clock::new(1) // the map object itself is 1 element
+    }
+
     fn prepare(&self, insert: &mut InsertBlockData) -> crate::Result<()> {
         let block = insert.as_block_mut();
         block.set_content_type(ContentType::Node);

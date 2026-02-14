@@ -2,7 +2,7 @@ use crate::block::{BlockMut, InsertBlockData, ID};
 use crate::content::{BlockContent, BlockContentRef, ContentType};
 use crate::integrate::IntegrationContext;
 use crate::lib0::Value;
-use crate::node::NodeType;
+use crate::node::{Named, Node, NodeType};
 use crate::prelim::Prelim;
 use crate::state_vector::Snapshot;
 use crate::store::lmdb::BlockStore;
@@ -112,7 +112,13 @@ impl<'tx, 'db> Display for TextRef<&'tx Transaction<'db>> {
 
 impl<'tx, 'db> TextRef<&'tx mut Transaction<'db>> {
     pub fn cursor_mut<'a>(&'a mut self) -> crate::Result<TextCursor<&'a mut Transaction<'db>>> {
-        TextCursor::new(self.tx, self.block.start())
+        let parent = *self.block.id();
+        let parent = if parent.is_root() {
+            Node::Root(Named::Hash(parent))
+        } else {
+            Node::Nested(parent)
+        };
+        TextCursor::new(self.tx, parent, self.block.start())
     }
 
     pub fn insert<S>(&mut self, index: usize, chunk: S) -> crate::Result<()>
@@ -249,6 +255,11 @@ where
 {
     type Return = ();
 
+    #[inline]
+    fn clock_len(&self) -> Clock {
+        Clock::new(1)
+    }
+
     fn prepare(&self, insert: &mut InsertBlockData) -> crate::Result<()> {
         let block = insert.as_block_mut();
         block.set_content_type(ContentType::Format);
@@ -267,6 +278,7 @@ where
 pub struct TextCursor<T> {
     /// Transaction.
     tx: T,
+    parent: Node<'static>,
     /// Current block, the cursor is pointing at.
     curr: Option<BlockMut>,
     /// Offset within the block, cursor is pointing at.
@@ -278,7 +290,11 @@ pub struct TextCursor<T> {
 }
 
 impl<'tref, 'db> TextCursor<&'tref mut Transaction<'db>> {
-    pub fn new(tx: &'tref mut Transaction<'db>, start: Option<&ID>) -> crate::Result<Self> {
+    pub fn new(
+        tx: &'tref mut Transaction<'db>,
+        parent: Node<'static>,
+        start: Option<&ID>,
+    ) -> crate::Result<Self> {
         let curr = match start {
             None => None,
             Some(&id) => {
@@ -289,6 +305,7 @@ impl<'tref, 'db> TextCursor<&'tref mut Transaction<'db>> {
         Ok(TextCursor {
             tx,
             curr,
+            parent,
             index: 0,
             offset: 0,
             attributes: Default::default(),
@@ -363,7 +380,16 @@ impl<'tref, 'db> TextCursor<&'tref mut Transaction<'db>> {
     }
 
     pub fn insert<P: Prelim>(&mut self, prelim: P) -> crate::Result<P::Return> {
-        let mut insert: InsertBlockData = todo!();
+        let left = self.left_id();
+        let right = self.right_id();
+        let (mut db, state) = self.tx.split_mut();
+        let id = state.next_id();
+        let clock_len = prelim.clock_len();
+        let parent = self.parent.clone();
+        let left = left.as_ref();
+        let right = right.as_ref();
+        let mut insert: InsertBlockData =
+            InsertBlockData::new(id, clock_len, left, right, left, right, parent, None);
         let result = prelim.integrate(&mut insert, &mut self.tx)?;
         let (mut db, state) = self.tx.split_mut();
         if self.offset != 0 {
@@ -380,6 +406,10 @@ impl<'tref, 'db> TextCursor<&'tref mut Transaction<'db>> {
 
         todo!("");
     }
+
+    fn left_id(&mut self) -> Option<ID> {}
+
+    fn right_id(&mut self) -> Option<ID> {}
 }
 
 #[repr(transparent)]
@@ -396,11 +426,15 @@ impl<'a> StringPrelim<'a> {
 impl<'a> Prelim for StringPrelim<'a> {
     type Return = ();
 
+    fn clock_len(&self) -> Clock {
+        let utf16_len = self.data.encode_utf16().count();
+        Clock::new(utf16_len as u32)
+    }
+
     fn prepare(&self, insert: &mut InsertBlockData) -> crate::Result<()> {
         let block = insert.as_block_mut();
         block.set_content_type(ContentType::String);
-        let data = BlockContent::string(self.data);
-        insert.content = smallvec![data];
+        insert.content = BlockContent::string(self.data);
         Ok(())
     }
 

@@ -1,5 +1,5 @@
 use crate::block_cursor::BlockCursor;
-use crate::content::{BlockContent, BlockContentRef, ContentType};
+use crate::content::{BlockContent, BlockContentRef, ContentType, InlineContent};
 use crate::integrate::IntegrationContext;
 use crate::node::{Node, NodeID, NodeType};
 use crate::store::lmdb::store::SplitResult;
@@ -13,10 +13,7 @@ use lmdb_rs_m::Database;
 use serde::de::{SeqAccess, Visitor};
 use serde::ser::SerializeTuple;
 use serde::{Deserialize, Deserializer, Serialize};
-use smallvec::{smallvec, SmallVec};
 use std::fmt::{Debug, Display, Formatter};
-use std::io::Write;
-use std::mem::offset_of;
 use std::ops::{Deref, DerefMut};
 use zerocopy::{CastError, FromBytes, Immutable, IntoBytes, KnownLayout, TryFromBytes};
 
@@ -129,13 +126,8 @@ pub struct BlockHeader {
     flags: BlockFlags,
     /// Used only when [ContentType::Node] is set. Defines the type of the node.
     node_type: NodeType,
-    /// If inline content is used, this is its length in bytes.
-    inline_content_len: u8,
-    /// Flags that define the block's content type.
-    content_type: ContentType,
-    /// If the content is small, it doesn't exist in a separate space.
-    /// Instead, we put it directly here.
-    inline_content: [u8; 8],
+    /// Inlined content data.
+    content: InlineContent,
     /// NodeID of the parent node collection that contains this block.
     parent: NodeID,
     /// XX Hash of the key if provided, 0 otherwise.
@@ -156,16 +148,14 @@ impl BlockHeader {
         BlockHeader {
             clock_len: Clock::new(0),
             flags: BlockFlags::default(),
-            content_type: ContentType::Deleted,
             node_type: NodeType::default(),
-            inline_content_len: 0,
+            content: InlineContent::new(ContentType::Deleted),
             parent: NodeID::default(),
             key_hash: U32::new(0),
             left: ID::default(),
             right: ID::default(),
             origin_left: ID::default(),
             origin_right: ID::default(),
-            inline_content: [0; 8],
         }
     }
 
@@ -199,16 +189,14 @@ impl BlockHeader {
         Self {
             clock_len: len,
             flags,
-            content_type: ContentType::Deleted,
             node_type: NodeType::Unknown,
-            inline_content_len: 0,
+            content: InlineContent::new(ContentType::Deleted),
             parent,
             key_hash,
             left: left.copied().unwrap_or_default(),
             right: right.copied().unwrap_or_default(),
             origin_left: origin_left.copied().unwrap_or_default(),
             origin_right: origin_right.copied().unwrap_or_default(),
-            inline_content: [0; 8],
         }
     }
 
@@ -217,7 +205,7 @@ impl BlockHeader {
     }
 
     pub fn content_type(&self) -> ContentType {
-        self.content_type
+        self.content.content_type
     }
 
     pub fn contains(&self, id: &ID) -> bool {
@@ -315,7 +303,7 @@ impl BlockHeader {
 
     pub fn start(&self) -> Option<&ID> {
         if self.flags.contains(BlockFlags::INLINE_CONTENT) {
-            let id = ID::ref_from_bytes(&self.inline_content).unwrap();
+            let id = ID::ref_from_bytes(&self.content.data()).unwrap();
             Some(id)
         } else {
             None
@@ -326,7 +314,8 @@ impl BlockHeader {
         match id {
             Some(id) => {
                 self.flags |= BlockFlags::INLINE_CONTENT;
-                self.inline_content = id.into_bytes();
+                self.content.len = ID::SIZE as u8;
+                self.content.data = id.into_bytes();
             }
             None => {
                 self.flags -= BlockFlags::INLINE_CONTENT;
@@ -335,7 +324,7 @@ impl BlockHeader {
     }
 
     pub fn node_type(&self) -> Option<&NodeType> {
-        if self.content_type == ContentType::Node {
+        if self.content_type() == ContentType::Node {
             Some(&self.node_type)
         } else {
             None
@@ -343,7 +332,7 @@ impl BlockHeader {
     }
 
     pub fn set_node_type(&mut self, node_type: NodeType) {
-        if self.content_type != ContentType::Node {
+        if self.content_type() != ContentType::Node {
             panic!("cannot set node_type when content_type is not Node");
         }
         self.node_type = node_type;
@@ -351,13 +340,13 @@ impl BlockHeader {
 
     #[inline]
     pub fn set_content_type(&mut self, content_type: ContentType) {
-        self.content_type = content_type;
+        self.content.content_type = content_type;
         if content_type.is_countable() {
             self.flags |= BlockFlags::COUNTABLE;
         } else {
             self.flags -= BlockFlags::COUNTABLE;
         }
-        if matches!(self.content_type, ContentType::Deleted) {
+        if matches!(self.content.content_type, ContentType::Deleted) {
             self.flags |= BlockFlags::DELETED;
         } else {
             self.flags -= BlockFlags::DELETED;
@@ -391,12 +380,7 @@ impl BlockHeader {
     }
 
     pub fn set_inline_content(&mut self, content: BlockContentRef) -> bool {
-        if content.can_inline() {
-            let body = content.body();
-            let len = body.len();
-            self.inline_content_len = len as u8;
-            self.content_type = content.content_type();
-            self.inline_content[..len].copy_from_slice(body);
+        if self.content.copy_from(content) {
             self.flags |= BlockFlags::INLINE_CONTENT;
             true
         } else {
@@ -406,12 +390,7 @@ impl BlockHeader {
 
     pub fn try_content(&self) -> Option<BlockContentRef<'_>> {
         if self.flags.contains(BlockFlags::INLINE_CONTENT) {
-            let start = offset_of!(BlockHeader, content_type);
-            let bytes = self.as_bytes();
-            let len = self.inline_content_len as usize;
-            // field content_type (1 byte) is immediately followed by inline_content (8 bytes)
-            let content = BlockContentRef::new(&bytes[start..(start + len + 1)]).unwrap();
-            Some(content)
+            Some(self.content.as_ref())
         } else {
             None
         }
@@ -433,7 +412,7 @@ impl<'a> Block<'a> {
     }
 
     pub(crate) fn info_flags(&self) -> u8 {
-        let mut info = self.content_type as u8 | (self.flags.0 & 0b1100_0000); // has left & right origin
+        let mut info = self.content_type() as u8 | (self.flags.0 & 0b1100_0000); // has left & right origin
         if self.key_hash != U32::new(0) {
             info |= 0b0010_0000;
         }
@@ -526,16 +505,14 @@ impl BlockMut {
             let right = BlockHeader {
                 clock_len: clock_len - offset,
                 flags,
-                content_type: self.content_type,
                 node_type: Default::default(),
-                inline_content_len: 0,
                 parent: self.parent,
                 key_hash: self.key_hash,
                 left,
                 right,
                 origin_left: left,
                 origin_right: self.origin_right,
-                inline_content: Default::default(), // nodes are not splittable
+                content: InlineContent::new(self.content_type()),
             };
             Some(Self::new(self.right, right))
         }
@@ -561,8 +538,8 @@ impl BlockMut {
             && other.origin_left() == Some(&self.last_id())
             && self.origin_right() == other.origin_right()
             && self.is_deleted() == other.is_deleted()
-            && self.content_type == other.content_type
-            && self.content_type.is_mergeable()
+            && self.content_type() == other.content_type()
+            && self.content_type().is_mergeable()
     }
 
     pub fn as_block(&self) -> Block<'_> {
@@ -612,7 +589,7 @@ pub struct InsertBlockData {
     /// - For [ContentType::Format] it's key-value pair of formatting attributes.
     /// - For [ContentType::Doc] it's the ID of the document.
     /// - For other content types it's empty.
-    pub content: SmallVec<[BlockContent; 1]>,
+    pub content: BlockContent,
     /// Parent node identifier that contains this block.
     pub parent: Option<Node<'static>>,
     /// If the block is part of a map-like structure, this field contains the UTF-8 encoded key string.
@@ -652,8 +629,12 @@ impl InsertBlockData {
         }
     }
 
-    pub fn content(&self) -> &[BlockContent] {
-        &self.content
+    pub fn content(&self) -> Option<&BlockContent> {
+        if self.content.is_empty() {
+            None
+        } else {
+            Some(&self.content)
+        }
     }
 
     pub(crate) fn new_node(node: &Node, kind: NodeType) -> Self {
@@ -664,16 +645,14 @@ impl InsertBlockData {
                 BlockHeader {
                     clock_len: 1.into(),
                     flags: BlockFlags::COUNTABLE,
-                    content_type: ContentType::Node,
+                    content: InlineContent::new(ContentType::Node),
                     node_type: kind,
-                    inline_content_len: 0,
                     parent: id,
                     key_hash: Default::default(),
                     left: Default::default(),
                     right: Default::default(),
                     origin_left: Default::default(),
                     origin_right: Default::default(),
-                    inline_content: Default::default(),
                 },
             ),
             parent: None,
@@ -714,13 +693,11 @@ impl InsertBlockData {
 
     pub fn merge(&mut self, other: Self) -> bool {
         if self.block.merge(other.block.as_block()) {
-            // contents are mergeable through simple byte concatenation
-            match self.block.content_type {
-                ContentType::Json | ContentType::Atom => self.content.extend(other.content),
-                ContentType::String => self.content[0].extend_from_slice(other.content[0].body()),
-                _ => { /* other contents are not written */ }
+            if !self.content.is_empty() {
+                self.content.merge(other.content)
+            } else {
+                true
             }
-            true
         } else {
             false
         }
@@ -739,30 +716,12 @@ impl InsertBlockData {
 
     pub fn split(&mut self, offset: Clock) -> Option<Self> {
         let new_block = self.block.split(offset)?;
-
-        let new_content = {
-            let mut offset = offset.get() as usize;
-            match new_block.content_type {
-                ContentType::String => {
-                    let content = self.content[0].body();
-                    let str = unsafe { std::str::from_utf8_unchecked(content) };
-                    let mut byte_offset = 0;
-                    for c in str.chars() {
-                        if offset == 0 {
-                            break;
-                        }
-                        offset -= 1;
-                        let utf8_len = c.len_utf8();
-                        byte_offset += utf8_len;
-                    }
-                    let mut new_content = BlockContent::new(ContentType::String);
-                    new_content.extend_from_slice(&content[byte_offset..]);
-                    self.content[0].drain(1 + byte_offset..);
-                    smallvec![new_content]
-                }
-                ContentType::Atom | ContentType::Json => self.content.drain(offset..).collect(),
-                _ => Default::default(),
-            }
+        let new_content = if !self.content.is_empty() {
+            self.content
+                .split(offset.get() as usize)
+                .unwrap_or_default()
+        } else {
+            self.content.clone()
         };
 
         Some(Self {
@@ -894,7 +853,7 @@ impl InsertBlockData {
 
         //TODO: check if this item is in a moved range and merge moves
 
-        match self.block.content_type {
+        match self.block.content.content_type {
             ContentType::Deleted => {
                 tx_state
                     .delete_set
@@ -950,9 +909,8 @@ impl InsertBlockData {
 impl Display for InsertBlockData {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}, {}", self.block.id, self.block.header)?;
-        let content = self.content();
-        for content in content {
-            writeln!(f, " {}", content)?;
+        if let Some(content) = self.content() {
+            write!(f, " {}", content)?;
         }
         Ok(())
     }
@@ -1059,7 +1017,7 @@ impl Display for BlockHeader {
         if let Some(content) = self.try_content() {
             write!(f, ", start: {}", content)?;
         }
-        write!(f, " - {}", self.content_type)?;
+        write!(f, " - {}", self.content.content_type)?;
 
         Ok(())
     }
@@ -1068,16 +1026,24 @@ impl Display for BlockHeader {
 #[cfg(test)]
 mod test {
     use crate::block::{InsertBlockData, ID};
-    use crate::content::{BlockContent, BlockContentRef, ContentType};
+    use crate::content::{BlockContent, ContentType, InlineContent};
     use crate::node::{Node, NodeID};
-    use crate::{lib0, BlockHeader, BlockMut, ClientID, Clock};
+    use crate::{lib0, BlockHeader, ClientID, Clock};
     use serde::{Deserialize, Serialize};
     use serde_json::json;
-    use smallvec::SmallVec;
-    use zerocopy::IntoBytes;
 
     const CLIENT: ClientID = unsafe { ClientID::new_unchecked(123) };
     const PARENT: Node = Node::nested(ID::new(CLIENT, Clock::new(0)));
+
+    #[test]
+    fn block_header_size() {
+        assert_eq!(size_of::<BlockHeader>(), 60);
+    }
+
+    #[test]
+    fn inline_content_size() {
+        assert_eq!(size_of::<InlineContent>(), 10);
+    }
 
     #[test]
     fn id_serialize() {
@@ -1104,7 +1070,7 @@ mod test {
             13,
             4,
             Some("key"),
-            [BlockContent::atom(&lib0!({"key":"value"})).unwrap()],
+            BlockContent::atom([&lib0!({"key":"value"})]).unwrap(),
         );
 
         assert_eq!(insert.block.left(), Some(&left));
@@ -1114,9 +1080,9 @@ mod test {
         assert_eq!(insert.parent, Some(PARENT.clone()));
 
         assert_eq!(insert.clock_len(), Clock::new(2));
-        let content = insert.content();
+        let content = insert.content().unwrap();
         assert_eq!(content.len(), 1);
-        assert_eq!(content[0].content_type(), ContentType::Atom);
+        assert_eq!(content.content_type(), ContentType::Atom);
         assert_eq!(insert.entry_key(), Some("key"));
     }
 
@@ -1130,13 +1096,13 @@ mod test {
             0,
             4,
             Some("test"),
-            [BlockContent::string("hello world")],
+            BlockContent::string("hello world"),
         );
 
         block.set_entry_key("123".as_bytes());
 
         assert_eq!(block.entry_key(), Some("123"));
-        let content = &block.content()[0];
+        let content = block.content().unwrap();
         assert_eq!(content, &BlockContent::string("hello world"));
     }
 
@@ -1150,14 +1116,14 @@ mod test {
             0,
             4,
             Some("test"),
-            [BlockContent::string("hello world")],
+            BlockContent::string("hello world"),
         );
 
         block.set_entry_key("test123".as_bytes());
 
         assert_eq!(block.entry_key(), Some("test123"));
-        let content = block.content();
-        assert_eq!(content, &[BlockContent::string("hello world")]);
+        let content = block.content().unwrap();
+        assert_eq!(content, &BlockContent::string("hello world"));
     }
 
     #[test]
@@ -1170,13 +1136,13 @@ mod test {
             0,
             4,
             Some("test"),
-            [BlockContent::string("hello world")],
+            BlockContent::string("hello world"),
         );
 
         block.set_entry_key("1234".as_bytes());
 
         assert_eq!(block.entry_key(), Some("1234"));
-        let content = &block.content()[0];
+        let content = block.content().unwrap();
         assert_eq!(content, &BlockContent::string("hello world"));
     }
 
@@ -1190,7 +1156,7 @@ mod test {
             14,
             15,
             Some("key"),
-            [BlockContent::string("hello world")],
+            BlockContent::string("hello world"),
         );
 
         let right = b.split(6.into()).unwrap();
@@ -1202,7 +1168,7 @@ mod test {
             6,
             15,
             Some("key"),
-            [BlockContent::string("world")],
+            BlockContent::string("world"),
         );
         assert_eq!(right, expected_right);
 
@@ -1214,7 +1180,7 @@ mod test {
             14,
             15,
             Some("key"),
-            [BlockContent::string("hello ")],
+            BlockContent::string("hello "),
         );
         assert_eq!(b, expected_left);
     }
@@ -1229,7 +1195,7 @@ mod test {
             14,
             15,
             Some("key"),
-            [BlockContent::string("hello world")],
+            BlockContent::string("hello world"),
         );
 
         let expected = b.clone();
@@ -1242,37 +1208,19 @@ mod test {
 
     #[test]
     fn block_split_deleted() {
-        let mut b = block(
-            1,
-            11,
-            12,
-            13,
-            14,
-            15,
-            Some("key"),
-            [BlockContent::deleted()],
-        );
+        let mut b = block(1, 11, 12, 13, 14, 15, Some("key"), BlockContent::deleted());
 
         let right = b.split(6.into()).unwrap();
-        let mut expected_right = block(7, 5, 6, 13, 6, 15, Some("key"), [BlockContent::deleted()]);
+        let expected_right = block(7, 5, 6, 13, 6, 15, Some("key"), BlockContent::deleted());
         assert_eq!(right, expected_right);
 
-        let mut expected_left = block(1, 6, 12, 7, 14, 15, Some("key"), [BlockContent::deleted()]);
+        let expected_left = block(1, 6, 12, 7, 14, 15, Some("key"), BlockContent::deleted());
         assert_eq!(b, expected_left);
     }
 
     #[test]
     fn block_merge_deleted() {
-        let mut b = block(
-            1,
-            11,
-            12,
-            13,
-            14,
-            15,
-            Some("key"),
-            [BlockContent::deleted()],
-        );
+        let mut b = block(1, 11, 12, 13, 14, 15, Some("key"), BlockContent::deleted());
 
         let expected = b.clone();
 
@@ -1295,10 +1243,7 @@ mod test {
             4,
             5,
             Some("aa"),
-            [
-                BlockContent::atom(&alice).unwrap(),
-                BlockContent::atom(&bob).unwrap(),
-            ],
+            BlockContent::atom([&alice, &bob]).unwrap(),
         );
 
         let right = b.split(1.into()).unwrap();
@@ -1310,7 +1255,7 @@ mod test {
             1,
             5,
             Some("aa"),
-            [BlockContent::atom(&bob).unwrap()],
+            BlockContent::atom([&bob]).unwrap(),
         );
         assert_eq!(right, expected_right);
 
@@ -1322,7 +1267,7 @@ mod test {
             4,
             5,
             Some("aa"),
-            [BlockContent::atom(&alice).unwrap()],
+            BlockContent::atom([&alice]).unwrap(),
         );
         assert_eq!(b, expected_left);
     }
@@ -1340,10 +1285,7 @@ mod test {
             4,
             5,
             Some("aa"),
-            [
-                BlockContent::atom(&alice).unwrap(),
-                BlockContent::atom(&bob).unwrap(),
-            ],
+            BlockContent::atom([&alice, &bob]).unwrap(),
         );
 
         let expected = b.clone();
@@ -1372,7 +1314,7 @@ mod test {
 
         // content over 8 bytes
         let mut block = BlockHeader::empty();
-        let expected = BlockContent::json(&json!({"users":[1,2,3,4,5,6]})).unwrap();
+        let expected = BlockContent::json([&json!({"users":[1,2,3,4,5,6]})]).unwrap();
         assert!(!block.set_inline_content(expected.as_ref()));
         let actual = block.try_content();
         assert!(actual.is_none());
@@ -1391,7 +1333,7 @@ mod test {
         }
     }
 
-    fn block<I>(
+    fn block(
         id: u32,
         len: u32,
         left: u32,
@@ -1399,11 +1341,8 @@ mod test {
         origin_left: u32,
         origin_right: u32,
         entry: Option<&str>,
-        content: I,
-    ) -> InsertBlockData
-    where
-        I: IntoIterator<Item = BlockContent>,
-    {
+        content: BlockContent,
+    ) -> InsertBlockData {
         let mut data = InsertBlockData::new(
             ID::new(CLIENT, id.into()),
             len.into(),
@@ -1414,9 +1353,8 @@ mod test {
             PARENT,
             entry,
         );
-        let content: SmallVec<[BlockContent; 1]> = SmallVec::from_iter(content);
-        data.block.set_content_type(content[0].content_type());
-        if data.block.content_type.has_content() {
+        data.block.set_content_type(content.content_type());
+        if data.block.content.content_type.has_content() {
             data.content = content;
         }
         data

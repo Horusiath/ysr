@@ -4,7 +4,7 @@ use crate::lib0::Value;
 use crate::node::NodeType;
 use crate::prelim::Prelim;
 use crate::types::Capability;
-use crate::{In, Mounted, Transaction, Unmounted};
+use crate::{Clock, In, Mounted, Transaction, Unmounted};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::ops::{Deref, DerefMut, RangeBounds};
@@ -121,6 +121,11 @@ pub struct ListPrelim(Vec<In>);
 
 impl Prelim for ListPrelim {
     type Return = Unmounted<List>;
+
+    #[inline]
+    fn clock_len(&self) -> Clock {
+        Clock::new(1) // the list object itself is 1 element
+    }
 
     fn prepare(&self, insert: &mut InsertBlockData) -> crate::Result<()> {
         let block = insert.as_block_mut();

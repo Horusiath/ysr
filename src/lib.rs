@@ -82,6 +82,8 @@ pub enum Error {
     ClientIDOutOfRange,
     #[error("LMDB error: {0}")]
     Lmdb(#[from] lmdb_rs_m::MdbError),
+    #[error("expected value couldn't be fit into containing data")]
+    ValueTooLarge,
 }
 
 impl From<TryReserveError> for Error {

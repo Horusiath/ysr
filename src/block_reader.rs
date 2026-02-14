@@ -1,7 +1,7 @@
 use crate::block::{
     BlockHeader, BlockMut, InsertBlockData, CONTENT_TYPE_GC, CONTENT_TYPE_SKIP, ID,
 };
-use crate::content::{BlockContent, ContentType};
+use crate::content::{BlockContent, BlockWriter, ContentType};
 use crate::id_set::IDSet;
 use crate::integrate::IntegrationContext;
 use crate::node::{Node, NodeID, NodeType};
@@ -15,6 +15,7 @@ use smallvec::SmallVec;
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt::{Display, Formatter};
 use std::io::{Read, Write};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 #[derive(Default)]
 pub struct Update {
@@ -71,11 +72,13 @@ impl Update {
         match info & CARRIER_INFO {
             CONTENT_TYPE_GC => {
                 let len = decoder.read_len()?;
-                Ok(Some(Carrier::GC(BlockRange { head: id, len })))
+                let end = id.clock + len - 1;
+                Ok(Some(Carrier::GC(BlockRange::new(id, end))))
             }
             CONTENT_TYPE_SKIP => {
                 let len = decoder.read_len()?;
-                Ok(Some(Carrier::Skip(BlockRange { head: id, len })))
+                let end = id.clock + len - 1;
+                Ok(Some(Carrier::Skip(BlockRange::new(id, end))))
             }
             _ => Self::read_block(id, info, decoder),
         }
@@ -99,7 +102,7 @@ impl Update {
                 let mut root_parent_name = String::new();
                 let buf = unsafe { root_parent_name.as_mut_vec() };
                 decoder.read_string(buf)?;
-                Node::root(root_parent_name)
+                Node::root_named(root_parent_name)
             } else {
                 let nested_parent_id = decoder.read_left_id()?;
                 Node::Nested(NodeID::from_nested(nested_parent_id))
@@ -119,8 +122,8 @@ impl Update {
         let content_type = ContentType::try_from(info & CARRIER_INFO)?;
         header.set_content_type(content_type);
 
-        let content = Self::read_content(&mut header, decoder)?;
-        let mut block = InsertBlockData {
+        let content = Self::read_content(&mut header, decoder)?.unwrap_or_default();
+        let block = InsertBlockData {
             block: BlockMut::new(id, header),
             content,
             parent,
@@ -132,44 +135,52 @@ impl Update {
     fn read_content(
         block: &mut BlockHeader,
         decoder: &mut impl Decoder,
-    ) -> crate::Result<SmallVec<[BlockContent; 1]>> {
-        let mut result = SmallVec::new();
+    ) -> crate::Result<Option<BlockContent>> {
+        let mut result = None;
         match block.content_type() {
             ContentType::Deleted => {
                 let deleted_len = decoder.read_len()?;
                 block.set_clock_len(deleted_len);
             }
-            ContentType::Json => block.set_clock_len(copy_json(decoder, &mut result)?),
-            ContentType::Atom => block.set_clock_len(copy_lib0(decoder, &mut result)?),
+            ContentType::Json => {
+                let content = copy_json(decoder)?;
+                block.set_clock_len(Clock::new(content.len() as u32));
+                result = Some(content);
+            }
+            ContentType::Atom => {
+                let content = copy_lib0(decoder)?;
+                block.set_clock_len(Clock::new(content.len() as u32));
+                result = Some(content);
+            }
             ContentType::Binary => {
-                let mut w = BlockContent::new(ContentType::Binary);
+                let mut w = BlockWriter::new(ContentType::Binary);
 
-                let len = decoder.read_len()?;
                 block.set_clock_len(1.into());
+                let len = decoder.read_len()?;
                 std::io::copy(&mut decoder.take(len.into()), &mut w)?;
 
-                result.push(w)
+                result = Some(BlockContent::from(w));
             }
             ContentType::String => {
-                let mut w = BlockContent::new(ContentType::String);
+                let mut w = BlockWriter::new(ContentType::String);
 
                 let len = decoder.read_len()?;
                 block.set_clock_len(len);
                 std::io::copy(&mut decoder.take(len.into()), &mut w)?;
 
-                result.push(w)
+                result = Some(BlockContent::from(w));
             }
             ContentType::Embed => {
-                let mut w = BlockContent::new(ContentType::Embed);
+                let mut w = BlockWriter::new(ContentType::Embed);
 
                 block.set_clock_len(1.into());
                 let json = decoder.read_json::<serde_json::Value>()?;
                 serde_json::to_writer(&mut w, &json)?;
 
-                result.push(w)
+                result = Some(BlockContent::from(w));
             }
             ContentType::Format => {
-                let mut w = BlockContent::new(ContentType::Format);
+                let mut w = BlockWriter::new(ContentType::Format);
 
                 block.set_clock_len(1.into());
                 let key_len: u64 = decoder.read_var()?;
@@ -180,7 +191,7 @@ impl Update {
                 w.write_var(value_len)?;
                 std::io::copy(&mut decoder.take(value_len), &mut w)?;
 
-                result.push(w)
+                result = Some(BlockContent::from(w));
             }
             ContentType::Node => {
                 block.set_clock_len(1.into());
@@ -189,9 +200,9 @@ impl Update {
                 block.set_node_type(node_type);
             }
             ContentType::Doc => {
-                let mut w = BlockContent::new(ContentType::Doc);
+                let mut w = BlockWriter::new(ContentType::Doc);
                 block.set_clock_len(1.into());
-                todo!()
+                result = Some(BlockContent::from(w));
             }
         }
         Ok(result)
@@ -234,20 +245,18 @@ impl<'a, D: Decoder> BlockReader<'a, D> {
         match info & CARRIER_INFO {
             CONTENT_TYPE_GC => {
                 let len = self.decoder.read_len()?;
-                let carrier = Carrier::GC(BlockRange {
-                    head: ID::new(self.current_client, self.current_clock),
-                    len,
-                });
+                let id = ID::new(self.current_client, self.current_clock);
+                let end = self.current_clock + len - 1;
+                let carrier = Carrier::GC(BlockRange::new(id, end));
                 self.current_clock += len;
                 self.remaining_blocks -= 1;
                 Ok(Some(carrier))
             }
             CONTENT_TYPE_SKIP => {
                 let len = self.decoder.read_len()?;
-                let carrier = Carrier::Skip(BlockRange {
-                    head: ID::new(self.current_client, self.current_clock),
-                    len,
-                });
+                let id = ID::new(self.current_client, self.current_clock);
+                let end = self.current_clock + len - 1;
+                let carrier = Carrier::Skip(BlockRange::new(id, end));
                 self.current_clock += len;
                 self.remaining_blocks -= 1;
                 Ok(Some(carrier))
@@ -279,33 +288,29 @@ impl<'a, D: Decoder> Iterator for BlockReader<'a, D> {
     }
 }
 
-fn copy_lib0<D: Decoder>(
-    decoder: &mut D,
-    res: &mut SmallVec<[BlockContent; 1]>,
-) -> crate::Result<Clock> {
+fn copy_lib0<D: Decoder>(decoder: &mut D) -> crate::Result<BlockContent> {
     let count = decoder.read_len()?;
+    let mut res = SmallVec::new();
     res.try_reserve(count.get() as usize)?;
     for _ in 0u64..count.into() {
-        let mut content = BlockContent::new(ContentType::Atom);
+        let mut content = BlockWriter::new(ContentType::Atom);
         crate::lib0::copy(decoder, &mut content)?;
-        res.push(content);
+        res.push(content.into_inner());
     }
-    Ok(count)
+    Ok(BlockContent::multipart(res))
 }
 
-fn copy_json<D: Decoder>(
-    decoder: &mut D,
-    res: &mut SmallVec<[BlockContent; 1]>,
-) -> crate::Result<Clock> {
+fn copy_json<D: Decoder>(decoder: &mut D) -> crate::Result<BlockContent> {
     let count = decoder.read_len()?;
+    let mut res = SmallVec::new();
     res.try_reserve(count.get() as usize)?;
     for _ in 0u64..count.into() {
-        let mut content = BlockContent::new(ContentType::Atom);
+        let mut content = BlockWriter::new(ContentType::Json);
         let value: serde_json::Value = serde_json::from_reader(&mut *decoder)?;
         serde_json::to_writer(&mut content, &value)?;
-        res.push(content);
+        res.push(content.into_inner());
     }
-    Ok(count)
+    Ok(BlockContent::multipart(res))
 }
 
 const CARRIER_INFO: u8 = 0b0001_1111;
@@ -388,15 +393,30 @@ impl Carrier {
     }
 }
 
-#[derive(Debug)]
+#[repr(C)]
+#[derive(
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    Copy,
+    Clone,
+    FromBytes,
+    KnownLayout,
+    Immutable,
+    IntoBytes,
+    Default,
+    Ord,
+    PartialOrd,
+)]
 pub struct BlockRange {
     head: ID,
-    len: Clock,
+    end: Clock,
 }
 
 impl BlockRange {
-    pub fn new(head: ID, len: Clock) -> Self {
-        Self { head, len }
+    pub fn new(head: ID, end: Clock) -> Self {
+        Self { head, end }
     }
 
     pub fn head(&self) -> &ID {
@@ -404,11 +424,29 @@ impl BlockRange {
     }
 
     pub fn end(&self) -> Clock {
-        self.head.clock + self.len - 1
+        self.end
     }
 
     pub fn len(&self) -> Clock {
-        self.len
+        self.end - self.head.clock + 1
+    }
+
+    #[inline]
+    pub fn contains(&self, id: &ID) -> bool {
+        self.head.client == id.client && self.head.clock >= id.clock && self.end <= id.clock
+    }
+
+    pub fn offset(&self, id: &ID) -> Option<Clock> {
+        if self.contains(id) {
+            Some(self.end - id.clock)
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    pub fn parse(data: &[u8]) -> crate::Result<&Self> {
+        Self::ref_from_bytes(data).map_err(|_| crate::Error::InvalidMapping("BlockRange"))
     }
 }
 
@@ -417,9 +455,7 @@ impl Display for BlockRange {
         write!(
             f,
             "<{}:{}..{}>",
-            self.head.client,
-            self.head.clock,
-            self.head.clock + self.len - 1
+            self.head.client, self.head.clock, self.end
         )
     }
 }
@@ -428,7 +464,6 @@ impl Display for BlockRange {
 mod test {
     use crate::block::ID;
     use crate::block_reader::{BlockReader, Carrier};
-    use crate::content::BlockContentRef;
     use crate::read::DecoderV1;
     use crate::ClientID;
     use std::io::Cursor;
@@ -449,7 +484,7 @@ mod test {
         assert_eq!(n.id(), &ID::new(CLIENT, 0.into()));
         assert_eq!(n.block.origin_right(), None);
         assert_eq!(n.block.origin_left(), None);
-        let Some(text) = n.content.iter().next().unwrap().as_text() else {
+        let Some(text) = n.content.as_text() else {
             unreachable!()
         };
         assert_eq!(text, "0");
@@ -460,7 +495,7 @@ mod test {
         };
         assert_eq!(n.id(), &ID::new(CLIENT, 1.into()));
         assert_eq!(n.block.origin_right(), Some(&ID::new(CLIENT, 0.into())));
-        let Some(text) = n.content.iter().next().unwrap().as_text() else {
+        let Some(text) = n.content.as_text() else {
             unreachable!()
         };
         assert_eq!(text, "1");
@@ -470,7 +505,7 @@ mod test {
             unreachable!()
         };
         assert_eq!(n.id(), &ID::new(CLIENT, 2.into()));
-        let Some(text) = n.content.iter().next().unwrap().as_text() else {
+        let Some(text) = n.content.as_text() else {
             unreachable!()
         };
         assert_eq!(text, "2");

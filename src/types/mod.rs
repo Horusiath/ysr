@@ -25,7 +25,7 @@ impl<Cap> Unmounted<Cap> {
         S: Into<Cow<'static, str>>,
     {
         Unmounted {
-            node: Node::root(name),
+            node: Node::root_named(name),
             _capability: PhantomData,
         }
     }
