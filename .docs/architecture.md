@@ -37,19 +37,20 @@ key-space range.
 
 There are several different key-spaces (further on referenced to as a *stores*):
 
-- [InternStringsStore](./stores/intern_strings_store.md)
-- [MetaStore](./stores/meta_store.md) is responsible for holding documents unique metadata such as current client ID and
+- [InternStringsStore](stores/01_intern_strings_store.md)
+- [MetaStore](stores/00_meta_store.md) is responsible for holding documents unique metadata such as current client ID
+  and
   document's options.
-- [StateVectorStore](stores/state_vector_store.md), which is responsible for holding `ClientID`->`Clock` key value pairs
+- [StateVectorStore](stores/05_state_vector_store.md), which is responsible for holding `ClientID`->`Clock` key value
+  pairs
   representing current state of integrated document data.
-- [BlockStore](./stores/block_store.md) representing blocks - pieces of metadata used by `ysr` and `yjs` for conflict
+- [BlockStore](stores/02_block_store.md) representing blocks - pieces of metadata used by `ysr` and `yjs` for conflict
   resolution.
-- [ContentStore](./stores/content_data.md) representing user data, related to blocks. It only holds data that was too
+- [ContentStore](stores/03_content_data.md) representing user data, related to blocks. It only holds data that was too
   big to be inlined within block store headers themselves.
-- [MapEntryStore](./stores/map_entries.md) holding information about `(NodeID, String)`->`ID` key-value entries
+- [MapEntryStore](stores/04_map_entries.md) holding information about `(NodeID, String)`->`ID` key-value entries
   representing the relationships
   between YMap user-defined keys and the IDs of the blocks holding the data for those entries.
-- [DeleteSet](./stores/delete_set.md) represents a compressed information about all the blocks deleted by the user.
 
 ## Nodes
 
