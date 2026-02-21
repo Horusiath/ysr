@@ -47,10 +47,10 @@ the containing `BlockHeader`:
 - If `ORIGIN_RIGHT` bit is set, it means that `BlockHeader.origin_right` field contains an `ID` pointing to a block,
   that was a right-side neighbor of a current block at the moment of current block's insertion.
 
-## Merging blocks together
-
-## Splitting blocks
+The algorithm behind merging and splitting blocks have been described in [yata](./general/yata.md) section.
 
 ## Block Range
 
-`BlockRange`
+`BlockRange` describes a continuous range of `ID` that could be hold by one or more blocks. Each `BlockRange` contains a
+`head` (and `ID` of its first element) followed by `end` clock describing the clock offset of its last element (which
+shares the same `ClientID` as the `head`).

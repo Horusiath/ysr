@@ -103,7 +103,10 @@ While *YATA* conflict resolution algorithm targets conflict resolution in insert
 elements, it can be extended to work with the maps. In such case each map entry could be treated as its own individual
 sequence of elements.
 
-Reading from the map means reading the last element of that map entry's sequence of blocks.
+Reading from the map means reading the last element of that map entry's sequence of blocks. This is executed by lookup
+on `MapEntryStore` for a particular (`NodeId`, `{search_key}`) key-value pair, reading the value holding an `ID` of the
+block holding the corresponding entry value and then resolving that value. Keep in mind that the block itself might have
+been deleted.
 
 Writing (or integrating the value) to the map means, deleting last known element in the sequence and then appending the
 new element block as the next last element.
