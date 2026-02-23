@@ -1,4 +1,4 @@
-use crate::block::{Block, BlockMut, InsertBlockData, ID};
+use crate::block::{Block, BlockMut, ID, InsertBlockData};
 use crate::block_reader::Carrier;
 use crate::content::{BlockContentRef, ContentType};
 use crate::id_set::IDSet;
@@ -8,7 +8,7 @@ use crate::transaction::TransactionState;
 use crate::{ClientID, Clock, Error, Optional, StateVector, U32};
 use lmdb_rs_m::core::MdbResult;
 use lmdb_rs_m::{Cursor, Database, MdbError, MdbValue, ToMdbValue};
-use smallvec::{smallvec, ExtendFromSlice, SmallVec};
+use smallvec::{ExtendFromSlice, SmallVec, smallvec};
 use std::collections::{BTreeMap, VecDeque};
 use std::ops::{Deref, DerefMut};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
@@ -202,7 +202,7 @@ impl<'tx> BlockStore<'tx> for Database<'tx> {
             let client_id = *ClientID::parse(&key[1..])?;
             let clock =
                 *Clock::ref_from_bytes(&value).map_err(|_| Error::InvalidMapping("Clock"))?;
-            if client_id != ClientID::MAX_VALUE {
+            if client_id != ClientID::ROOT {
                 state_vector.insert(client_id, clock);
             }
 
@@ -488,52 +488,6 @@ pub(crate) const KEY_PREFIX_CONTENT: u8 = 0x05;
 
 #[repr(C, packed)]
 #[derive(FromBytes, IntoBytes, Immutable, KnownLayout, Clone, Copy, Debug, PartialEq, Eq)]
-pub struct BlockKey {
-    tag: u8,
-    id: ID,
-}
-
-impl BlockKey {
-    pub fn new(id: ID) -> Self {
-        BlockKey {
-            tag: KEY_PREFIX_BLOCK,
-            id,
-        }
-    }
-}
-
-impl ToMdbValue for BlockKey {
-    fn to_mdb_value(&self) -> MdbValue<'_> {
-        let ptr = std::ptr::from_ref(self) as *const _;
-        unsafe { MdbValue::new(ptr, size_of::<Self>()) }
-    }
-}
-
-#[repr(C, packed)]
-#[derive(FromBytes, IntoBytes, Immutable, KnownLayout, Clone, Copy, Debug, PartialEq, Eq)]
-pub struct BlockContentKey {
-    tag: u8,
-    id: ID,
-}
-
-impl BlockContentKey {
-    pub fn new(id: ID) -> Self {
-        BlockContentKey {
-            tag: KEY_PREFIX_CONTENT,
-            id,
-        }
-    }
-}
-
-impl ToMdbValue for BlockContentKey {
-    fn to_mdb_value(&self) -> MdbValue<'_> {
-        let ptr = std::ptr::from_ref(self) as *const _;
-        unsafe { MdbValue::new(ptr, size_of::<Self>()) }
-    }
-}
-
-#[repr(C, packed)]
-#[derive(FromBytes, IntoBytes, Immutable, KnownLayout, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StateVectorKey {
     tag: u8,
     client_id: ClientID,
@@ -723,7 +677,7 @@ impl<'a> DerefMut for OwnedCursor<'a> {
 
 #[cfg(test)]
 mod test {
-    use crate::block::{InsertBlockData, ID};
+    use crate::block::{ID, InsertBlockData};
     use crate::node::Node;
     use crate::store::lmdb::store::{BlockStore, CursorExt};
     use lmdb_rs_m::DbFlags;

@@ -241,7 +241,7 @@ impl<'db> Transaction<'db> {
             return Ok(());
         }
 
-        let mut current_client = ClientID::MAX_VALUE;
+        let mut current_client = ClientID::ROOT;
         let mut min_state = Clock::new(0);
         let mut max_state = Clock::new(0);
 

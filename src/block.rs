@@ -2,14 +2,14 @@ use crate::block_cursor::BlockCursor;
 use crate::content::{BlockContent, BlockContentRef, ContentType, InlineContent};
 use crate::integrate::IntegrationContext;
 use crate::node::{Node, NodeID, NodeType};
-use crate::store::lmdb::store::SplitResult;
 use crate::store::lmdb::BlockStore;
+use crate::store::lmdb::store::SplitResult;
 use crate::transaction::TransactionState;
 use crate::{ClientID, Clock, Optional, U32};
 use crate::{Error, Result};
 use bitflags::bitflags;
 use bytes::Bytes;
-use lmdb_rs_m::Database;
+use lmdb_rs_m::{Database, MdbValue, ToMdbValue};
 use serde::de::{SeqAccess, Visitor};
 use serde::ser::SerializeTuple;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -141,6 +141,7 @@ pub struct BlockHeader {
     /// ID of the right neighbor block at the point of insertion (if such existed).
     origin_right: ID,
 }
+
 impl BlockHeader {
     pub const SIZE: usize = size_of::<BlockHeader>();
 
@@ -394,6 +395,12 @@ impl BlockHeader {
         } else {
             None
         }
+    }
+}
+
+impl ToMdbValue for BlockHeader {
+    fn to_mdb_value(&self) -> MdbValue<'_> {
+        MdbValue::new_from_sized(self)
     }
 }
 
@@ -1025,10 +1032,10 @@ impl Display for BlockHeader {
 
 #[cfg(test)]
 mod test {
-    use crate::block::{InsertBlockData, ID};
+    use crate::block::{ID, InsertBlockData};
     use crate::content::{BlockContent, ContentType, InlineContent};
     use crate::node::{Node, NodeID};
-    use crate::{lib0, BlockHeader, ClientID, Clock};
+    use crate::{BlockHeader, ClientID, Clock, lib0};
     use serde::{Deserialize, Serialize};
     use serde_json::json;
 

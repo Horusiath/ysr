@@ -74,8 +74,8 @@ pub enum Error {
     Json(#[from] serde_json::Error),
     #[error("invalid lib0 data: {0}")]
     Lib0(#[from] Box<crate::lib0::Error>),
-    #[error("store error: {0}")]
-    Store(DynError),
+    #[error("{0}")]
+    Custom(DynError),
     #[error("block not found: {0}")]
     BlockNotFound(ID),
     #[error("Client ID is not valid 53-bit integer")]
@@ -95,6 +95,12 @@ impl From<TryReserveError> for Error {
 impl From<CollectionAllocErr> for Error {
     fn from(_: CollectionAllocErr) -> Self {
         Self::OutOfMemory
+    }
+}
+
+impl Into<std::fmt::Error> for Error {
+    fn into(self) -> std::fmt::Error {
+        std::fmt::Error
     }
 }
 
@@ -152,24 +158,20 @@ impl<T> Optional for Result<T, MdbError> {
 pub struct ClientID(U32);
 
 impl ClientID {
-    const MAX_VALUE: Self = ClientID(U32::new((1u32 << 31) - 1));
+    const ROOT: Self = ClientID(U32::new(0));
 
     pub fn new_random() -> Self {
-        let value: u32 = rand::random_range(..((1u32 << 31) - 1));
+        let value: u32 = rand::random_range(..u32::MAX) + 1;
         Self(value.into())
     }
 
     pub fn is_valid(self) -> bool {
-        self <= Self::MAX_VALUE
+        self > Self::ROOT
     }
 
     pub fn new(id: U32) -> Option<Self> {
         let id = Self(id.into());
-        if id.is_valid() {
-            Some(id)
-        } else {
-            None
-        }
+        if id.is_valid() { Some(id) } else { None }
     }
 
     #[inline]

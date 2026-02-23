@@ -1,21 +1,17 @@
 use crate::block::{
-    Block, CONTENT_TYPE_ATOM, CONTENT_TYPE_BINARY, CONTENT_TYPE_DELETED, CONTENT_TYPE_DOC,
+    CONTENT_TYPE_ATOM, CONTENT_TYPE_BINARY, CONTENT_TYPE_DELETED, CONTENT_TYPE_DOC,
     CONTENT_TYPE_EMBED, CONTENT_TYPE_FORMAT, CONTENT_TYPE_JSON, CONTENT_TYPE_NODE,
     CONTENT_TYPE_STRING,
 };
 use crate::node::NodeID;
+use crate::store::lmdb::store::SplitResult;
 use crate::write::WriteExt;
-use crate::{lib0, Unmounted};
-use lmdb_rs_m::{MdbValue, ToMdbValue};
-use serde::de::DeserializeOwned;
-use serde::Serialize;
-use smallvec::{smallvec, ExtendFromSlice, SmallVec};
-use std::ffi::c_void;
+use crate::{Clock, lib0};
+use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::fmt::{Debug, Display, Formatter};
-use std::io::{Cursor, Write};
-use std::marker::PhantomData;
-use std::mem::offset_of;
-use zerocopy::{Immutable, IntoBytes, KnownLayout, TryFromBytes};
+use std::io::Write;
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, TryFromBytes};
 
 #[repr(u8)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq, TryFromBytes, KnownLayout, Immutable, IntoBytes)]
@@ -116,6 +112,264 @@ impl TryFrom<u8> for ContentType {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Content<'a> {
+    content_type: ContentType,
+    data: Cow<'a, [u8]>,
+}
+
+impl Content<'static> {
+    pub const DELETED: Self = Content {
+        content_type: ContentType::Deleted,
+        data: Cow::Borrowed(&[]),
+    };
+
+    pub fn json<T: Serialize>(data: &T) -> crate::Result<Self> {
+        let json = serde_json::to_vec(data)?;
+        Ok(Self::new(ContentType::Json, Cow::Owned(json)))
+    }
+
+    pub fn atom<T: Serialize>(data: &T) -> crate::Result<Self> {
+        let json = lib0::to_vec(data)?;
+        Ok(Self::new(ContentType::Atom, Cow::Owned(json)))
+    }
+
+    pub fn multipart<T: Serialize>(data: &[T]) -> crate::Result<Vec<Self>> {
+        let mut buf = Vec::with_capacity(data.len());
+        for value in data {
+            buf.push(Self::atom(value)?);
+        }
+        Ok(buf)
+    }
+
+    pub fn format<'a, T: Serialize>(key: &'a str, value: &'a T) -> crate::Result<Self> {
+        let attr = FormatAttribute::compose(key, value)?;
+        Ok(Self::new(ContentType::Format, Cow::Owned(attr)))
+    }
+}
+
+impl<'a> Content<'a> {
+    pub fn new(content_type: ContentType, data: Cow<'a, [u8]>) -> Self {
+        Self { content_type, data }
+    }
+
+    pub fn content_type(&self) -> ContentType {
+        self.content_type
+    }
+
+    pub fn bytes(&self) -> &'a [u8] {
+        self.data.as_ref()
+    }
+
+    pub fn to_owned(&self) -> Content<'static> {
+        Self::new(self.content_type, self.data.to_owned())
+    }
+
+    pub fn binary<B: AsRef<[u8]>>(data: &'a B) -> Self {
+        Self::new(ContentType::Binary, Cow::Borrowed(data.as_ref()))
+    }
+
+    pub fn str<S: AsRef<str>>(data: &'a S) -> Self {
+        let str = data.as_ref();
+        Self::new(ContentType::Binary, Cow::Borrowed(str.as_bytes()))
+    }
+
+    pub fn node(node_id: &'a NodeID) -> Self {
+        let bytes = node_id.as_bytes();
+        Self::new(ContentType::Node, Cow::Borrowed(bytes))
+    }
+
+    pub fn doc(doc_id: &'a str) -> Self {
+        Self::new(ContentType::Doc, Cow::Borrowed(doc_id.as_bytes()))
+    }
+
+    pub fn as_json<T: Deserialize<'a>>(&self) -> crate::Result<T> {
+        if self.content_type != ContentType::Json {
+            return Err(crate::Error::InvalidMapping("json"));
+        }
+        let json: T = serde_json::from_slice(self.data.as_ref())?;
+        Ok(json)
+    }
+
+    pub fn as_atom<T: Deserialize<'a>>(&self) -> crate::Result<T> {
+        if self.content_type != ContentType::Json {
+            return Err(crate::Error::InvalidMapping("atom"));
+        }
+        let atom: T = lib0::from_slice(self.data.as_ref())?;
+        Ok(atom)
+    }
+
+    pub fn as_str(&self) -> crate::Result<&str> {
+        if self.content_type != ContentType::String {
+            return Err(crate::Error::InvalidMapping("string"));
+        }
+        match std::str::from_utf8(self.data.as_ref()) {
+            Ok(str) => Ok(str),
+            Err(_) => Err(crate::Error::InvalidMapping("string")),
+        }
+    }
+
+    pub fn as_binary(&self) -> crate::Result<&[u8]> {
+        if self.content_type != ContentType::Binary {
+            return Err(crate::Error::InvalidMapping("binary"));
+        }
+        Ok(self.data.as_ref())
+    }
+
+    pub fn as_node(&self) -> crate::Result<&NodeID> {
+        if self.content_type != ContentType::Node {
+            return Err(crate::Error::InvalidMapping("node"));
+        }
+        let node_id = NodeID::ref_from_bytes(self.data.as_ref())?;
+        Ok(node_id)
+    }
+
+    pub fn as_doc(&self) -> crate::Result<&str> {
+        if self.content_type != ContentType::Doc {
+            return Err(crate::Error::InvalidMapping("document id"));
+        }
+        match std::str::from_utf8(self.data.as_ref()) {
+            Ok(str) => Ok(str),
+            Err(_) => Err(crate::Error::InvalidMapping("document id")),
+        }
+    }
+
+    pub fn as_format(&self) -> crate::Result<FormatAttribute<'a>> {
+        if self.content_type != ContentType::Json {
+            return Err(crate::Error::InvalidMapping("format attribute"));
+        }
+        match FormatAttribute::new(self.data.as_ref()) {
+            Some(attr) => Ok(attr),
+            None => Err(crate::Error::InvalidMapping("format attribute")),
+        }
+    }
+
+    pub fn split(&self, utf16_offset: usize) -> Option<(Self, Self)> {
+        /// Map offset given as UTF16 code points to byte offset in UTF8 encoded string.
+        fn map_offset(str: &str, utf16: usize) -> Option<usize> {
+            let mut offset = 0;
+            for ch in str.encode_utf16() {
+                if offset == utf16 {
+                    break;
+                }
+                offset += 1;
+            }
+
+            if offset == utf16 { Some(offset) } else { None }
+        }
+
+        if self.content_type != ContentType::String {
+            return None; // only strings can be split. JSON and atoms are multipart.
+        }
+
+        let str: &'a str = unsafe { std::str::from_utf8_unchecked(&self.data) };
+        let offset = map_offset(str, utf16_offset)?;
+        let (left, right) = self.data.split_at(offset);
+        let left = Self::new(self.content_type, left.into());
+        let right = Self::new(self.content_type, right.into());
+        Some((left, right))
+    }
+}
+
+impl<'a> Display for Content<'a> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self.content_type {
+            ContentType::Deleted => write!(f, "deleted"),
+            ContentType::Json => {
+                let json: serde_json::Value =
+                    serde_json::from_slice(&self.data).map_err(|_| std::fmt::Error)?;
+                write!(f, "{}", json)
+            }
+            ContentType::Binary => {
+                for byte in self.data.iter() {
+                    write!(f, "{:02x}", byte)?;
+                }
+                Ok(())
+            }
+            ContentType::String => {
+                let str = std::str::from_utf8(&self.data).map_err(|_| std::fmt::Error)?;
+                write!(f, "{}", str)
+            }
+            ContentType::Embed => {
+                write!(f, "embed")
+            }
+            ContentType::Format => {
+                let attr = FormatAttribute::new(&self.data).ok_or(std::fmt::Error)?;
+                write!(f, "{}", attr)
+            }
+            ContentType::Node => {
+                let node_id = NodeID::ref_from_bytes(&self.data).map_err(|_| std::fmt::Error)?;
+                write!(f, "{}", node_id)
+            }
+            ContentType::Atom => {
+                let atom: lib0::Value =
+                    lib0::from_slice(&self.data).map_err(|_| std::fmt::Error)?;
+                write!(f, "{}", atom)
+            }
+            ContentType::Doc => {
+                let doc_id = std::str::from_utf8(&self.data).map_err(|_| std::fmt::Error)?;
+                write!(f, "{}", doc_id)
+            }
+        }
+    }
+}
+
+#[repr(transparent)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FormatAttribute<'a> {
+    data: &'a [u8],
+}
+
+impl FormatAttribute<'static> {
+    pub fn compose<T: Serialize>(key: &str, value: &T) -> crate::Result<Vec<u8>> {
+        if key.len() >= u8::MAX as usize {
+            return Err(crate::Error::KeyTooLong);
+        }
+
+        let mut buf = Vec::with_capacity(key.len() + 1);
+        buf.write_u8(key.len() as u8)?;
+        buf.extend_from_slice(key.as_bytes());
+        lib0::to_writer(&mut buf, value)?;
+        Ok(buf)
+    }
+}
+
+impl<'a> FormatAttribute<'a> {
+    pub fn new(data: &'a [u8]) -> Option<Self> {
+        if data.is_empty() {
+            return None;
+        }
+        let len = data[0] as usize;
+        if data.len() < len + 1 {
+            return None;
+        }
+        Some(Self { data })
+    }
+
+    pub fn key(&self) -> &'a str {
+        let len = self.data[0] as usize;
+        let key: &'a [u8] = &self.data[1..(len + 1)];
+        unsafe { std::str::from_utf8_unchecked(key) }
+    }
+
+    pub fn value(&self) -> &'a [u8] {
+        let len = self.data[0] as usize;
+        &self.data[(len + 1)..]
+    }
+}
+
+impl<'a> Display for FormatAttribute<'a> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let key = self.key();
+        let value: lib0::Value = match lib0::from_slice(self.value()) {
+            Ok(v) => v,
+            Err(_) => return Err(std::fmt::Error),
+        };
+        write!(f, "\"{}\"={}", key, value)
+    }
+}
+
+/*
 #[repr(C)]
 #[derive(Debug, Clone, PartialEq, Eq, TryFromBytes, KnownLayout, Immutable, IntoBytes)]
 pub struct InlineContent {
@@ -807,3 +1061,4 @@ mod test {
         assert_eq!(content.as_ref(), content2);
     }
 }
+*/

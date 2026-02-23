@@ -160,7 +160,7 @@ impl NodeID {
         let hash = twox_hash::XxHash32::oneshot(0, root.as_ref());
         // we compute hash of root name for the higher part of the node id
         // the upper half of the node id is u64::MAX since client IDs canonically use only 53 bits
-        NodeID::new(ClientID::MAX_VALUE, hash.into())
+        NodeID::new(ClientID::ROOT, hash.into())
     }
 
     #[inline]
@@ -170,7 +170,7 @@ impl NodeID {
 
     #[inline]
     pub fn is_root(&self) -> bool {
-        self.client == ClientID::MAX_VALUE
+        self.client == ClientID::ROOT
     }
 
     #[inline]

@@ -1,7 +1,7 @@
 use crate::block::InsertBlockData;
-use crate::content::{BlockContentRef, ContentRef};
+use crate::content::{BlockContentRef, Content};
 use crate::prelim::Prelim;
-use crate::{lib0, Transaction};
+use crate::{Transaction, lib0};
 use bytes::{Bytes, BytesMut};
 use serde::de::{Error, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
