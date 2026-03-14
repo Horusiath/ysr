@@ -1,12 +1,11 @@
 use crate::block::InsertBlockData;
-use crate::content::{BlockContentRef, ContentType};
+use crate::content::ContentType;
 use crate::lib0::Value;
 use crate::node::NodeType;
 use crate::prelim::Prelim;
 use crate::types::Capability;
 use crate::{Clock, In, Mounted, Transaction, Unmounted};
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
 use std::ops::{Deref, DerefMut, RangeBounds};
 
 pub type ListRef<Txn> = Mounted<List, Txn>;
@@ -176,7 +175,7 @@ mod test {
     use crate::lib0::Value;
     use crate::read::DecoderV1;
     use crate::test_util::{multi_doc, sync};
-    use crate::{lib0, In, List, MapPrelim, Optional, StateVector, Transaction, Unmounted};
+    use crate::{In, List, MapPrelim, Optional, StateVector, Transaction, Unmounted, lib0};
     use std::collections::{BTreeMap, HashMap};
 
     #[test]

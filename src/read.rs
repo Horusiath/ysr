@@ -1,6 +1,6 @@
 use crate::block::ID;
 use crate::varint::{Signed, SignedVarInt, VarInt};
-use crate::{lib0, ClientID, Clock};
+use crate::{ClientID, Clock, lib0};
 use serde::de::DeserializeOwned;
 use std::fmt::{Debug, Display, Formatter};
 use std::io::{Cursor, Read, Write};

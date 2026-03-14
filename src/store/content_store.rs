@@ -1,62 +1,40 @@
+use crate::ID;
 use crate::block_reader::BlockRange;
 use crate::content::{Content, ContentType};
-use crate::store::lmdb::store::KEY_PREFIX_CONTENT;
-use crate::{Clock, ID, Optional};
-use lmdb_rs_m::{Cursor, MdbError, MdbValue, ToMdbValue};
+use crate::store::{KEY_PREFIX_CONTENT, ReadableBytes};
+use lmdb_rs_m::{Cursor, Database, MdbError, MdbValue, ToMdbValue};
+use std::borrow::Cow;
 use std::fmt::{Debug, Formatter};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 #[repr(transparent)]
+#[derive(Clone, Copy)]
 pub(crate) struct ContentStore<'a> {
-    cursor: Cursor<'a>,
+    db: &'a Database<'a>,
 }
 
 impl<'a> ContentStore<'a> {
     const PREFIX: u8 = KEY_PREFIX_CONTENT;
 
-    pub fn new(cursor: Cursor<'a>) -> Self {
-        ContentStore { cursor }
+    pub fn new(db: &'a Database<'a>) -> Self {
+        ContentStore { db }
     }
 
-    /// Returns a block key range current cursor is pointing to.
-    /// If cursor is not pointing anywhere within content keyspace `(None, None)` will be returned.
-    /// If cursor points to a block having a single element `(Some(id), None)` will be returned.
-    /// If cursor points to a block having multiple splittable elements `(Some(id), Some(end))` will be returned.
-    pub fn current_id(&mut self) -> crate::Result<Option<&ID>> {
-        let key: &[u8] = self.cursor.get_key()?;
-        if key[0] != Self::PREFIX {
-            return Ok(None);
-        }
-
-        let id = ID::parse(&key[1..])?;
-        Ok(Some(id))
-    }
-
-    pub fn seek(&mut self, id: ID) -> crate::Result<Option<&'a [u8]>> {
-        let key = BlockContentKey::new(id);
-        match self.cursor.to_key(&key) {
-            Ok(_) => {
-                let value: &'a [u8] = self.cursor.get_value()?;
-                Ok(Some(value))
-            }
+    pub fn get(&self, key: ID) -> crate::Result<Option<&'a [u8]>> {
+        let key = BlockContentKey::new(key);
+        match self.db.get(&key.as_bytes()) {
+            Ok(value) => Ok(Some(value)),
             Err(MdbError::NotFound) => Ok(None),
             Err(e) => Err(e.into()),
         }
     }
 
-    pub fn read_range<'b: 'a>(
-        &'b mut self,
-        content_type: ContentType,
-        range: BlockRange,
-    ) -> ReadRange<'b> {
-        ReadRange::new(self, content_type, range)
-    }
-
     pub fn insert(&mut self, id: &ID, content: &[Content<'_>]) -> crate::Result<()> {
         let mut id = *id;
+        let mut cursor = self.db.new_cursor()?;
         for content in content {
             let key = BlockContentKey::new(id);
-            self.cursor.set(&key, content.bytes(), 0)?;
+            cursor.set(&key, &content.bytes(), 0)?;
             id.clock += 1; // this will only happen for multipart
         }
         Ok(())
@@ -78,154 +56,126 @@ impl<'a> ContentStore<'a> {
                 true // these types can be stored on multiple entries
             }
         };
+        let mut cursor = self.db.new_cursor()?;
         let mut curr = *range.head();
         let key = BlockContentKey::new(curr);
-        self.cursor.to_key(&key)?;
-        self.cursor.del()?;
+        cursor.to_key(&key)?;
+        cursor.del()?;
         let mut deleted_entries = 1;
 
         if is_multipart {
             let end = ID::new(curr.client, range.end());
             while curr != end {
-                self.cursor.to_next_key()?;
-                curr = match self.current_id()? {
-                    Some(&id) if id != end => id,
-                    _ => break,
+                cursor.to_next_key()?;
+                curr = match parse_id(cursor.get_key()?)? {
+                    Some(id) => *id,
+                    None => break,
                 };
-
-                self.cursor.del()?;
-                deleted_entries += 1;
+                if curr != end {
+                    cursor.del()?;
+                    deleted_entries += 1;
+                }
             }
         }
         Ok(deleted_entries)
     }
 
-    pub fn iter(&mut self) -> Iter<'a> {
-        Iter { store: self }
+    pub fn read_range(&self, content_type: ContentType, range: BlockRange) -> ReadRange<'_> {
+        ReadRange::new(self.db, content_type, range)
     }
 
-    pub fn inspect(&mut self) -> Inspect<'a> {
-        Inspect { store: self }
+    pub fn inspect(&self) -> Inspect<'a> {
+        Inspect { db: self.db }
     }
 }
 
-pub struct Iter<'a> {
-    store: &'a mut ContentStore<'a>,
-}
-
-impl<'a> Iter<'a> {
-    pub fn next(&mut self) -> crate::Result<Option<(&'a ID, &'a [u8])>> {
-        match self.store.current_id()? {
-            None => Ok(None),
-            Some(id) => {
-                let value: &'a [u8] = self.store.cursor.get_value()?;
-                self.store.cursor.to_next_key().optional()?;
-                Ok(Some((id, value)))
-            }
-        }
+fn parse_id<'a>(key: &'a [u8]) -> crate::Result<Option<&'a ID>> {
+    if key[0] != ContentStore::PREFIX {
+        return Ok(None);
     }
+
+    let id = ID::parse(&key[1..])?;
+    Ok(Some(id))
 }
 
 pub struct Inspect<'tx> {
-    store: &'tx mut ContentStore<'tx>,
+    db: &'tx Database<'tx>,
 }
 
 impl<'tx> Debug for Inspect<'tx> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let mut s = f.debug_map();
 
-        let mut i = self.store.iter();
-        while let Some((id, content)) = i.next().map_err(|_| std::fmt::Error)? {
+        let mut cursor = self.db.new_cursor().map_err(|_| std::fmt::Error)?;
+        cursor
+            .to_gte_key(&[ContentStore::PREFIX].as_ref())
+            .map_err(|_| std::fmt::Error)?;
+        while let Some(id) =
+            parse_id(cursor.get_key().map_err(|_| std::fmt::Error)?).map_err(|_| std::fmt::Error)?
+        {
             s.key(id);
-            s.value(&ReadableBytes::new(content));
+            s.value(&ReadableBytes::new(
+                cursor.get_value().map_err(|_| std::fmt::Error)?,
+            ));
+            cursor.to_next_key().map_err(|_| std::fmt::Error)?;
         }
-
         s.finish()
     }
 }
 
-struct ReadableBytes<'a> {
-    bytes: &'a [u8],
-}
-
-impl<'a> ReadableBytes<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes }
-    }
-}
-
-impl<'a> Debug for ReadableBytes<'a> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "b\"")?;
-        for &b in self.bytes {
-            // https://doc.rust-lang.org/reference/tokens.html#byte-escapes
-            if b == b'\n' {
-                write!(f, "\\n")?;
-            } else if b == b'\r' {
-                write!(f, "\\r")?;
-            } else if b == b'\t' {
-                write!(f, "\\t")?;
-            } else if b == b'\\' || b == b'"' {
-                write!(f, "\\{}", b as char)?;
-            } else if b == b'\0' {
-                write!(f, "\\0")?;
-            // ASCII printable
-            } else if (0x20..0x7f).contains(&b) {
-                write!(f, "{}", b as char)?;
-            } else {
-                write!(f, "\\x{:02x}", b)?;
-            }
-        }
-        write!(f, "\"")?;
-        Ok(())
-    }
-}
-
 pub struct ReadRange<'a> {
-    store: &'a mut ContentStore<'a>,
+    state: ReadRangeState<'a>,
     range: BlockRange,
     content_type: ContentType,
-    initialized: bool,
+}
+
+enum ReadRangeState<'a> {
+    Uninit(&'a Database<'a>),
+    Init(Cursor<'a>),
+    Finished,
 }
 
 impl<'a> ReadRange<'a> {
-    fn new(store: &'a mut ContentStore<'a>, content_type: ContentType, range: BlockRange) -> Self {
+    fn new(cursor: &'a Database<'a>, content_type: ContentType, range: BlockRange) -> Self {
         ReadRange {
-            store,
+            state: ReadRangeState::Uninit(cursor),
             range,
             content_type,
-            initialized: false,
         }
     }
 
     pub fn next(&mut self) -> crate::Result<Option<Content<'a>>> {
-        if !self.initialized {
-            if self.initialise()? {
-                self.initialized = true;
-            } else {
-                return Ok(None);
+        match &mut self.state {
+            ReadRangeState::Finished => Ok(None),
+            ReadRangeState::Init(cursor) => {
+                cursor.to_next_key()?;
+                let end = ID::new(self.range.head().client, self.range.end());
+                match parse_id(cursor.get_key()?)? {
+                    Some(&id) if id <= end => {
+                        let content =
+                            Content::new(self.content_type, Cow::Borrowed(cursor.get_value()?));
+                        Ok(Some(content))
+                    }
+                    _ => {
+                        self.state = ReadRangeState::Finished;
+                        Ok(None)
+                    }
+                }
             }
-        } else {
-            self.store.cursor.to_next_key()?;
-        };
-
-        match self.store.current_range()? {
-            Some(&range)
-                if self.range.head().client == range.head().client
-                    && self.range.head().clock <= range.end() =>
-            {
-                let value: &'a [u8] = self.store.cursor.get_value()?;
-                let content = Content::new(self.content_type, value);
-                Ok(Some(content)) //TODO: implement content slicing when block range intersects content boundaries
+            ReadRangeState::Uninit(db) => {
+                let mut cursor = db.new_cursor()?;
+                let key = BlockContentKey::new(*self.range.head());
+                let value = match cursor.to_key(&key.as_bytes()) {
+                    Ok(_) => Content::new(self.content_type, Cow::Borrowed(cursor.get_value()?)),
+                    Err(MdbError::NotFound) => {
+                        self.state = ReadRangeState::Finished;
+                        return Ok(None);
+                    }
+                    Err(e) => return Err(e.into()),
+                };
+                self.state = ReadRangeState::Init(cursor);
+                Ok(Some(value))
             }
-            _ => Ok(None), // we reached the end
-        }
-    }
-
-    fn initialise(&mut self) -> crate::Result<bool> {
-        match self.store.current_range()? {
-            Some(current) if current.head() == self.range.head() => Ok(Some(Clock::new(0))), // cursor is in correct position
-            _ => self.store.seek(*self.range.head()), // we need to reset cursor position
         }
     }
 }

@@ -2,8 +2,8 @@ use crate::block::ID;
 use crate::read::{Decode, Decoder, ReadExt};
 use crate::write::{Encode, Encoder, WriteExt};
 use crate::{ClientID, Clock};
-use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 use std::ops::Range;
 
 /// IDSet is a temporary object that is created when needed.

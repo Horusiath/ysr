@@ -1,4 +1,4 @@
-use crate::store::lmdb::store::KEY_PREFIX_STATE_VECTOR;
+use crate::store::KEY_PREFIX_STATE_VECTOR;
 use crate::{ClientID, Clock, Optional, StateVector};
 use lmdb_rs_m::{MdbError, MdbValue, ToMdbValue};
 use std::collections::BTreeMap;
@@ -6,35 +6,26 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 #[repr(transparent)]
 pub struct StateVectorStore<'tx> {
-    cursor: lmdb_rs_m::Cursor<'tx>,
+    db: &'tx lmdb_rs_m::Database<'tx>,
 }
 
 impl<'tx> StateVectorStore<'tx> {
-    pub fn new(cursor: lmdb_rs_m::Cursor<'tx>) -> Self {
-        Self { cursor }
-    }
-
-    pub fn current(&mut self) -> crate::Result<Option<(&'tx ClientID, &'tx Clock)>> {
-        let key: &'tx [u8] = self.cursor.get_key()?;
-        if key[0] != KEY_PREFIX_STATE_VECTOR {
-            return Ok(None);
-        }
-
-        let client: &'tx ClientID = ClientID::parse(&key[1..])?;
-        let value: &'tx [u8] = self.cursor.get_value()?;
-        let clock: &'tx Clock = Clock::ref_from_bytes(value)?;
-        Ok(Some((client, clock)))
+    pub fn new(db: &'tx lmdb_rs_m::Database<'tx>) -> Self {
+        Self { db }
     }
 
     pub fn state_vector(&mut self) -> crate::Result<StateVector> {
         let mut buf = BTreeMap::new();
+        let mut cursor = self.db.new_cursor()?;
 
         let key = StateVectorKey::new(unsafe { ClientID::new_unchecked(0) });
-        match self.cursor.to_gte_key(&key) {
+        match cursor.to_gte_key(&key) {
             Ok(_) => {
-                while let Some((&client, &clock)) = self.current()? {
-                    buf.insert(client, clock);
-                    if self.cursor.to_next_key().optional()?.is_none() {
+                while let Some(key) = StateVectorKey::parse(cursor.get_key()?) {
+                    let clock = *Clock::ref_from_bytes(cursor.get_value()?)
+                        .map_err(|_| crate::Error::InvalidMapping("Clock"))?;
+                    buf.insert(key.client, clock);
+                    if cursor.to_next_key().optional()?.is_none() {
                         break;
                     }
                 }
@@ -48,16 +39,18 @@ impl<'tx> StateVectorStore<'tx> {
     pub fn update(&mut self, client: ClientID, clock: Clock) -> crate::Result<Clock> {
         let key = StateVectorKey::new(client);
         let value = clock.as_bytes();
-        match self.cursor.to_key(&key) {
+        let mut cursor = self.db.new_cursor()?;
+        match cursor.to_key(&key) {
             Ok(_) => {
-                let local_clock = *Clock::ref_from_bytes(self.cursor.get_value()?)?;
+                let local_clock = *Clock::ref_from_bytes(cursor.get_value()?)
+                    .map_err(|_| crate::Error::InvalidMapping("Clock"))?;
                 if local_clock < clock {
-                    self.cursor.replace(&value)?;
+                    cursor.replace(&value)?;
                 }
                 Ok(local_clock)
             }
             Err(MdbError::NotFound) => {
-                self.cursor.set(&key, &value, 0)?;
+                cursor.set(&key, &value, 0)?;
                 Ok(Clock::new(0))
             }
             Err(e) => Err(e.into()),
@@ -66,10 +59,10 @@ impl<'tx> StateVectorStore<'tx> {
 
     pub fn get_clock(&mut self, client_id: ClientID) -> crate::Result<Option<&'tx Clock>> {
         let key = StateVectorKey::new(client_id);
-        match self.cursor.to_key(&key) {
-            Ok(_) => {
-                let value: &'tx [u8] = self.cursor.get_value()?;
-                let clock = Clock::ref_from_bytes(value)?;
+        match self.db.get(&key) {
+            Ok(value) => {
+                let clock = Clock::ref_from_bytes(value)
+                    .map_err(|_| crate::Error::InvalidMapping("Clock"))?;
                 Ok(Some(clock))
             }
             Err(MdbError::NotFound) => Ok(None),
@@ -92,10 +85,21 @@ impl StateVectorKey {
             client,
         }
     }
+
+    pub fn parse(data: &[u8]) -> Option<&Self> {
+        let key = Self::ref_from_bytes(data).ok()?;
+        if key.tag == KEY_PREFIX_STATE_VECTOR {
+            Some(key)
+        } else {
+            None
+        }
+    }
 }
 
 impl ToMdbValue for StateVectorKey {
     fn to_mdb_value(&self) -> MdbValue<'_> {
-        MdbValue::new_from_sized(self.as_bytes())
+        let slice = self.as_bytes();
+        let ptr = slice.as_ptr() as *const _;
+        unsafe { MdbValue::new(ptr, slice.len()) }
     }
 }

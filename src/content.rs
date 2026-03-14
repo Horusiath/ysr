@@ -3,10 +3,11 @@ use crate::block::{
     CONTENT_TYPE_EMBED, CONTENT_TYPE_FORMAT, CONTENT_TYPE_JSON, CONTENT_TYPE_NODE,
     CONTENT_TYPE_STRING,
 };
+use crate::lib0;
+use crate::lib0::Value;
 use crate::node::NodeID;
-use crate::store::lmdb::store::SplitResult;
+use crate::read::{Decoder, ReadExt};
 use crate::write::WriteExt;
-use crate::{Clock, lib0};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::fmt::{Debug, Display, Formatter};
@@ -146,6 +147,10 @@ impl Content<'static> {
         let attr = FormatAttribute::compose(key, value)?;
         Ok(Self::new(ContentType::Format, Cow::Owned(attr)))
     }
+
+    pub fn string<S: Into<String>>(value: S) -> Self {
+        Self::new(ContentType::String, Cow::Owned(value.into().into_bytes()))
+    }
 }
 
 impl<'a> Content<'a> {
@@ -153,6 +158,17 @@ impl<'a> Content<'a> {
         Self { content_type, data }
     }
 
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.bytes().is_empty()
+    }
+
+    #[inline]
     pub fn content_type(&self) -> ContentType {
         self.content_type
     }
@@ -314,6 +330,30 @@ impl<'a> Display for Content<'a> {
     }
 }
 
+impl<'a> TryFrom<Content<'a>> for Value {
+    type Error = crate::Error;
+
+    fn try_from(value: Content<'a>) -> Result<Self, Self::Error> {
+        match value.content_type() {
+            ContentType::Atom => Ok(lib0::from_slice(value.bytes())?),
+            _ => Err(crate::Error::InvalidMapping("atom")),
+        }
+    }
+}
+
+impl<'a> TryFrom<Content<'a>> for FormatAttribute<'a> {
+    type Error = crate::Error;
+
+    fn try_from(value: Content<'a>) -> Result<Self, Self::Error> {
+        match value.content_type() {
+            ContentType::Format => Ok(FormatAttribute {
+                data: value.bytes(),
+            }),
+            _ => Err(crate::Error::InvalidMapping("format attribute")),
+        }
+    }
+}
+
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FormatAttribute<'a> {
@@ -321,12 +361,28 @@ pub struct FormatAttribute<'a> {
 }
 
 impl FormatAttribute<'static> {
+    pub fn decode(decoder: &mut impl Decoder) -> crate::Result<Vec<u8>> {
+        let key_len: u64 = decoder.read_var()?;
+        if key_len >= u8::MAX as u64 {
+            return Err(crate::Error::KeyTooLong);
+        }
+
+        let mut buf = Vec::with_capacity(key_len as usize + 8);
+        buf.write_var(key_len)?;
+        std::io::copy(&mut decoder.take(key_len), &mut buf)?;
+
+        let value_len: u64 = decoder.read_var()?;
+        buf.write_var(value_len)?;
+        std::io::copy(&mut decoder.take(value_len), &mut buf)?;
+        Ok(buf)
+    }
+
     pub fn compose<T: Serialize>(key: &str, value: &T) -> crate::Result<Vec<u8>> {
         if key.len() >= u8::MAX as usize {
             return Err(crate::Error::KeyTooLong);
         }
 
-        let mut buf = Vec::with_capacity(key.len() + 1);
+        let mut buf = Vec::with_capacity(key.len() + 8);
         buf.write_u8(key.len() as u8)?;
         buf.extend_from_slice(key.as_bytes());
         lib0::to_writer(&mut buf, value)?;

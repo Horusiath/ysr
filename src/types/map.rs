@@ -1,19 +1,19 @@
-use crate::block::{Block, BlockMut, InsertBlockData, ID};
-use crate::content::{BlockContentRef, ContentType, TryFromContent};
+use crate::block::{BlockMut, ID, InsertBlockData};
+use crate::content::{Content, ContentType};
 use crate::integrate::IntegrationContext;
 use crate::node::{Node, NodeID, NodeType};
 use crate::prelim::Prelim;
-use crate::store::lmdb::store::{
-    map_key, BlockContentKey, BlockKey, CursorExt, OwnedCursor, KEY_PREFIX_MAP,
-};
-use crate::store::lmdb::BlockStore;
+use crate::store::Db;
+use crate::store::map_entries::MapEntries;
 use crate::types::Capability;
-use crate::{lib0, Clock, Error, In, Mounted, Optional, Transaction, Unmounted};
+use crate::{Clock, Error, In, Mounted, Optional, Transaction, Unmounted, lib0};
 use lmdb_rs_m::{Database, MdbError};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::marker::PhantomData;
+use std::mem::MaybeUninit;
 use std::ops::{Deref, DerefMut};
-use zerocopy::{FromBytes, IntoBytes};
+use zerocopy::IntoBytes;
 
 pub type MapRef<Txn> = Mounted<Map, Txn>;
 
@@ -30,36 +30,40 @@ impl<'tx, 'db> MapRef<&'tx Transaction<'db>> {
     pub fn get<K, V>(&self, key: K) -> crate::Result<V>
     where
         K: AsRef<str>,
-        V: TryFromContent,
+        V: for<'a> TryFrom<Content<'a>, Error = Error>,
     {
         let db = self.tx.db();
-        let id = *db.entry(*self.block.id(), key.as_ref())?;
-        let block = db.fetch_block(id, false)?;
+        let mut map_entries = db.map_entries()?;
+        let entry_id = *map_entries
+            .get(self.block.id(), key.as_ref())?
+            .ok_or(Error::NotFound)?;
+        let mut blocks = db.blocks()?;
+        let block = blocks.seek(entry_id)?.ok_or(Error::NotFound)?;
         if block.is_deleted() {
-            Err(crate::Error::NotFound)
+            Err(Error::NotFound)
         } else {
-            let content_type = block.content_type();
-            let content = db.block_content(id, content_type)?;
-            V::try_from_content(block, content)
+            let content = match block.try_inline_content() {
+                Some(content) => content, // content small enough to fit inline block header
+                None => {
+                    // we need to reach for the content store
+                    let mut content_store = db.contents()?;
+                    let content = content_store.seek(*block.id())?.ok_or(Error::NotFound)?;
+                    Content::new(block.content_type(), Cow::Borrowed(content))
+                }
+            };
+            V::try_from(content)
         }
     }
 
     pub fn len(&self) -> crate::Result<usize> {
-        let prefix = self.map_prefix();
         let db = self.tx.db();
-        let mut iter = Iter::<lib0::Value>::new(db, prefix);
+        let mut map_entries = db.map_entries()?;
+        let mut iter = map_entries.entries(self.node_id());
         let mut len = 0;
-        while iter.next_entry()?.is_some() {
+        while let Some(_) = iter.next()? {
             len += 1;
         }
         Ok(len)
-    }
-
-    fn map_prefix(&self) -> [u8; 9] {
-        let mut prefix = [0u8; 1 + size_of::<NodeID>()];
-        prefix[0] = KEY_PREFIX_MAP;
-        prefix[1..].copy_from_slice(&self.node_id().as_bytes());
-        prefix
     }
 
     pub fn contains_key<K>(&self, key: K) -> crate::Result<bool>
@@ -67,22 +71,24 @@ impl<'tx, 'db> MapRef<&'tx Transaction<'db>> {
         K: AsRef<str>,
     {
         let db = self.tx.db();
-        let mut cursor = db.new_cursor()?;
-        let key = map_key(*self.block.id(), key.as_ref());
-        match cursor.to_key(&key.as_ref()) {
-            Ok(()) => Ok(true),
-            Err(MdbError::NotFound) => Ok(false),
-            Err(e) => Err(Error::Lmdb(e)),
+        let mut map_entries = db.map_entries()?;
+        let entry_id = match map_entries.get(self.block.id(), key.as_ref())? {
+            None => return Ok(false),
+            Some(id) => *id,
+        };
+        let mut blocks = db.blocks()?;
+        match blocks.seek(entry_id)? {
+            None => Ok(false),
+            Some(block) => Ok(!block.is_deleted()),
         }
     }
 
     pub fn iter<T>(&self) -> Iter<'tx, T>
     where
-        T: TryFromContent,
+        T: TryFrom<Content<'tx>, Error = Error>,
     {
-        let prefix = self.map_prefix();
         let db = self.tx.db();
-        Iter::new(db, prefix)
+        Iter::new(db, *self.node_id())
     }
 
     pub fn to_value(&self) -> crate::Result<crate::lib0::Value> {
@@ -103,60 +109,65 @@ impl<'tx, 'db> MapRef<&'tx mut Transaction<'db>> {
         K: AsRef<str>,
         V: Prelim,
     {
+        let key = key.as_ref();
         let node_id = *self.node_id();
-        let db = self.tx.db();
-        let left_id = if let Some(id) = db.entry(*self.block.id(), key.as_ref()).optional()? {
-            let block = db.fetch_block(*id, false)?;
-            Some(block.last_id())
-        } else {
-            None
-        };
         let (mut db, state) = self.tx.split_mut();
+        let mut map_entries = db.map_entries()?;
+        let left_id = map_entries.get(&node_id, key)?;
         let id = state.next_id();
         let mut insert = InsertBlockData::new(
             id,
             Clock::new(1),
-            left_id.as_ref(),
+            left_id,
             None,
-            left_id.as_ref(),
+            left_id,
             None,
             Node::Nested(node_id),
             Some(key.as_ref()),
         );
         value.prepare(&mut insert)?;
-        let mut context = IntegrationContext::create(&mut insert, Clock::new(0), &mut db)?;
+        let mut blocks = db.blocks()?;
+        let mut context = IntegrationContext::create(&mut insert, Clock::new(0), &mut blocks)?;
         insert.integrate(&mut db, state, &mut context)?;
         value.integrate(&mut insert, &mut self.tx)?;
         Ok(())
     }
 
-    pub fn remove<K>(&mut self, key: K) -> crate::Result<()>
+    pub fn remove<K>(&mut self, key: K) -> crate::Result<bool>
     where
         K: AsRef<str>,
     {
         let (mut db, state) = self.tx.split_mut();
-        let id = *db.entry(*self.block.id(), key.as_ref())?;
-        let block = db.fetch_block(id, false)?;
+        let mut map_entries = db.map_entries()?;
+        let block_id = match map_entries.get(self.node_id(), key.as_ref())? {
+            None => return Ok(false),
+            Some(id) => *id,
+        };
+        let mut blocks = db.blocks()?;
+        let block = match blocks.seek(block_id)? {
+            None => return Ok(false),
+            Some(block) => block,
+        };
         if !block.is_deleted() {
             let mut block: BlockMut = block.into();
-            state.delete(&mut db, &mut block, false)?;
+            state.delete(&mut blocks, &mut block, false)?;
+            Ok(true)
+        } else {
+            Ok(false)
         }
-        Ok(())
     }
 
     pub fn clear(&mut self) -> crate::Result<()> {
-        let node_id = *self.node_id();
         let (mut db, state) = self.tx.split_mut();
-        let mut cursor = db.new_cursor()?;
-        let mut to_delete = Vec::new();
-        for res in cursor.entries(node_id) {
-            let (key, id) = res?;
-            to_delete.push(*id);
-        }
-        for id in to_delete {
-            cursor.to_key(&BlockKey::new(id))?;
-            let mut block: BlockMut = cursor.get_block()?.into();
-            cursor.delete_current(state, &mut block, false)?;
+        let mut map_entries = db.map_entries()?;
+        let mut blocks = db.blocks()?;
+        let mut iter = map_entries.entries(self.node_id());
+        while let Some(key) = iter.next()? {
+            let id = key.block_id();
+            if let Some(block) = blocks.seek(*id)? {
+                let mut block: BlockMut = block.into();
+                state.delete(&mut blocks, &mut block, false)?;
+            }
         }
         Ok(())
     }
@@ -174,7 +185,23 @@ impl<'tx, 'db> Deref for MapRef<&'tx mut Transaction<'db>> {
 
 enum IterState<'a> {
     Uninit(Option<Database<'a>>),
-    Init(OwnedCursor<'a>),
+    Init(InitializedIterator<'a>),
+}
+
+struct InitializedIterator<'a> {
+    db: Database<'a>,
+    map_entries: crate::store::MapEntriesStore<'a>,
+}
+
+impl<'a> InitializedIterator<'a> {
+    pub fn init(db: Database<'a>) -> crate::Result<Self> {
+        let mut init = InitializedIterator {
+            db,
+            map_entries: unsafe { MaybeUninit::uninit().assume_init() },
+        };
+        init.map_entries = init.db.map_entries()?;
+        Ok(init)
+    }
 }
 
 impl<'a> IterState<'a> {
@@ -184,18 +211,18 @@ impl<'a> IterState<'a> {
 }
 pub struct Iter<'a, T> {
     state: IterState<'a>,
-    prefix: [u8; 9],
+    node_id: NodeID,
     _phantom: PhantomData<T>,
 }
 
 impl<'a, T> Iter<'a, T>
 where
-    T: TryFromContent,
+    T: TryFrom<Content<'a>>,
 {
-    pub fn new(db: Database<'a>, prefix: [u8; 9]) -> Self {
+    pub fn new(db: Database<'a>, node_id: NodeID) -> Self {
         Iter {
             state: IterState::new(db),
-            prefix,
+            node_id,
             _phantom: PhantomData,
         }
     }
@@ -301,7 +328,7 @@ where
 
 impl<'a, T> Iterator for Iter<'a, T>
 where
-    T: TryFromContent,
+    T: TryFrom<Content<'a>>,
 {
     type Item = crate::Result<(&'a str, T)>;
 
@@ -451,7 +478,7 @@ mod test {
 
     use crate::test_util::{multi_doc, sync};
     use crate::{
-        lib0, In, List, ListPrelim, ListRef, Map, MapPrelim, Optional, StateVector, Unmounted,
+        In, List, ListPrelim, ListRef, Map, MapPrelim, Optional, StateVector, Unmounted, lib0,
     };
     use serde::Deserialize;
     use std::collections::HashMap;

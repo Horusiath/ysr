@@ -1,8 +1,7 @@
 use crate::block::InsertBlockData;
-use crate::content::{BlockContent, ContentType};
-use crate::{lib0, Clock, Transaction};
+use crate::content::{Content, ContentType};
+use crate::{Clock, Transaction};
 use serde::Serialize;
-use smallvec::smallvec;
 
 pub trait Prelim {
     type Return;
@@ -31,7 +30,7 @@ where
 
     fn prepare(&self, insert: &mut InsertBlockData) -> crate::Result<()> {
         insert.block.set_content_type(ContentType::Atom);
-        insert.content = BlockContent::atom([self])?;
+        insert.content = Content::atom(&self)?;
         Ok(())
     }
 

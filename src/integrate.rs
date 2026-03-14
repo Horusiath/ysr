@@ -1,7 +1,6 @@
 use crate::block::{BlockMut, InsertBlockData};
 use crate::node::NodeType;
-use crate::store::lmdb::store::SplitResult;
-use crate::store::lmdb::BlockStore;
+use crate::store::block_store::{BlockStore, SplitResult};
 use crate::{Clock, Optional};
 use lmdb_rs_m::Database;
 use std::collections::HashSet;
@@ -18,10 +17,10 @@ impl IntegrationContext {
     pub fn create(
         target: &mut InsertBlockData,
         offset: Clock,
-        db: &mut Database,
+        blocks: &mut BlockStore<'_>,
     ) -> crate::Result<Self> {
         let left = if let Some(&origin) = target.block.origin_left() {
-            Some(match db.split_block(origin)? {
+            Some(match db.split(origin)? {
                 SplitResult::Unchanged(left) => left.into(),
                 SplitResult::Split(left, _) => left,
             })
@@ -29,7 +28,7 @@ impl IntegrationContext {
             None
         };
         let right = if let Some(&origin) = target.block.origin_right() {
-            Some(match db.split_block(origin)? {
+            Some(match db.split(origin)? {
                 SplitResult::Unchanged(block) => block.into(),
                 SplitResult::Split(_, right) => right,
             })

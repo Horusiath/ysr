@@ -1,7 +1,7 @@
+use crate::Clock;
 use crate::id_set::IDSet;
 use crate::read::{Decode, Decoder, ReadExt};
 use crate::write::{Encode, Encoder, WriteExt};
-use crate::Clock;
 use crate::{ClientID, ID};
 use std::cmp::Ordering;
 use std::collections::btree_map::Entry;

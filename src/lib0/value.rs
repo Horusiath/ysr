@@ -1,8 +1,4 @@
-use crate::block::InsertBlockData;
-use crate::content::{BlockContentRef, Content};
-use crate::prelim::Prelim;
-use crate::{Transaction, lib0};
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use serde::de::{Error, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;

@@ -1,19 +1,82 @@
-use crate::store::lmdb::store::KEY_PREFIX_BLOCK;
-use crate::{Block, Error, ID};
-use lmdb_rs_m::{MdbError, MdbValue, ToMdbValue};
+use crate::node::{Node, NodeType};
+use crate::store::KEY_PREFIX_BLOCK;
+use crate::{Block, BlockHeader, BlockMut, Error, ID};
+use lmdb_rs_m::{Database, MdbError, MdbValue, ToMdbValue};
 use std::fmt::{Debug, Formatter};
-use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, TryFromBytes};
 
 #[repr(transparent)]
-pub struct BlockStore<'tx> {
-    cursor: lmdb_rs_m::Cursor<'tx>,
+#[derive(Clone, Copy)]
+pub(crate) struct BlockStore<'tx> {
+    db: &'tx Database<'tx>,
 }
 
 impl<'tx> BlockStore<'tx> {
+    pub fn new(db: &'tx Database<'tx>) -> Self {
+        Self { db }
+    }
+
+    pub fn cursor(&self) -> crate::Result<BlockCursor<'tx>> {
+        let cursor = self.db.new_cursor()?;
+        Ok(BlockCursor { cursor })
+    }
+
+    pub fn get(&self, id: ID) -> crate::Result<Block<'tx>> {
+        let key = BlockKey::new(id);
+        match self.db.get(&key.as_bytes()) {
+            Ok(value) => Ok(Block::new(id, value)?),
+            Err(MdbError::NotFound) => Err(crate::Error::NotFound),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn get_or_insert_node(&self, node: Node, node_type: NodeType) -> crate::Result<BlockMut> {
+        let node_id = node.id();
+        let key = BlockKey::new(node_id);
+        match self.db.get(&key) {
+            Ok(value) => {
+                let header: &BlockHeader = BlockHeader::try_ref_from_bytes(value)
+                    .map_err(|_| crate::Error::MalformedBlock(node_id))?;
+                Ok(BlockMut::new(node_id, header.clone()))
+            }
+            Err(MdbError::NotFound) if node_id.is_root() => {
+                // root types don't carry over extra data
+                let block = BlockMut::new(node_id, BlockHeader::empty());
+                self.db.set(&key, block.header())?;
+                Ok(block)
+            }
+            Err(MdbError::NotFound) => Err(crate::Error::NotFound),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Inserts a new block into database.
+    pub fn insert(&self, block: Block<'_>) -> crate::Result<()> {
+        let key = BlockKey::new(*block.id());
+        self.db.set(&key, block.header())?;
+        Ok(())
+    }
+
+    pub fn inspect(&self) -> Inspector<'_> {
+        Inspector { db: self.db }
+    }
+}
+
+pub struct BlockCursor<'tx> {
+    cursor: lmdb_rs_m::Cursor<'tx>,
+}
+
+impl<'tx> BlockCursor<'tx> {
     const PREFIX: u8 = KEY_PREFIX_BLOCK;
 
-    pub fn new(cursor: lmdb_rs_m::Cursor<'tx>) -> Self {
-        Self { cursor }
+    /// Moves the cursor position into the given block location and replaces existing block header
+    /// with a provided one. This method will throw an error if a block hadn't been inserted into
+    /// a database before.
+    pub fn update(&mut self, block: Block<'tx>) -> crate::Result<()> {
+        let key = BlockKey::new(*block.id());
+        self.cursor.to_key(&key)?;
+        self.cursor.replace(block.header())?;
+        Ok(())
     }
 
     /// Returns an [ID] of the block at the current position.
@@ -133,26 +196,33 @@ impl<'tx> BlockStore<'tx> {
         self.seek_containing(*left_id) // left id is point at the end of the block
     }
 
-    /// Inserts a new block into database.
-    pub fn insert(&mut self, block: Block<'tx>) -> crate::Result<()> {
-        let key = BlockKey::new(*block.id());
-        self.cursor.set(&key, block.header(), 0)?;
+    #[inline]
+    pub fn update_current(&mut self, header: &BlockHeader) -> crate::Result<()> {
+        self.cursor.replace(header)?;
         Ok(())
     }
 
-    /// Moves the cursor position into the given block location and replaces existing block header
-    /// with a provided one. This method will throw an error if a block hadn't been inserted into
-    /// a database before.
-    pub fn update(&mut self, block: Block<'tx>) -> crate::Result<()> {
-        let key = BlockKey::new(*block.id());
-        self.cursor.to_key(&key)?;
-        self.cursor.replace(block.header())?;
-        Ok(())
+    pub fn split(&mut self, id: ID) -> crate::Result<SplitResult> {
+        let mut left: BlockMut = match self.seek_containing(id)? {
+            Some(block) => block.into(),
+            None => return Err(crate::Error::BlockNotFound(id)),
+        };
+        let offset = id.clock - left.id().clock;
+        match left.split(offset) {
+            None => Ok(SplitResult::Unchanged(left)),
+            Some(right) => {
+                self.update_current(left.header())?;
+                self.cursor
+                    .set(&right.id().as_bytes(), &right.as_block().as_bytes(), 0)?;
+                Ok(SplitResult::Split(left, right))
+            }
+        }
     }
+}
 
-    pub fn inspect(&mut self) -> Inspector<'_> {
-        Inspector { store: self }
-    }
+pub enum SplitResult {
+    Unchanged(BlockMut),
+    Split(BlockMut, BlockMut),
 }
 
 #[repr(C, packed)]
@@ -179,18 +249,19 @@ impl ToMdbValue for BlockKey {
 }
 
 pub struct Inspector<'tx> {
-    store: &'tx mut BlockStore<'tx>,
+    db: &'tx Database<'tx>,
 }
 
 impl<'tx> Debug for Inspector<'tx> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let mut s = f.debug_list();
-        if let Some(block) = self.store.current().map_err(|_| std::fmt::Error)? {
-            s.entry(&block);
+        let cursor = self.db.new_cursor().map_err(|_| std::fmt::Error)?;
+        let mut c = BlockCursor { cursor };
+        // we need to set cursor position at the beginning of the space
+        let _ = c.seek(ID::new(0.into(), 0.into()));
 
-            while let Some(block) = self.store.next().map_err(|_| std::fmt::Error)? {
-                s.entry(&block);
-            }
+        while let Some(block) = c.next().map_err(|_| std::fmt::Error)? {
+            s.entry(&block);
         }
 
         s.finish()

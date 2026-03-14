@@ -1,9 +1,10 @@
-use crate::block::{BlockMut, InsertBlockData, ID};
-use crate::node::{Node, NodeID, NodeType};
-use crate::store::lmdb::BlockStore;
 use crate::Transaction;
+use crate::block::{BlockMut, ID};
+use crate::node::{Node, NodeID, NodeType};
+use crate::store::Db;
 use std::borrow::{Borrow, BorrowMut, Cow};
 use std::marker::PhantomData;
+use std::ops::{Deref, DerefMut};
 
 pub mod list;
 pub mod map;
@@ -46,24 +47,32 @@ impl<Cap> Unmounted<Cap>
 where
     Cap: Capability,
 {
-    pub fn mount_mut<'db, Txn>(&self, mut tx: Txn) -> crate::Result<Mounted<Cap, Txn>>
+    pub fn mount_mut<'tx, 'db, Txn>(
+        &self,
+        tx: &'tx mut Txn,
+    ) -> crate::Result<Mounted<Cap, &'tx mut Transaction<'db>>>
     where
         Txn: BorrowMut<Transaction<'db>>,
     {
         let borrowed = tx.borrow_mut();
-        let block = borrowed
-            .db()
-            .get_or_insert_node(self.node.clone(), Cap::node_type())?;
-        Ok(Mounted::new(block, tx))
+        let db = borrowed.db();
+        let blocks = db.blocks();
+        let block = blocks.get_or_insert_node(self.node.clone(), Cap::node_type())?;
+        Ok(Mounted::new(block, borrowed))
     }
 
-    pub fn mount<'db, Txn>(&self, tx: Txn) -> crate::Result<Mounted<Cap, Txn>>
+    pub fn mount<'tx, 'db, Txn>(
+        &self,
+        tx: &'tx Txn,
+    ) -> crate::Result<Mounted<Cap, &'tx Transaction<'db>>>
     where
         Txn: Borrow<Transaction<'db>>,
     {
         let borrowed = tx.borrow();
-        let block: BlockMut = borrowed.db().fetch_block(self.node_id(), true)?.into();
-        Ok(Mounted::new(block, tx))
+        let db = borrowed.db();
+        let blocks = db.blocks();
+        let block: BlockMut = blocks.get_or_insert_node(self.node.clone(), Cap::node_type())?;
+        Ok(Mounted::new(block, borrowed))
     }
 }
 

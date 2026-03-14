@@ -2,26 +2,23 @@ mod block;
 mod block_reader;
 mod content;
 mod id_set;
+mod input;
+mod integrate;
 pub mod lib0;
 mod multi_doc;
 mod node;
+mod output;
+mod prelim;
 mod read;
 mod state_vector;
 mod store;
-mod transaction;
-mod types;
-mod varint;
-mod write;
-
-mod block_cursor;
-//mod bucket;
-mod input;
-mod integrate;
-mod output;
-mod prelim;
 #[cfg(test)]
 mod test_util;
+mod transaction;
+mod types;
 mod update;
+mod varint;
+mod write;
 
 pub use crate::block::{Block, BlockHeader, BlockMut, ID};
 pub use input::In;
@@ -84,6 +81,8 @@ pub enum Error {
     Lmdb(#[from] lmdb_rs_m::MdbError),
     #[error("expected value couldn't be fit into containing data")]
     ValueTooLarge,
+    #[error("hash collision detected on {0}")]
+    HashCollision(crate::U32),
 }
 
 impl From<TryReserveError> for Error {
@@ -98,7 +97,7 @@ impl From<CollectionAllocErr> for Error {
     }
 }
 
-impl Into<std::fmt::Error> for Error {
+impl Into<std::fmt::Error> for crate::Error {
     fn into(self) -> std::fmt::Error {
         std::fmt::Error
     }

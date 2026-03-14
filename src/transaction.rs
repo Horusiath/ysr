@@ -1,20 +1,18 @@
 use crate::block::{Block, BlockMut, ID};
 use crate::block_reader::{Carrier, Update};
-use crate::content::{ContentFormat, ContentType};
+use crate::content::ContentType;
 use crate::id_set::IDSet;
 use crate::node::{Node, NodeID};
 use crate::read::Decoder;
 use crate::state_vector::Snapshot;
-use crate::store::lmdb::store::{
-    BlockContentKey, BlockKey, CursorExt, MapBucketHashKey, KEY_PREFIX_BLOCK, KEY_PREFIX_INTERN_STR,
-};
-use crate::store::lmdb::BlockStore;
+use crate::store::Db;
+use crate::store::block_store::BlockStore;
 use crate::write::{Encode, Encoder, EncoderV1, WriteExt};
 use crate::{ClientID, Clock, Optional, StateVector, U32};
 use bitflags::bitflags;
 use bytes::{BufMut, Bytes, BytesMut};
 use lmdb_rs_m::{Database, DbHandle};
-use smallvec::{smallvec, SmallVec};
+use smallvec::{SmallVec, smallvec};
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
@@ -69,13 +67,61 @@ impl TransactionState {
 
     pub(crate) fn delete(
         &mut self,
-        db: &mut Database,
+        blocks: &mut BlockStore<'_>,
         block: &mut BlockMut,
         parent_deleted: bool,
     ) -> crate::Result<bool> {
-        let mut cursor = db.new_cursor()?;
-        cursor.to_key(&BlockKey::new(*block.id()))?;
-        cursor.delete_current(self, block, parent_deleted)
+        if block.is_deleted() {
+            return Ok(false);
+        }
+        block.set_deleted();
+        blocks.update(block.as_block())?;
+
+        self.delete_set.insert(*block.id(), block.clock_len());
+        self.add_changed_type(*block.parent(), parent_deleted, block.key_hash());
+
+        match block.content_type() {
+            ContentType::Node => {
+                // iterate over list values of the node and delete them
+                let mut current = block.start().copied();
+                while let Some(id) = current {
+                    if !self.delete(blocks, &mut block, true)?
+                        && block.id().clock < self.begin_state.get(&block.id().client)
+                    {
+                        // This will be gc'd later and we want to merge it if possible
+                        // We try to merge all deleted items after each transaction,
+                        // but we have no knowledge about that this needs to be merged
+                        // since it is not in transaction.ds. Hence we add it to transaction._mergeStructs
+                        self.merge_blocks.insert(*block.id());
+                    }
+                    current = block.right().copied();
+                }
+
+                //iterate over map entries of the node and delete them
+                let mut to_delete = Vec::new();
+                for result in self.entries(*block.parent()) {
+                    let (_, &entry_id) = result?;
+                    to_delete.push(entry_id);
+                }
+
+                for entry_id in to_delete {
+                    self.to_key(&BlockKey::new(entry_id))?;
+                    let mut block: BlockMut = self.get_block()?.into();
+                    if !self.delete_current(self, &mut block, true)?
+                        && entry_id.clock < self.begin_state.get(&entry_id.client)
+                    {
+                        // same as above
+                        self.merge_blocks.insert(entry_id);
+                    }
+                }
+                self.changed.remove(block.id());
+
+                // restore cursor position
+                self.to_key(&rollback_key)?;
+            }
+            _ => { /* not used */ }
+        }
+        Ok(true)
     }
 
     fn precommit<'db>(

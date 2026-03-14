@@ -1,16 +1,14 @@
-use crate::block::{BlockMut, InsertBlockData, ID};
-use crate::content::{BlockContent, BlockContentRef, ContentType};
+use crate::block::{BlockMut, ID, InsertBlockData};
+use crate::content::{Content, ContentType};
 use crate::integrate::IntegrationContext;
 use crate::lib0::Value;
 use crate::node::{Named, Node, NodeType};
 use crate::prelim::Prelim;
 use crate::state_vector::Snapshot;
-use crate::store::lmdb::BlockStore;
 use crate::types::Capability;
 use crate::{Clock, In, Mounted, Out, Transaction};
 use genawaiter2::yield_;
 use serde::{Deserialize, Serialize};
-use smallvec::smallvec;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
@@ -35,12 +33,12 @@ impl<'tx, 'db> TextRef<&'tx Transaction<'db>> {
     /// Returns an iterator over uncommitted changes (deltas) made to this text type
     /// within its current transaction scope.
     pub fn uncommitted(&self) -> impl Iterator<Item = crate::Result<Delta>> {
-        genawaiter2::rc::gen!({ yield_!(Ok(Delta::Retain(0, None))) }).into_iter()
+        todo!()
     }
 
     /// Returns an iterator over all text and embedded chunks grouped by their applied attributes.
     pub fn chunks(&self) -> impl Iterator<Item = crate::Result<Chunk>> {
-        genawaiter2::rc::gen!({ yield_!(Ok(Chunk::new(0))) }).into_iter()
+        todo!()
     }
 
     /// Returns an iterator over all text and embedded chunks grouped by their applied attributes,
@@ -50,7 +48,7 @@ impl<'tx, 'db> TextRef<&'tx Transaction<'db>> {
         from: Option<&Snapshot>,
         to: Option<&Snapshot>,
     ) -> impl Iterator<Item = crate::Result<Chunk>> {
-        genawaiter2::rc::gen!({ yield_!(Ok(Chunk::new(0))) }).into_iter()
+        todo!()
     }
 }
 
@@ -434,7 +432,7 @@ impl<'a> Prelim for StringPrelim<'a> {
     fn prepare(&self, insert: &mut InsertBlockData) -> crate::Result<()> {
         let block = insert.as_block_mut();
         block.set_content_type(ContentType::String);
-        insert.content = BlockContent::string(self.data);
+        insert.content = Content::string(self.data);
         Ok(())
     }
 
@@ -504,7 +502,7 @@ mod test {
     use crate::test_util::{multi_doc, sync};
     use crate::types::text::{Attrs, Chunk, Delta};
     use crate::write::Encode;
-    use crate::{lib0, ListPrelim, Map, MapPrelim, MapRef, Out, StateVector, Text, Unmounted};
+    use crate::{ListPrelim, Map, MapPrelim, MapRef, Out, StateVector, Text, Unmounted, lib0};
 
     #[test]
     fn insert_empty_string() {
