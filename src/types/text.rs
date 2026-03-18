@@ -5,9 +5,9 @@ use crate::lib0::Value;
 use crate::node::{Named, Node, NodeType};
 use crate::prelim::Prelim;
 use crate::state_vector::Snapshot;
+use crate::store::Db;
 use crate::types::Capability;
 use crate::{Clock, In, Mounted, Out, Transaction};
-use genawaiter2::yield_;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -26,19 +26,37 @@ impl Capability for Text {
 }
 
 impl<'tx, 'db> TextRef<&'tx Transaction<'db>> {
-    pub fn len(&self) -> usize {
-        todo!()
+    pub fn len(&self) -> crate::Result<usize> {
+        let mut current = self.block.start().copied();
+        if current.is_none() {
+            return Ok(0);
+        }
+
+        let mut len = 0;
+        let db = self.tx.db();
+        let blocks = db.blocks();
+        let mut cursor = blocks.cursor()?;
+
+        while let Some(id) = current {
+            let block = cursor.seek(id)?;
+            len += block.len().get() as usize;
+            current = block.right().copied();
+        }
+
+        Ok(len)
     }
 
     /// Returns an iterator over uncommitted changes (deltas) made to this text type
     /// within its current transaction scope.
     pub fn uncommitted(&self) -> impl Iterator<Item = crate::Result<Delta>> {
-        todo!()
+        todo!();
+        [].into_iter()
     }
 
     /// Returns an iterator over all text and embedded chunks grouped by their applied attributes.
     pub fn chunks(&self) -> impl Iterator<Item = crate::Result<Chunk>> {
-        todo!()
+        todo!();
+        [].into_iter()
     }
 
     /// Returns an iterator over all text and embedded chunks grouped by their applied attributes,
@@ -48,7 +66,8 @@ impl<'tx, 'db> TextRef<&'tx Transaction<'db>> {
         from: Option<&Snapshot>,
         to: Option<&Snapshot>,
     ) -> impl Iterator<Item = crate::Result<Chunk>> {
-        todo!()
+        todo!();
+        [].into_iter()
     }
 }
 
@@ -84,22 +103,22 @@ impl Chunk {
 
 impl<'tx, 'db> Display for TextRef<&'tx Transaction<'db>> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let mut next = self.block.start().cloned();
+        let mut next = self.block.start().copied();
         let db = self.tx.db();
+        let blocks = db.blocks();
+        let mut cursor = blocks.cursor().map_err(|_| std::fmt::Error)?;
+        let contents = db.contents();
         while let Some(id) = next {
-            let Ok(block) = db.fetch_block(id, false) else {
-                return Err(std::fmt::Error);
-            };
+            let block = cursor.seek(id).map_err(|_| std::fmt::Error)?;
             if block.is_countable() && !block.is_deleted() {
-                let content_type = block.header().content_type();
-                let Some(chunk) = db
-                    .block_content(id, content_type)
-                    .map_err(|_| std::fmt::Error)?
-                    .as_text()
-                else {
-                    continue;
-                };
-                write!(f, "{}", chunk)?;
+                if block.content_type() == ContentType::String {
+                    let data = match block.try_inline_data() {
+                        Some(data) => data,
+                        None => contents.get(*block.id()).map_err(|_| std::fmt::Error)?,
+                    };
+                    let str = unsafe { std::str::from_utf8_unchecked(data) };
+                    write!(f, "{}", str)?;
+                }
             }
             next = block.right().cloned();
         }
@@ -287,9 +306,9 @@ pub struct TextCursor<T> {
     attributes: Attrs,
 }
 
-impl<'tref, 'db> TextCursor<&'tref mut Transaction<'db>> {
+impl<'tx, 'db> TextCursor<&'tx mut Transaction<'db>> {
     pub fn new(
-        tx: &'tref mut Transaction<'db>,
+        tx: &'tx mut Transaction<'db>,
         parent: Node<'static>,
         start: Option<&ID>,
     ) -> crate::Result<Self> {
@@ -380,7 +399,7 @@ impl<'tref, 'db> TextCursor<&'tref mut Transaction<'db>> {
     pub fn insert<P: Prelim>(&mut self, prelim: P) -> crate::Result<P::Return> {
         let left = self.left_id();
         let right = self.right_id();
-        let (mut db, state) = self.tx.split_mut();
+        let (db, state) = self.tx.split_mut();
         let id = state.next_id();
         let clock_len = prelim.clock_len();
         let parent = self.parent.clone();
@@ -795,7 +814,7 @@ mod test {
         txt.insert(0, "aaa").unwrap();
         txt.remove_range(0..3).unwrap();
 
-        assert_eq!(txt.len(), 3);
+        assert_eq!(txt.len().unwrap(), 3);
         assert_eq!(txt.to_string(), "bbb");
 
         tx.commit(None).unwrap();

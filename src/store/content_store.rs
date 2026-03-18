@@ -20,11 +20,11 @@ impl<'a> ContentStore<'a> {
         ContentStore { db }
     }
 
-    pub fn get(&self, key: ID) -> crate::Result<Option<&'a [u8]>> {
+    pub fn get(&self, key: ID) -> crate::Result<&'a [u8]> {
         let key = BlockContentKey::new(key);
         match self.db.get(&key.as_bytes()) {
-            Ok(value) => Ok(Some(value)),
-            Err(MdbError::NotFound) => Ok(None),
+            Ok(value) => Ok(value),
+            Err(MdbError::NotFound) => Err(crate::Error::NotFound),
             Err(e) => Err(e.into()),
         }
     }
@@ -176,6 +176,18 @@ impl<'a> ReadRange<'a> {
                 self.state = ReadRangeState::Init(cursor);
                 Ok(Some(value))
             }
+        }
+    }
+}
+
+impl<'a> Iterator for ReadRange<'a> {
+    type Item = crate::Result<Content<'a>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.next() {
+            Ok(None) => None,
+            Ok(Some(content)) => Some(Ok(content)),
+            Err(e) => Some(Err(e)),
         }
     }
 }

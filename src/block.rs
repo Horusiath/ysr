@@ -1,15 +1,19 @@
-use crate::content::{Content, ContentType};
+use crate::block_reader::BlockRange;
+use crate::content::{Content, ContentType, utf16_to_utf8};
 use crate::integrate::IntegrationContext;
 use crate::node::{Node, NodeID, NodeType};
+use crate::store::Db;
+use crate::store::block_store::SplitResult;
 use crate::transaction::TransactionState;
 use crate::{ClientID, Clock, Optional, U32};
 use crate::{Error, Result};
-use bitflags::bitflags;
+use bitflags::{Flags, bitflags};
 use bytes::Bytes;
 use lmdb_rs_m::{Database, MdbValue, ToMdbValue};
 use serde::de::{SeqAccess, Visitor};
 use serde::ser::SerializeTuple;
 use serde::{Deserialize, Deserializer, Serialize};
+use smallvec::{SmallVec, smallvec};
 use std::borrow::Cow;
 use std::fmt::{Debug, Display, Formatter};
 use std::ops::{Deref, DerefMut};
@@ -312,14 +316,13 @@ impl BlockHeader {
     }
 
     pub fn start(&self) -> Option<&ID> {
-        if self.flags.contains(BlockFlags::INLINE_CONTENT) {
-            let content = self.try_inline_content()?;
-            if content.content_type() == ContentType::Node {
-                let id = ID::ref_from_bytes(content.bytes()).ok()?;
-                return Some(id);
-            }
+        if self.content_type() == ContentType::Node {
+            let bytes = self.try_inline_data()?;
+            let id = ID::ref_from_bytes(bytes).ok()?;
+            Some(id)
+        } else {
+            None
         }
-        None
     }
 
     pub fn set_start(&mut self, id: Option<&ID>) {
@@ -408,13 +411,21 @@ impl BlockHeader {
         self.flags -= BlockFlags::INLINE_CONTENT;
     }
 
-    pub fn try_inline_content(&self) -> Option<Content<'_>> {
+    pub fn try_inline_data(&self) -> Option<&[u8]> {
         if self.flags.contains(BlockFlags::INLINE_CONTENT) {
             let bytes = &self.inline_content[..self.inline_content_len as usize];
-            let content = Content::new(self.content_type(), Cow::Borrowed(bytes));
-            Some(content)
+            Some(bytes)
         } else {
             None
+        }
+    }
+
+    pub fn try_inline_content(&self) -> Option<Content<'_>> {
+        if self.is_deleted() {
+            Some(Content::DELETED)
+        } else {
+            self.try_inline_data()
+                .map(|bytes| Content::new(self.content_type(), Cow::Borrowed(bytes)))
         }
     }
 }
@@ -437,6 +448,11 @@ impl<'a> Block<'a> {
             Ok(header) => Ok(Self { id, header }),
             Err(_) => Err(Error::MalformedBlock(id)),
         }
+    }
+
+    pub fn range(&self) -> BlockRange {
+        let id = *self.id();
+        BlockRange::new(id, id.clock + self.clock_len)
     }
 
     pub(crate) fn info_flags(&self) -> u8 {
@@ -465,6 +481,14 @@ impl<'a> Block<'a> {
     #[inline]
     pub fn header(&self) -> &BlockHeader {
         self.header
+    }
+
+    /// Returns the inline content of this block, if any, with the lifetime
+    /// tied to the underlying `BlockHeader` reference (`'a`) rather than the
+    /// local borrow of `self` (which is what you'd get going through `Deref`).
+    pub fn try_inline_content(&self) -> Option<Content<'a>> {
+        let header: &'a BlockHeader = self.header;
+        header.try_inline_content()
     }
 }
 
@@ -532,21 +556,19 @@ impl BlockMut {
             self.flags |= BlockFlags::RIGHT;
 
             let mut inline_content = [0u8; BlockHeader::INLINE_CONTENT_LEN];
-            let inline_content_len = match self.try_inline_content() {
-                Some(content) => match content.split(offset.get() as usize) {
-                    Some((left, right)) => {
-                        self.set_inline_content(left);
-                        inline_content.copy_from_slice(right.bytes());
-                        flags |= BlockFlags::INLINE_CONTENT;
-                        if right.content_type().is_countable() {
-                            flags |= BlockFlags::COUNTABLE;
-                        }
-                        right.len() as u8
-                    }
-                    None => 0,
-                },
-                None => 0,
-            };
+            let mut inline_content_len: u8 = 0;
+            if let Some(bytes) = self.try_inline_data()
+                && self.content_type() == ContentType::String
+            {
+                // split inlined content - only applicable to strings
+                let source = unsafe { std::str::from_utf8_unchecked(bytes) };
+                let utf16_offset = offset.get() as usize;
+                if let Some(utf8_offset) = utf16_to_utf8(source, utf16_offset) {
+                    inline_content.copy_from_slice(&bytes[utf8_offset..]);
+                    inline_content_len = (bytes.len() - utf8_offset) as u8;
+                    self.inline_content_len = utf8_offset as u8; // we don't need to truncate content itself
+                }
+            }
 
             let right = BlockHeader {
                 clock_len: clock_len - offset,
@@ -569,9 +591,7 @@ impl BlockMut {
     pub fn merge(&mut self, other: Block<'_>) -> bool {
         if self.can_merge(&other) {
             self.clock_len += other.clock_len;
-
             self.set_right(other.right());
-
             // other.right.left points to the last id, so we don't need to update it
             true
         } else {
@@ -637,7 +657,7 @@ pub struct InsertBlockData {
     /// - For [ContentType::Format] it's key-value pair of formatting attributes.
     /// - For [ContentType::Doc] it's the ID of the document.
     /// - For other content types it's empty.
-    pub content: Content<'static>,
+    pub content: SmallVec<[Content<'static>; 1]>,
     /// Parent node identifier that contains this block.
     pub parent: Option<Node<'static>>,
     /// If the block is part of a map-like structure, this field contains the UTF-8 encoded key string.
@@ -673,20 +693,20 @@ impl InsertBlockData {
             block,
             parent: Some(parent),
             entry: entry_key.map(|key| Bytes::copy_from_slice(key.as_bytes())),
-            content: Default::default(),
+            content: smallvec![],
         }
     }
 
-    pub fn content(&self) -> Option<Content<'_>> {
-        if self.content.is_empty() {
-            None
-        } else {
-            Some(self.content)
-        }
+    pub fn content(&self) -> &[Content<'_>] {
+        &self.content
     }
 
-    pub(crate) fn new_node(node: &Node, kind: NodeType) -> Self {
+    pub(crate) fn new_node(node: &Node, kind: NodeType, start: Option<ID>) -> Self {
         let id = node.id();
+        let content = match start {
+            None => Content::new(ContentType::Node, Cow::Borrowed(&[0u8; size_of::<ID>()])),
+            Some(id) => Content::new(ContentType::Node, Cow::Owned(id.as_bytes().into())),
+        };
         Self {
             block: BlockMut::new(
                 id,
@@ -707,7 +727,7 @@ impl InsertBlockData {
             ),
             parent: None,
             entry: None,
-            content: Default::default(),
+            content: smallvec![content],
         }
     }
 
@@ -744,10 +764,17 @@ impl InsertBlockData {
     pub fn merge(&mut self, other: Self) -> bool {
         if self.block.merge(other.block.as_block()) {
             if !self.content.is_empty() {
-                self.content.merge(other.content)
-            } else {
-                true
+                self.content.extend(other.content);
+                if self.block.content_type() == ContentType::String {
+                    // compress the contents
+                    let mut buf = Vec::new();
+                    for content in self.content.drain(..) {
+                        buf.extend_from_slice(content.data.as_bytes());
+                    }
+                    self.content = smallvec![Content::new(ContentType::String, Cow::Owned(buf))];
+                }
             }
+            true
         } else {
             false
         }
@@ -764,40 +791,25 @@ impl InsertBlockData {
         &mut self.block
     }
 
-    pub fn split(&mut self, offset: Clock) -> Option<Self> {
-        let new_block = self.block.split(offset)?;
-        let new_content = if !self.content.is_empty() {
-            self.content
-                .split(offset.get() as usize)
-                .unwrap_or_default()
-        } else {
-            self.content.clone()
-        };
-
-        Some(Self {
-            block: new_block,
-            content: new_content,
-            parent: self.parent.clone(),
-            entry: self.entry.clone(),
-        })
-    }
-
     pub(crate) fn integrate(
         &mut self,
-        db: &mut Database,
+        db: &Database,
         tx_state: &mut TransactionState,
         context: &mut IntegrationContext,
     ) -> crate::Result<()> {
+        let blocks = db.blocks();
+        let mut block_cursor = blocks.cursor()?;
         if context.offset > 0 {
             // offset could be > 0 only in context of Update::integrate,
             // is such case offset kind in use always means Yjs-compatible offset (utf-16)
 
             self.block.id.clock += context.offset;
-            let left =
-                match db.split_block(ID::new(self.block.id.client, self.block.id.clock - 1))? {
-                    SplitResult::Unchanged(left) => left.last_id(),
-                    SplitResult::Split(left, _right) => left.last_id(), //TODO: *self = right; ?
-                };
+            let split_id = ID::new(self.block.id.client, self.block.id.clock - 1);
+            let result = block_cursor.split(split_id)?;
+            let left = match result {
+                SplitResult::Unchanged(left) => left.last_id(),
+                SplitResult::Split(left, _right) => left.last_id(), //TODO: *self = right; ?
+            };
             self.block.set_left(Some(&left));
             self.block.set_origin_left(left);
         }
@@ -839,12 +851,12 @@ impl InsertBlockData {
             left.set_right(Some(self.id()));
         } else {
             let right = if let Some(key) = self.entry_key() {
+                let map_entries = db.map_entries();
                 // add current block to the beginning of YMap entries
-                if let Some(mut right) = db.entry(parent_id, key).optional()?.copied() {
-                    let mut cursor = BlockCursor::new(db.new_cursor()?);
-                    if let Some(()) = cursor.seek(right).optional()? {
+                if let Some(mut right) = map_entries.get(&parent_id, key)?.copied() {
+                    if let Some(block) = block_cursor.seek(right).optional()? {
                         // move until the left-most block
-                        while let Some(block) = cursor.next_left().optional()? {
+                        while let Some(block) = block_cursor.left()? {
                             right = block.id;
                         }
                     }
@@ -854,7 +866,7 @@ impl InsertBlockData {
                 }
             } else {
                 if context.parent.is_none() {
-                    context.parent = Some(db.fetch_block(parent_id, true)?.into());
+                    context.parent = block_cursor.seek(parent_id).optional()?.map(BlockMut::from);
                 }
                 if let Some(parent) = &mut context.parent {
                     // current block is new head of the list
@@ -876,14 +888,15 @@ impl InsertBlockData {
                 .map(|r| !r.contains(right))
                 .unwrap_or(true)
             {
-                let right = db.fetch_block(*right, true)?;
-                context.right = Some(right.into());
+                let right = block_cursor.seek(*right).optional()?.map(BlockMut::from);
+                context.right = right;
             }
             let right = context.right.as_mut().unwrap();
             right.set_left(Some(self.id()));
         } else if let Some(entry_key) = self.entry_key() {
             // set as current parent value if right === null and this is parentSub
-            db.set_entry(parent_id, entry_key, self.id())?;
+            let map_entries = db.map_entries();
+            map_entries.insert(&parent_id, entry_key, self.id())?;
 
             // this is the current attribute value of parent. delete right
             if let Some(left) = context.left.as_mut() {
@@ -892,7 +905,7 @@ impl InsertBlockData {
                     .as_ref()
                     .map(|p| p.is_deleted())
                     .unwrap_or(true);
-                tx_state.delete(db, left, parent_deleted)?;
+                tx_state.delete(left, parent_deleted, &mut block_cursor, &map_entries)?;
             }
         }
 
@@ -901,9 +914,7 @@ impl InsertBlockData {
             //TODO: linked type joining
         }
 
-        //TODO: check if this item is in a moved range and merge moves
-
-        match self.block.content.content_type {
+        match self.block.content_type() {
             ContentType::Deleted => {
                 tx_state
                     .delete_set
@@ -927,13 +938,13 @@ impl InsertBlockData {
             _ => { /* do nothing */ }
         }
 
-        db.insert_block(self)?;
+        blocks.insert(self.as_block())?;
 
         let parent_deleted = if let Some(parent_block) = context.parent.as_mut() {
             let parent = parent_block.as_block();
             let is_deleted = parent.id.is_nested() && parent.is_deleted();
             tx_state.add_changed_type(parent.id, is_deleted, self.block.key_hash());
-            db.update_block(parent)?;
+            block_cursor.update(parent)?;
             is_deleted
         } else {
             true // parent GCed?
@@ -942,14 +953,20 @@ impl InsertBlockData {
         if parent_deleted || (self.block.key_hash().is_some() && self.block.right().is_some()) {
             // if either parent is deleted or this block is not the last block in
             // a map-like structure, delete it
-            tx_state.delete(db, &mut self.block, parent_deleted)?;
+            let map_entries = db.map_entries();
+            tx_state.delete(
+                &mut self.block,
+                parent_deleted,
+                &mut block_cursor,
+                &map_entries,
+            )?;
         }
 
         if let Some(right) = context.right.as_mut() {
-            db.update_block(right.as_block())?;
+            block_cursor.update(right.as_block())?;
         }
         if let Some(left) = context.left.as_mut() {
-            db.update_block(left.as_block())?;
+            block_cursor.update(left.as_block())?;
         }
 
         Ok(())
@@ -959,7 +976,7 @@ impl InsertBlockData {
 impl Display for InsertBlockData {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}, {}", self.block.id, self.block.header)?;
-        if let Some(content) = self.content() {
+        for content in self.content() {
             write!(f, " {}", content)?;
         }
         Ok(())
@@ -1067,7 +1084,7 @@ impl Display for BlockHeader {
         if let Some(content) = self.try_inline_content() {
             write!(f, ", start: {}", content)?;
         }
-        write!(f, " - {}", self.content.content_type)?;
+        write!(f, " - {}", self.content_type())?;
 
         Ok(())
     }
@@ -1078,9 +1095,10 @@ mod test {
     use crate::block::{ID, InsertBlockData};
     use crate::content::{Content, ContentType};
     use crate::node::{Node, NodeID};
-    use crate::{BlockHeader, ClientID, Clock, lib0};
+    use crate::{BlockHeader, BlockMut, ClientID, Clock, lib0};
     use serde::{Deserialize, Serialize};
     use serde_json::json;
+    use smallvec::smallvec;
 
     const CLIENT: ClientID = unsafe { ClientID::new_unchecked(123) };
     const PARENT: Node = Node::nested(ID::new(CLIENT, Clock::new(0)));
@@ -1112,7 +1130,7 @@ mod test {
         let right = ID::new(CLIENT, 4.into());
         let o_right = ID::new(CLIENT, 4.into());
 
-        let mut insert = block(
+        let insert = block(
             1,
             2,
             3,
@@ -1120,17 +1138,17 @@ mod test {
             13,
             4,
             Some("key"),
-            Content::atom([&lib0!({"key":"value"})]).unwrap(),
+            Content::atom(&lib0!({"x":1})).unwrap(),
         );
 
         assert_eq!(insert.block.left(), Some(&left));
         assert_eq!(insert.block.right(), Some(&right));
         assert_eq!(insert.block.origin_left(), Some(&o_left));
         assert_eq!(insert.block.origin_right(), Some(&o_right));
-        assert_eq!(insert.parent, Some(PARENT.clone()));
+        assert_eq!(insert.block.parent(), &PARENT.id());
 
-        assert_eq!(insert.clock_len(), Clock::new(2));
-        let content = insert.content().unwrap();
+        assert_eq!(insert.block.clock_len(), Clock::new(2));
+        let content = &insert.block.try_inline_content().unwrap();
         assert_eq!(content.len(), 1);
         assert_eq!(content.content_type(), ContentType::Atom);
         assert_eq!(insert.entry_key(), Some("key"));
@@ -1143,7 +1161,7 @@ mod test {
         block.set_entry_key("123".as_bytes());
 
         assert_eq!(block.entry_key(), Some("123"));
-        let content = block.content().unwrap();
+        let content = &block.content()[0];
         assert_eq!(content, &Content::str(&"hello world"));
     }
 
@@ -1163,7 +1181,7 @@ mod test {
         block.set_entry_key("test123".as_bytes());
 
         assert_eq!(block.entry_key(), Some("test123"));
-        let content = block.content().unwrap();
+        let content = &block.content()[0];
         assert_eq!(content, &Content::string("hello world"));
     }
 
@@ -1183,155 +1201,151 @@ mod test {
         block.set_entry_key("1234".as_bytes());
 
         assert_eq!(block.entry_key(), Some("1234"));
-        let content = block.content().unwrap();
+        let content = &block.content()[0];
         assert_eq!(content, &Content::string("hello world"));
     }
 
     #[test]
-    fn block_split_text() {
-        let mut b = block(
-            1,
-            11,
-            12,
-            13,
-            14,
-            15,
-            Some("key"),
-            Content::string("hello world"),
+    fn block_split_inline_text() {
+        let parent: NodeID = Node::root_named("parent").id();
+        let header = BlockHeader::new(
+            7.into(),
+            Some(&ID::new(CLIENT, 4.into())),
+            Some(&ID::new(CLIENT, 16.into())),
+            Some(&ID::new(CLIENT, 4.into())),
+            Some(&ID::new(CLIENT, 16.into())),
+            parent,
+            None,
         );
+        let mut left = BlockMut::new(ID::new(1.into(), 5.into()), header);
+        assert!(left.set_inline_content(Content::str(&"hello w")));
 
-        let right = b.split(6.into()).unwrap();
-        let expected_right = block(7, 5, 6, 13, 6, 15, Some("key"), Content::string("world"));
-        assert_eq!(right, expected_right);
+        let right = left.split(5.into()).unwrap();
 
-        let expected_left = block(1, 6, 12, 7, 14, 15, Some("key"), Content::string("hello "));
-        assert_eq!(b, expected_left);
+        assert_eq!(left.clock_len(), Clock::new(5));
+        assert_eq!(left.content_type(), ContentType::String);
+        assert_eq!(left.try_inline_data().unwrap(), b"hello");
+        assert_eq!(left.left(), Some(&ID::new(1.into(), 4.into())));
+        assert_eq!(left.right(), Some(&ID::new(1.into(), 11.into())));
+
+        assert_eq!(right.clock_len(), Clock::new(2));
+        assert_eq!(right.content_type(), ContentType::String);
+        assert_eq!(right.try_inline_data().unwrap(), b" w");
+        assert_eq!(right.left(), Some(&ID::new(1.into(), 10.into())));
+        assert_eq!(right.right(), Some(&ID::new(1.into(), 16.into())));
     }
 
     #[test]
-    fn block_merge_text() {
-        let mut b = block(
-            1,
-            11,
-            12,
-            13,
-            14,
-            15,
-            Some("key"),
-            Content::string("hello world"),
+    fn block_merge_inline_text() {
+        let parent: NodeID = Node::root_named("parent").id();
+        let mut left = BlockMut::new(
+            ID::new(CLIENT, 5.into()),
+            BlockHeader::new(
+                5.into(),
+                Some(&ID::new(CLIENT, 4.into())),
+                Some(&ID::new(CLIENT, 10.into())),
+                Some(&ID::new(CLIENT, 4.into())),
+                Some(&ID::new(CLIENT, 10.into())),
+                parent,
+                None,
+            ),
         );
+        left.set_inline_content(Content::str(&"hello"));
+        let mut right = BlockMut::new(
+            ID::new(CLIENT, 10.into()),
+            BlockHeader::new(
+                2.into(),
+                Some(&ID::new(CLIENT, 4.into())),
+                Some(&ID::new(CLIENT, 16.into())),
+                Some(&ID::new(CLIENT, 4.into())),
+                Some(&ID::new(CLIENT, 16.into())),
+                parent,
+                None,
+            ),
+        );
+        right.set_inline_content(Content::str(&" w"));
 
-        let expected = b.clone();
-
-        let right = b.split(6.into()).unwrap();
-        assert!(b.merge(right));
-
-        assert_eq!(b, expected);
+        assert!(left.merge(right.as_block()));
+        assert_eq!(left.clock_len(), Clock::new(7));
+        assert_eq!(left.try_inline_data().unwrap(), b"hello w");
+        assert_eq!(left.left(), Some(&ID::new(1.into(), 4.into())));
+        assert_eq!(left.left(), Some(&ID::new(1.into(), 16.into())));
     }
 
     #[test]
     fn block_split_deleted() {
-        let mut b = block(1, 11, 12, 13, 14, 15, Some("key"), Content::DELETED);
+        let parent: NodeID = Node::root_named("parent").id();
+        let mut left = BlockMut::new(
+            ID::new(CLIENT, 5.into()),
+            BlockHeader::new(
+                5.into(),
+                Some(&ID::new(CLIENT, 4.into())),
+                Some(&ID::new(CLIENT, 10.into())),
+                Some(&ID::new(CLIENT, 4.into())),
+                Some(&ID::new(CLIENT, 10.into())),
+                parent,
+                None,
+            ),
+        );
+        left.set_content_type(ContentType::Deleted);
 
-        let right = b.split(6.into()).unwrap();
-        let expected_right = block(7, 5, 6, 13, 6, 15, Some("key"), Content::DELETED);
-        assert_eq!(right, expected_right);
+        let right = left.split(3.into()).unwrap();
 
-        let expected_left = block(1, 6, 12, 7, 14, 15, Some("key"), Content::DELETED);
-        assert_eq!(b, expected_left);
+        assert_eq!(
+            left,
+            BlockMut::new(
+                ID::new(CLIENT, 5.into()),
+                BlockHeader::new(
+                    3.into(),
+                    Some(&ID::new(CLIENT, 4.into())),
+                    Some(&ID::new(CLIENT, 8.into())),
+                    Some(&ID::new(CLIENT, 4.into())),
+                    Some(&ID::new(CLIENT, 10.into())),
+                    parent,
+                    None,
+                ),
+            )
+        );
+        assert_eq!(
+            right,
+            BlockMut::new(
+                ID::new(CLIENT, 8.into()),
+                BlockHeader::new(
+                    2.into(),
+                    Some(&ID::new(CLIENT, 7.into())),
+                    Some(&ID::new(CLIENT, 10.into())),
+                    Some(&ID::new(CLIENT, 7.into())),
+                    Some(&ID::new(CLIENT, 10.into())),
+                    parent,
+                    None,
+                ),
+            )
+        );
     }
 
     #[test]
     fn block_merge_deleted() {
-        let mut b = block(1, 11, 12, 13, 14, 15, Some("key"), Content::DELETED);
-
-        let expected = b.clone();
-
-        let right = b.split(6.into()).unwrap();
-        assert!(b.merge(right));
-
-        assert_eq!(b, expected);
-    }
-
-    #[test]
-    fn block_split_atom() {
-        let alice = User::new("Alice");
-        let bob = User::new("Bob");
-
-        let mut b = block(
-            1,
-            2,
-            0,
-            3,
-            4,
-            5,
-            Some("aa"),
-            Content::atom([&alice, &bob]).unwrap(),
+        let parent: NodeID = Node::root_named("parent").id();
+        let mut block = BlockMut::new(
+            ID::new(CLIENT, 1.into()),
+            BlockHeader::new(
+                11.into(),
+                Some(&ID::new(CLIENT, 12.into())),
+                Some(&ID::new(CLIENT, 13.into())),
+                Some(&ID::new(CLIENT, 14.into())),
+                Some(&ID::new(CLIENT, 15.into())),
+                parent,
+                None,
+            ),
         );
+        block.set_content_type(ContentType::Deleted);
 
-        let right = b.split(1.into()).unwrap();
-        let expected_right = block(2, 1, 1, 3, 1, 5, Some("aa"), Content::atom([&bob]).unwrap());
-        assert_eq!(right, expected_right);
+        let expected = block.clone();
 
-        let expected_left = block(
-            1,
-            1,
-            0,
-            2,
-            4,
-            5,
-            Some("aa"),
-            Content::atom([&alice]).unwrap(),
-        );
-        assert_eq!(b, expected_left);
-    }
+        let right = block.split(6.into()).unwrap();
+        assert!(block.merge(right.as_block()));
 
-    #[test]
-    fn block_merge_atom() {
-        let alice = User::new("Alice");
-        let bob = User::new("Bob");
-
-        let mut b = block(
-            1,
-            2,
-            0,
-            3,
-            4,
-            5,
-            Some("aa"),
-            Content::atom([&alice, &bob]).unwrap(),
-        );
-
-        let expected = b.clone();
-
-        let right = b.split(1.into()).unwrap();
-        assert!(b.merge(right));
-
-        assert_eq!(b, expected);
-    }
-
-    #[test]
-    fn inline_content() {
-        // content exactly 8 bytes long
-        let mut block = BlockHeader::empty();
-        let expected = Content::node(&NodeID::new(1.into(), 2.into()));
-        assert!(block.set_inline_content(expected.as_ref()));
-        let actual = block.try_inline_content().unwrap();
-        assert_eq!(actual, expected.as_ref());
-
-        // content under 8 bytes
-        let mut block = BlockHeader::empty();
-        let expected = Content::string("string");
-        assert!(block.set_inline_content(expected.as_ref()));
-        let actual = block.try_inline_content().unwrap();
-        assert_eq!(actual, expected.as_ref());
-
-        // content over 8 bytes
-        let mut block = BlockHeader::empty();
-        let expected = Content::json([&json!({"users":[1,2,3,4,5,6]})]).unwrap();
-        assert!(!block.set_inline_content(expected.as_ref()));
-        let actual = block.try_inline_content();
-        assert!(actual.is_none());
+        assert_eq!(block, expected);
     }
 
     #[derive(Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -1355,9 +1369,9 @@ mod test {
         origin_left: u32,
         origin_right: u32,
         entry: Option<&str>,
-        content: Content,
+        content: Content<'static>,
     ) -> InsertBlockData {
-        let mut data = InsertBlockData::new(
+        let mut insert = InsertBlockData::new(
             ID::new(CLIENT, id.into()),
             len.into(),
             Some(&ID::new(CLIENT, left.into())),
@@ -1367,10 +1381,8 @@ mod test {
             PARENT,
             entry,
         );
-        data.block.set_content_type(content.content_type());
-        if data.block.content.content_type.has_content() {
-            data.content = content;
-        }
-        data
+        insert.block.set_content_type(content.content_type());
+        insert.content = smallvec![content];
+        insert
     }
 }

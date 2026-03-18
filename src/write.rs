@@ -261,7 +261,8 @@ impl<W: Write> Encoder for EncoderV1<W> {
     }
 
     fn write_json<S: Serialize>(&mut self, any: &S) -> crate::Result<()> {
-        serde_json::to_writer(&mut self.writer, any)?;
+        let str = serde_json::to_string(any)?;
+        self.write_string(str.as_str())?;
         Ok(())
     }
 }

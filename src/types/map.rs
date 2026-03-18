@@ -3,8 +3,9 @@ use crate::content::{Content, ContentType};
 use crate::integrate::IntegrationContext;
 use crate::node::{Node, NodeID, NodeType};
 use crate::prelim::Prelim;
-use crate::store::Db;
-use crate::store::map_entries::MapEntries;
+use crate::store::block_store::{BlockCursor, BlockStore};
+use crate::store::map_entries::{MapEntries, MapKey};
+use crate::store::{Db, MapEntriesStore};
 use crate::types::Capability;
 use crate::{Clock, Error, In, Mounted, Optional, Transaction, Unmounted, lib0};
 use lmdb_rs_m::{Database, MdbError};
@@ -13,7 +14,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 use std::ops::{Deref, DerefMut};
-use zerocopy::IntoBytes;
+use std::pin::Pin;
 
 pub type MapRef<Txn> = Mounted<Map, Txn>;
 
@@ -33,12 +34,12 @@ impl<'tx, 'db> MapRef<&'tx Transaction<'db>> {
         V: for<'a> TryFrom<Content<'a>, Error = Error>,
     {
         let db = self.tx.db();
-        let mut map_entries = db.map_entries()?;
+        let map_entries = db.map_entries();
         let entry_id = *map_entries
             .get(self.block.id(), key.as_ref())?
             .ok_or(Error::NotFound)?;
-        let mut blocks = db.blocks()?;
-        let block = blocks.seek(entry_id)?.ok_or(Error::NotFound)?;
+        let blocks = db.blocks();
+        let block = blocks.get(entry_id)?;
         if block.is_deleted() {
             Err(Error::NotFound)
         } else {
@@ -46,8 +47,8 @@ impl<'tx, 'db> MapRef<&'tx Transaction<'db>> {
                 Some(content) => content, // content small enough to fit inline block header
                 None => {
                     // we need to reach for the content store
-                    let mut content_store = db.contents()?;
-                    let content = content_store.seek(*block.id())?.ok_or(Error::NotFound)?;
+                    let content_store = db.contents();
+                    let content = content_store.get(*block.id())?;
                     Content::new(block.content_type(), Cow::Borrowed(content))
                 }
             };
@@ -57,11 +58,19 @@ impl<'tx, 'db> MapRef<&'tx Transaction<'db>> {
 
     pub fn len(&self) -> crate::Result<usize> {
         let db = self.tx.db();
-        let mut map_entries = db.map_entries()?;
+        let map_entries = db.map_entries();
+        let blocks = db.blocks();
+        let mut blocks_cursor = blocks.cursor()?;
         let mut iter = map_entries.entries(self.node_id());
         let mut len = 0;
         while let Some(_) = iter.next()? {
-            len += 1;
+            // we only need a direct seek, since `seek_containing` would catch at best deleted blocks
+            // that we don't care about here
+            if let Some(block) = blocks_cursor.seek(*iter.block_id()?).optional()? {
+                if !block.is_deleted() {
+                    len += 1;
+                }
+            }
         }
         Ok(len)
     }
@@ -71,32 +80,30 @@ impl<'tx, 'db> MapRef<&'tx Transaction<'db>> {
         K: AsRef<str>,
     {
         let db = self.tx.db();
-        let mut map_entries = db.map_entries()?;
+        let map_entries = db.map_entries();
         let entry_id = match map_entries.get(self.block.id(), key.as_ref())? {
             None => return Ok(false),
             Some(id) => *id,
         };
-        let mut blocks = db.blocks()?;
-        match blocks.seek(entry_id)? {
+        let blocks = db.blocks();
+        match blocks.get(entry_id).optional()? {
             None => Ok(false),
             Some(block) => Ok(!block.is_deleted()),
         }
     }
 
-    pub fn iter<T>(&self) -> Iter<'tx, T>
-    where
-        T: TryFrom<Content<'tx>, Error = Error>,
-    {
+    pub fn iter(&self) -> Iter<'tx> {
         let db = self.tx.db();
         Iter::new(db, *self.node_id())
     }
 
     pub fn to_value(&self) -> crate::Result<crate::lib0::Value> {
         let mut map = HashMap::default();
-        let iter = self.iter::<crate::lib0::Value>();
-        for res in iter {
-            let (key, value) = res?;
-            map.insert(key.to_string(), value);
+        let mut iter = self.iter();
+        while let Some(e) = iter.next()? {
+            let key = e.key().to_owned();
+            let value: lib0::Value = e.value()?;
+            map.insert(key, value);
         }
 
         Ok(crate::lib0::Value::Object(map))
@@ -112,7 +119,7 @@ impl<'tx, 'db> MapRef<&'tx mut Transaction<'db>> {
         let key = key.as_ref();
         let node_id = *self.node_id();
         let (mut db, state) = self.tx.split_mut();
-        let mut map_entries = db.map_entries()?;
+        let map_entries = db.map_entries();
         let left_id = map_entries.get(&node_id, key)?;
         let id = state.next_id();
         let mut insert = InsertBlockData::new(
@@ -126,8 +133,8 @@ impl<'tx, 'db> MapRef<&'tx mut Transaction<'db>> {
             Some(key.as_ref()),
         );
         value.prepare(&mut insert)?;
-        let mut blocks = db.blocks()?;
-        let mut context = IntegrationContext::create(&mut insert, Clock::new(0), &mut blocks)?;
+        let blocks = db.blocks();
+        let mut context = IntegrationContext::create(&mut insert, Clock::new(0), &blocks)?;
         insert.integrate(&mut db, state, &mut context)?;
         value.integrate(&mut insert, &mut self.tx)?;
         Ok(())
@@ -137,20 +144,22 @@ impl<'tx, 'db> MapRef<&'tx mut Transaction<'db>> {
     where
         K: AsRef<str>,
     {
-        let (mut db, state) = self.tx.split_mut();
-        let mut map_entries = db.map_entries()?;
-        let block_id = match map_entries.get(self.node_id(), key.as_ref())? {
+        let parent_id = *self.node_id();
+        let (db, state) = self.tx.split_mut();
+        let map_entries = db.map_entries();
+        let block_id = match map_entries.get(&parent_id, key.as_ref())? {
             None => return Ok(false),
             Some(id) => *id,
         };
-        let mut blocks = db.blocks()?;
-        let block = match blocks.seek(block_id)? {
+        let blocks = db.blocks();
+        let mut block_cursor = blocks.cursor()?;
+        let block = match block_cursor.seek(block_id).optional()? {
             None => return Ok(false),
             Some(block) => block,
         };
         if !block.is_deleted() {
             let mut block: BlockMut = block.into();
-            state.delete(&mut blocks, &mut block, false)?;
+            state.delete(&mut block, false, &mut block_cursor, &map_entries)?;
             Ok(true)
         } else {
             Ok(false)
@@ -158,15 +167,17 @@ impl<'tx, 'db> MapRef<&'tx mut Transaction<'db>> {
     }
 
     pub fn clear(&mut self) -> crate::Result<()> {
-        let (mut db, state) = self.tx.split_mut();
-        let mut map_entries = db.map_entries()?;
-        let mut blocks = db.blocks()?;
-        let mut iter = map_entries.entries(self.node_id());
-        while let Some(key) = iter.next()? {
-            let id = key.block_id();
-            if let Some(block) = blocks.seek(*id)? {
+        let parent_id = *self.node_id();
+        let (db, state) = self.tx.split_mut();
+        let map_entries = db.map_entries();
+        let blocks = db.blocks();
+        let mut cursor = blocks.cursor()?;
+        let mut iter = map_entries.entries(&parent_id);
+        while let Some(_) = iter.next()? {
+            let id = iter.block_id()?;
+            if let Some(block) = cursor.seek(*id).optional()? {
                 let mut block: BlockMut = block.into();
-                state.delete(&mut blocks, &mut block, false)?;
+                state.delete(&mut block, false, &mut cursor, &map_entries)?;
             }
         }
         Ok(())
@@ -184,226 +195,111 @@ impl<'tx, 'db> Deref for MapRef<&'tx mut Transaction<'db>> {
 }
 
 enum IterState<'a> {
-    Uninit(Option<Database<'a>>),
-    Init(InitializedIterator<'a>),
-}
-
-struct InitializedIterator<'a> {
-    db: Database<'a>,
-    map_entries: crate::store::MapEntriesStore<'a>,
-}
-
-impl<'a> InitializedIterator<'a> {
-    pub fn init(db: Database<'a>) -> crate::Result<Self> {
-        let mut init = InitializedIterator {
-            db,
-            map_entries: unsafe { MaybeUninit::uninit().assume_init() },
-        };
-        init.map_entries = init.db.map_entries()?;
-        Ok(init)
-    }
+    Uninit(Database<'a>, NodeID),
+    Init(InitIterState<'a>),
+    Finished,
 }
 
 impl<'a> IterState<'a> {
-    fn new(db: Database<'a>) -> Self {
-        IterState::Uninit(Some(db))
+    #[inline]
+    fn new(db: Database<'a>, node_id: NodeID) -> Self {
+        IterState::Uninit(db, node_id)
     }
 }
-pub struct Iter<'a, T> {
+
+struct InitIterState<'a> {
+    db: Pin<Box<Database<'a>>>,
+    // all fields bellow are referencing the database above which is provided by its pinned address
+    // they won't outlive it
+    node_entries: MapEntries<'static>,
+    map_entries: MapEntriesStore<'static>,
+}
+
+impl<'a> InitIterState<'a> {
+    fn new(db: Database<'a>, node_id: NodeID) -> crate::Result<Self> {
+        let db = Box::pin(db);
+
+        let map_entries: MapEntriesStore<'static> =
+            unsafe { std::mem::transmute(db.map_entries()) };
+        let node_entries: MapEntries<'static> = map_entries.entries(&node_id);
+        Ok(InitIterState {
+            db,
+            node_entries,
+            map_entries,
+        })
+    }
+}
+
+pub struct Entry<'a, 'db> {
+    key: MapKey<'a>,
+    block_id: ID,
+    db: &'a Database<'db>,
+}
+
+impl<'a, 'db> Entry<'a, 'db> {
+    pub fn new(key: MapKey<'a>, block_id: ID, db: &'a Database<'db>) -> Self {
+        Entry { key, block_id, db }
+    }
+
+    pub fn key(&self) -> &'a str {
+        self.key.key()
+    }
+
+    pub fn value<T>(&self) -> crate::Result<T>
+    where
+        T: for<'b> TryFrom<Content<'b>, Error = crate::Error>,
+    {
+        let blocks = self.db.blocks();
+        let block = blocks.get(self.block_id)?;
+        if !block.is_deleted() {
+            let content = match block.try_inline_content() {
+                Some(content) => content,
+                None => {
+                    let contents = self.db.contents();
+                    let data = contents.get(self.block_id)?;
+                    Content::new(block.content_type(), Cow::Borrowed(data))
+                }
+            };
+            T::try_from(content)
+        } else {
+            T::try_from(Content::DELETED)
+        }
+    }
+}
+
+pub struct Iter<'a> {
     state: IterState<'a>,
-    node_id: NodeID,
-    _phantom: PhantomData<T>,
 }
 
-impl<'a, T> Iter<'a, T>
-where
-    T: TryFrom<Content<'a>>,
-{
-    pub fn new(db: Database<'a>, node_id: NodeID) -> Self {
+impl<'db> Iter<'db> {
+    pub fn new(db: Database<'db>, node_id: NodeID) -> Self {
         Iter {
-            state: IterState::new(db),
-            node_id,
-            _phantom: PhantomData,
+            state: IterState::new(db, node_id),
         }
     }
 
-    fn next_entry(&mut self) -> crate::Result<Option<&mut lmdb_rs_m::Cursor<'a>>> {
-        match &mut self.state {
-            IterState::Uninit(db) => {
-                let db = db.take().unwrap();
-                let mut cursor = OwnedCursor::new(db)?;
-                if cursor
-                    .to_gte_key(&self.prefix.as_ref())
-                    .optional()?
-                    .is_none()
-                {
-                    return Ok(None);
-                };
-                self.state = IterState::Init(cursor);
-            }
-            IterState::Init(cursor) => {
-                if cursor.to_next_key().optional()?.is_none() {
-                    return Ok(None);
-                }
-            }
-        }
-        match &mut self.state {
-            IterState::Init(c) => {
-                let key: &[u8] = c.get_key()?;
-                if !key.starts_with(self.prefix.as_ref()) {
-                    Ok(None)
-                } else {
-                    Ok(Some(c.deref_mut()))
-                }
-            }
-            _ => unreachable!(),
-        }
-    }
-
-    fn prev_entry(&mut self) -> crate::Result<Option<&mut lmdb_rs_m::Cursor<'a>>> {
-        if let IterState::Uninit(db) = &mut self.state {
-            let db = db.take().unwrap();
-            let mut cursor = OwnedCursor::new(db)?;
-            if cursor
-                .to_gte_key(&self.prefix.as_ref())
-                .optional()?
-                .is_none()
-            {
-                return Ok(None);
-            };
-            self.state = IterState::Init(cursor);
-        }
-        match &mut self.state {
-            IterState::Init(cursor) => {
-                if cursor.to_prev_key().optional()?.is_none() {
-                    return Ok(None);
-                }
-                let key: &[u8] = cursor.get_key()?;
-                if !key.starts_with(self.prefix.as_ref()) {
-                    return Ok(None);
-                }
-                Ok(Some(cursor.deref_mut()))
-            }
-            _ => unreachable!(),
-        }
-    }
-
-    fn cursor(&mut self) -> &mut lmdb_rs_m::Cursor<'a> {
-        match &mut self.state {
-            IterState::Init(cursor) => cursor.deref_mut(),
-            _ => unreachable!(),
-        }
-    }
-
-    fn move_next(&mut self) -> crate::Result<Option<(&'a str, T)>> {
-        let cursor = match self.next_entry()? {
-            Some(cursor) => cursor,
-            None => return Ok(None),
+    fn ensure_init(&mut self) -> crate::Result<()> {
+        self.state = match std::mem::replace(&mut self.state, IterState::Finished) {
+            IterState::Uninit(db, node_id) => IterState::Init(InitIterState::new(db, node_id)?),
+            other => other,
         };
-
-        let rollback_key: &[u8] = cursor.get_key()?;
-        let key = unsafe { std::str::from_utf8_unchecked(&rollback_key[1 + 8 + 4..]) };
-        let id = *ID::parse(cursor.get_value()?)?;
-        cursor.to_key(&BlockKey::new(id))?;
-        let block = cursor.get_block()?;
-
-        if block.is_deleted() {
-            cursor.to_key(&rollback_key)?;
-            self.move_next()
-        } else {
-            let content = match block.content_type() {
-                ContentType::Node => BlockContentRef::NODE,
-                ContentType::Deleted => BlockContentRef::DELETED,
-                content_type => {
-                    cursor.to_key(&BlockContentKey::new(*block.id()))?;
-                    BlockContentRef::new(cursor.get_value()?)?
-                }
-            };
-            let value = T::try_from_content(block, content)?;
-            cursor.to_key(&rollback_key)?;
-            Ok(Some((key, value)))
-        }
-    }
-}
-
-impl<'a, T> Iterator for Iter<'a, T>
-where
-    T: TryFrom<Content<'a>>,
-{
-    type Item = crate::Result<(&'a str, T)>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self.move_next() {
-            Ok(None) => None,
-            Ok(Some((key, value))) => Some(Ok((key, value))),
-            Err(error) => Some(Err(error)),
-        }
-    }
-}
-
-struct RawIter<'a> {
-    prefix: [u8; 9],
-    cursor: Option<OwnedCursor<'a>>,
-}
-
-impl<'a> RawIter<'a> {
-    fn new(db: Database<'a>, prefix: [u8; 9]) -> crate::Result<Self> {
-        let mut cursor = OwnedCursor::new(db)?;
-        match cursor.to_gte_key(&prefix.as_ref()) {
-            Ok(()) => Ok(RawIter {
-                cursor: Some(cursor),
-                prefix,
-            }),
-            Err(MdbError::NotFound) => Ok(RawIter {
-                cursor: None,
-                prefix,
-            }),
-            Err(e) => return Err(Error::Lmdb(e)),
-        }
+        Ok(())
     }
 
-    pub fn next(&mut self) -> crate::Result<bool> {
-        if let Some(cursor) = &mut self.cursor {
-            match cursor.to_next_key() {
-                Ok(()) => {
-                    let key: &[u8] = cursor.get_key()?;
-                    Ok(key.starts_with(self.prefix.as_ref()))
-                }
-                Err(MdbError::NotFound) => Ok(false),
-                Err(e) => Err(Error::Lmdb(e)),
+    pub fn next<'b>(&'b mut self) -> crate::Result<Option<Entry<'b, 'db>>> {
+        self.ensure_init()?;
+        let inner = match &mut self.state {
+            IterState::Init(inner) => inner,
+            _ => return Ok(None),
+        };
+        let result = inner.node_entries.next()?;
+        match result {
+            None => Ok(None),
+            Some(map_key) => {
+                let block_id = *inner.node_entries.block_id()?;
+                let e = Entry::new(map_key, block_id, &inner.db);
+                Ok(Some(e))
             }
-        } else {
-            Ok(false)
-        }
-    }
-
-    pub fn next_back(&mut self) -> crate::Result<bool> {
-        if let Some(cursor) = &mut self.cursor {
-            match cursor.to_prev_key() {
-                Ok(()) => {
-                    let key: &[u8] = cursor.get_key()?;
-                    Ok(key.starts_with(self.prefix.as_ref()))
-                }
-                Err(MdbError::NotFound) => Ok(false),
-                Err(e) => Err(Error::Lmdb(e)),
-            }
-        } else {
-            Ok(false)
-        }
-    }
-
-    pub fn key(&mut self) -> Option<&'a [u8]> {
-        let cursor = self.cursor.as_deref_mut()?;
-        cursor.get_key().ok()
-    }
-
-    pub fn block_id(&mut self) -> crate::Result<Option<&'a ID>> {
-        if let Some(cursor) = &mut self.cursor {
-            let value: &[u8] = cursor.get_value()?;
-            let id = ID::parse(value)?;
-            Ok(Some(id))
-        } else {
-            Ok(None)
         }
     }
 }
@@ -434,7 +330,7 @@ impl Prelim for MapPrelim {
     ) -> crate::Result<Self::Return> {
         let unmounted: Unmounted<Map> = Unmounted::nested(*insert.block.id());
         if !self.0.is_empty() {
-            let mut mounted = unmounted.mount(tx)?;
+            let mut mounted = unmounted.mount_mut(tx)?;
             for (key, value) in self.0 {
                 mounted.insert(key, value)?;
             }

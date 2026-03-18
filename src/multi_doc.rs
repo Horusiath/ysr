@@ -16,7 +16,7 @@ impl MultiDoc {
     pub fn transact_mut(&self, doc_id: &str) -> crate::Result<Transaction<'_>> {
         let handle = self.env.create_db(doc_id, DbFlags::DbCreate)?;
         let tx = self.env.new_transaction()?;
-        Ok(Transaction::read_write(tx, handle, None, self.client_id))
+        Transaction::read_write(tx, handle, None, self.client_id)
     }
 
     pub fn transact_mut_with<O: Into<Origin>>(
@@ -27,12 +27,7 @@ impl MultiDoc {
         let origin = origin.into();
         let handle = self.env.create_db(doc_id, DbFlags::DbCreate)?;
         let tx = self.env.new_transaction()?;
-        Ok(Transaction::read_write(
-            tx,
-            handle,
-            Some(origin),
-            self.client_id,
-        ))
+        Transaction::read_write(tx, handle, Some(origin), self.client_id)
     }
 }
 
@@ -50,7 +45,7 @@ mod test {
     use crate::test_util::multi_doc;
     use crate::transaction::{CommitFlags, TransactionSummary};
 
-    use crate::{lib0, Map, MultiDoc, StateVector, Text, TextRef, Unmounted};
+    use crate::{Map, MultiDoc, StateVector, Text, TextRef, Unmounted, lib0};
     use bytes::Bytes;
     use uuid::Uuid;
 

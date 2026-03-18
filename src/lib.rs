@@ -31,6 +31,7 @@ use smallvec::CollectionAllocErr;
 pub use state_vector::StateVector;
 use std::collections::TryReserveError;
 pub use transaction::Transaction;
+pub use types::dynamic::{Dyn, DynRef};
 pub use types::list::{List, ListPrelim, ListRef};
 pub use types::map::{Map, MapPrelim, MapRef};
 pub use types::text::{Text, TextRef};

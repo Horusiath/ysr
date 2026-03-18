@@ -1,6 +1,6 @@
 use crate::node::{Node, NodeType};
 use crate::store::KEY_PREFIX_BLOCK;
-use crate::{Block, BlockHeader, BlockMut, Error, ID};
+use crate::{Block, BlockHeader, BlockMut, Error, ID, Optional};
 use lmdb_rs_m::{Database, MdbError, MdbValue, ToMdbValue};
 use std::fmt::{Debug, Formatter};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, TryFromBytes};
@@ -30,6 +30,13 @@ impl<'tx> BlockStore<'tx> {
         }
     }
 
+    /// Inserts a new block into database.
+    pub fn insert(&self, block: Block<'_>) -> crate::Result<()> {
+        let key = BlockKey::new(*block.id());
+        self.db.set(&key, block.header())?;
+        Ok(())
+    }
+
     pub fn get_or_insert_node(&self, node: Node, node_type: NodeType) -> crate::Result<BlockMut> {
         let node_id = node.id();
         let key = BlockKey::new(node_id);
@@ -41,7 +48,9 @@ impl<'tx> BlockStore<'tx> {
             }
             Err(MdbError::NotFound) if node_id.is_root() => {
                 // root types don't carry over extra data
-                let block = BlockMut::new(node_id, BlockHeader::empty());
+                let mut header = BlockHeader::empty();
+                header.set_node_type(node_type);
+                let block = BlockMut::new(node_id, header);
                 self.db.set(&key, block.header())?;
                 Ok(block)
             }
@@ -50,11 +59,9 @@ impl<'tx> BlockStore<'tx> {
         }
     }
 
-    /// Inserts a new block into database.
-    pub fn insert(&self, block: Block<'_>) -> crate::Result<()> {
-        let key = BlockKey::new(*block.id());
-        self.db.set(&key, block.header())?;
-        Ok(())
+    pub fn split(&self, id: ID) -> crate::Result<SplitResult> {
+        let mut cursor = self.cursor()?;
+        cursor.split(id)
     }
 
     pub fn inspect(&self) -> Inspector<'_> {
@@ -69,12 +76,20 @@ pub struct BlockCursor<'tx> {
 impl<'tx> BlockCursor<'tx> {
     const PREFIX: u8 = KEY_PREFIX_BLOCK;
 
+    pub fn insert(&mut self, block: Block<'_>) -> crate::Result<()> {
+        let key = BlockKey::new(*block.id());
+        self.cursor.set(&key, &block.header().as_bytes(), 0)?;
+        Ok(())
+    }
+
     /// Moves the cursor position into the given block location and replaces existing block header
     /// with a provided one. This method will throw an error if a block hadn't been inserted into
     /// a database before.
-    pub fn update(&mut self, block: Block<'tx>) -> crate::Result<()> {
+    pub fn update(&mut self, block: Block<'_>) -> crate::Result<()> {
         let key = BlockKey::new(*block.id());
-        self.cursor.to_key(&key)?;
+        if self.current_id()? != Some(block.id()) {
+            self.cursor.to_key(&key)?;
+        }
         self.cursor.replace(block.header())?;
         Ok(())
     }
@@ -98,39 +113,49 @@ impl<'tx> BlockCursor<'tx> {
 
     /// Returns a [Block] at the current cursor position.
     /// Returns `None` if current cursor position is outside the block boundaries.
-    pub fn current(&mut self) -> crate::Result<Option<Block<'tx>>> {
+    pub fn current(&mut self) -> crate::Result<Block<'tx>> {
         match self.current_id()? {
-            None => Ok(None),
+            None => Err(crate::Error::NotFound),
             Some(&id) => {
                 let value: &'tx [u8] = self.cursor.get_value()?;
-                Ok(Some(Block::new(id, value)?))
+                Ok(Block::new(id, value)?)
             }
+        }
+    }
+
+    /// Move cursor to the beginning of the block store space.
+    pub fn start_from(&mut self, id: ID) -> crate::Result<()> {
+        let key = BlockKey::new(id);
+        match self.cursor.to_gte_key(&key.as_bytes()) {
+            Ok(_) => Ok(()),
+            Err(MdbError::NotFound) => Err(crate::Error::NotFound),
+            Err(e) => Err(e.into()),
         }
     }
 
     /// Moves current cursor position to a block starting with a given [ID].
     /// Returns true if block has been found.
-    pub fn seek(&mut self, id: ID) -> crate::Result<Option<Block<'tx>>> {
+    pub fn seek(&mut self, id: ID) -> crate::Result<Block<'tx>> {
         let key = BlockKey::new(id);
         match self.cursor.to_key(&key) {
             Ok(_) => self.current(),
-            Err(MdbError::NotFound) => Ok(None),
+            Err(MdbError::NotFound) => Err(crate::Error::NotFound),
             Err(e) => Err(e.into()),
         }
     }
 
     /// Moves current cursor position to a block containing an element with a given [ID].
     /// Returns true if block has been found.
-    pub fn seek_containing(&mut self, id: ID) -> crate::Result<Option<Block<'tx>>> {
+    pub fn seek_containing(&mut self, id: ID) -> crate::Result<Block<'tx>> {
         let key = BlockKey::new(id);
         // try to seek to the exact key first
         match self.cursor.to_gte_key(&key) {
             Ok(()) => {
-                if let Some(block) = self.current()?
+                if let Some(block) = self.current().optional()?
                     && block.id() == &id
                 {
                     // the nearest >= key is a block, check if it's the one we're looking for
-                    return Ok(Some(block));
+                    return Ok(block);
                 }
             }
             Err(lmdb_rs_m::MdbError::NotFound) => { /* no >= key found */ }
@@ -142,13 +167,13 @@ impl<'tx> BlockCursor<'tx> {
         self.seek_prev_indirect(&id)
     }
 
-    fn seek_prev_indirect(&mut self, id: &ID) -> crate::Result<Option<Block<'tx>>> {
+    fn seek_prev_indirect(&mut self, id: &ID) -> crate::Result<Block<'tx>> {
         if let Some(block) = self.prev()?
             && block.contains(id)
         {
-            Ok(Some(block))
+            Ok(block)
         } else {
-            Ok(None)
+            Err(crate::Error::NotFound)
         }
     }
 
@@ -156,20 +181,20 @@ impl<'tx> BlockCursor<'tx> {
     /// Returns `None` if current cursor position is outside the block boundaries.
     pub fn next(&mut self) -> crate::Result<Option<Block<'tx>>> {
         self.cursor.to_next_key()?;
-        self.current()
+        self.current().optional()
     }
 
     /// Moves current cursor position to a previous block, returning it.
     /// Returns `None` if current cursor position is outside the block boundaries.
     pub fn prev(&mut self) -> crate::Result<Option<Block<'tx>>> {
         self.cursor.to_prev_key()?;
-        self.current()
+        self.current().optional()
     }
 
     /// Moves current cursor position to a block, that's a right neighbor of the current block.
     /// Returns `None` if the right neighbor could not be found.
     pub fn right(&mut self) -> crate::Result<Option<Block<'tx>>> {
-        let curr = match self.current()? {
+        let curr = match self.current().optional()? {
             Some(block) => block,
             None => return Ok(None),
         };
@@ -178,13 +203,13 @@ impl<'tx> BlockCursor<'tx> {
             None => return Ok(None),
         };
 
-        self.seek(*right_id)
+        self.seek(*right_id).optional()
     }
 
     /// Moves current cursor position to a block, that's a left neighbor of the current block.
     /// Returns `None` if the left neighbor could not be found.
     pub fn left(&mut self) -> crate::Result<Option<Block<'tx>>> {
-        let curr = match self.current()? {
+        let curr = match self.current().optional()? {
             Some(block) => block,
             None => return Ok(None),
         };
@@ -193,7 +218,7 @@ impl<'tx> BlockCursor<'tx> {
             None => return Ok(None),
         };
 
-        self.seek_containing(*left_id) // left id is point at the end of the block
+        self.seek_containing(*left_id).optional() // left id is point at the end of the block
     }
 
     #[inline]
@@ -203,10 +228,7 @@ impl<'tx> BlockCursor<'tx> {
     }
 
     pub fn split(&mut self, id: ID) -> crate::Result<SplitResult> {
-        let mut left: BlockMut = match self.seek_containing(id)? {
-            Some(block) => block.into(),
-            None => return Err(crate::Error::BlockNotFound(id)),
-        };
+        let mut left: BlockMut = self.seek_containing(id)?.into();
         let offset = id.clock - left.id().clock;
         match left.split(offset) {
             None => Ok(SplitResult::Unchanged(left)),

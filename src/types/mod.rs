@@ -4,8 +4,8 @@ use crate::node::{Node, NodeID, NodeType};
 use crate::store::Db;
 use std::borrow::{Borrow, BorrowMut, Cow};
 use std::marker::PhantomData;
-use std::ops::{Deref, DerefMut};
 
+pub mod dynamic;
 pub mod list;
 pub mod map;
 pub mod text;
@@ -21,6 +21,13 @@ pub struct Unmounted<Cap> {
 }
 
 impl<Cap> Unmounted<Cap> {
+    pub fn new(node: Node<'static>) -> Self {
+        Unmounted {
+            node,
+            _capability: PhantomData,
+        }
+    }
+
     pub fn root<S>(name: S) -> Self
     where
         S: Into<Cow<'static, str>>,

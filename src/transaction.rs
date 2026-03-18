@@ -1,12 +1,15 @@
 use crate::block::{Block, BlockMut, ID};
-use crate::block_reader::{Carrier, Update};
-use crate::content::ContentType;
+use crate::block_reader::{BlockRange, Carrier, Update};
+use crate::content::{ContentType, FormatAttribute};
 use crate::id_set::IDSet;
 use crate::node::{Node, NodeID};
 use crate::read::Decoder;
 use crate::state_vector::Snapshot;
-use crate::store::Db;
-use crate::store::block_store::BlockStore;
+use crate::store::block_store::{BlockCursor, BlockStore};
+use crate::store::content_store::ContentStore;
+use crate::store::intern_strings::InternStringsStore;
+use crate::store::map_entries::MapEntries;
+use crate::store::{Db, MapEntriesStore};
 use crate::write::{Encode, Encoder, EncoderV1, WriteExt};
 use crate::{ClientID, Clock, Optional, StateVector, U32};
 use bitflags::bitflags;
@@ -65,17 +68,66 @@ impl TransactionState {
         }
     }
 
-    pub(crate) fn delete(
+    fn delete_list_members<'tx>(
         &mut self,
-        blocks: &mut BlockStore<'_>,
+        start: ID,
+        block_cursor: &mut BlockCursor<'tx>,
+        map_entries: &MapEntriesStore<'tx>,
+    ) -> crate::Result<()> {
+        let mut current = Some(start);
+        while let Some(id) = current {
+            let mut block: BlockMut = block_cursor.seek(id)?.into();
+            if !self.delete(&mut block, true, block_cursor, map_entries)?
+                && block.id().clock < self.begin_state.get(&block.id().client)
+            {
+                // This will be gc'd later, and we want to merge it if possible
+                // We try to merge all deleted items after each transaction,
+                // but we have no knowledge about that this needs to be merged
+                // since it is not in transaction.ds. Hence, we add it to transaction._mergeStructs
+                self.merge_blocks.insert(*block.id());
+            }
+            current = block.right().copied();
+        }
+        Ok(())
+    }
+
+    fn delete_map_members<'tx>(
+        &mut self,
+        id: &ID,
+        block_cursor: &mut BlockCursor<'tx>,
+        map_entries: &MapEntriesStore<'tx>,
+    ) -> crate::Result<()> {
+        let mut to_delete = Vec::new();
+        let mut entries = map_entries.entries(id);
+        while let Some(_) = entries.next()? {
+            let child_id = *entries.block_id()?;
+            to_delete.push(child_id);
+        }
+
+        for entry_id in to_delete {
+            let mut block: BlockMut = block_cursor.seek(entry_id)?.into();
+            let existed_before = entry_id.clock < self.begin_state.get(&block.id().client);
+            let deleted = self.delete(&mut block, true, block_cursor, map_entries)?;
+            if deleted && existed_before {
+                // same as above
+                self.merge_blocks.insert(entry_id);
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn delete<'tx>(
+        &mut self,
         block: &mut BlockMut,
         parent_deleted: bool,
+        block_cursor: &mut BlockCursor<'tx>,
+        map_entries: &MapEntriesStore<'tx>,
     ) -> crate::Result<bool> {
         if block.is_deleted() {
             return Ok(false);
         }
         block.set_deleted();
-        blocks.update(block.as_block())?;
+        block_cursor.update(block.as_block())?;
 
         self.delete_set.insert(*block.id(), block.clock_len());
         self.add_changed_type(*block.parent(), parent_deleted, block.key_hash());
@@ -83,41 +135,11 @@ impl TransactionState {
         match block.content_type() {
             ContentType::Node => {
                 // iterate over list values of the node and delete them
-                let mut current = block.start().copied();
-                while let Some(id) = current {
-                    if !self.delete(blocks, &mut block, true)?
-                        && block.id().clock < self.begin_state.get(&block.id().client)
-                    {
-                        // This will be gc'd later and we want to merge it if possible
-                        // We try to merge all deleted items after each transaction,
-                        // but we have no knowledge about that this needs to be merged
-                        // since it is not in transaction.ds. Hence we add it to transaction._mergeStructs
-                        self.merge_blocks.insert(*block.id());
-                    }
-                    current = block.right().copied();
+                if let Some(start) = block.start() {
+                    self.delete_list_members(*start, block_cursor, map_entries)?;
                 }
-
                 //iterate over map entries of the node and delete them
-                let mut to_delete = Vec::new();
-                for result in self.entries(*block.parent()) {
-                    let (_, &entry_id) = result?;
-                    to_delete.push(entry_id);
-                }
-
-                for entry_id in to_delete {
-                    self.to_key(&BlockKey::new(entry_id))?;
-                    let mut block: BlockMut = self.get_block()?.into();
-                    if !self.delete_current(self, &mut block, true)?
-                        && entry_id.clock < self.begin_state.get(&entry_id.client)
-                    {
-                        // same as above
-                        self.merge_blocks.insert(entry_id);
-                    }
-                }
-                self.changed.remove(block.id());
-
-                // restore cursor position
-                self.to_key(&rollback_key)?;
+                self.delete_map_members(block.id(), block_cursor, map_entries)?;
             }
             _ => { /* not used */ }
         }
@@ -131,6 +153,7 @@ impl TransactionState {
     ) -> crate::Result<()> {
         // squash delete set
         self.delete_set.squash();
+        let blocks = db.blocks();
 
         // transaction.afterState = getStateVector(transaction.doc.store)
 
@@ -151,13 +174,12 @@ impl TransactionState {
         //tryMergeDeleteSet(ds, store)
 
         // on all affected store.clients props, try to merge
-        let mut cursor = db.new_cursor()?;
+        let mut cursor = blocks.cursor()?;
         let mut key_changes = BTreeMap::new();
         for (client, &clock) in self.current_state.iter() {
             let before_clock = self.begin_state.get(client);
             if before_clock != clock {
-                let key = BlockKey::new(ID::new(*client, clock));
-                cursor.to_gte_key(&key)?;
+                cursor.seek_containing(ID::new(*client, clock))?;
                 Self::merge_with_lefts(&mut cursor, &mut key_changes)?;
             }
         }
@@ -175,32 +197,28 @@ impl TransactionState {
     /// Returns ID of the current position after merging.
     /// Expects that cursor is set within a block keyspace position.
     fn merge_with_lefts(
-        cursor: &mut lmdb_rs_m::Cursor,
+        cursor: &mut BlockCursor<'_>,
         key_changes: &mut BTreeMap<(NodeID, U32, ID), ID>,
     ) -> crate::Result<ID> {
-        let mut right: BlockMut = cursor.get_block()?.into();
-        cursor.to_prev_key()?;
-        let mut left = cursor.get_block().optional()?.map(BlockMut::from);
-        while let Some(curr) = &mut left {
+        let mut right: BlockMut = cursor.current()?.into();
+        let end = *right.id();
+        let mut left = cursor.prev()?.map(BlockMut::from);
+        while let Some(mut curr) = left {
             if curr.merge(right.as_block()) {
                 if let Some(&parent_sub) = right.key_hash() {
                     let e = key_changes
                         .entry((*right.parent(), parent_sub, *right.id()))
                         .or_insert(*curr.id());
-                    *e = *curr.id();
+                    *e = *curr.id(); // update key
                 }
-                cursor.del()?;
+                //TODO: delete right
             } else {
                 break; // we couldn't merge left and right blocks
             }
 
             // move to left block
-            cursor.to_prev_key()?;
-            right = std::mem::replace(
-                &mut left,
-                cursor.get_block().optional()?.map(BlockMut::from),
-            )
-            .unwrap();
+            left = cursor.prev()?.map(BlockMut::from);
+            right = curr;
         }
 
         Ok(*right.id())
@@ -220,18 +238,25 @@ impl<'db> Transaction<'db> {
         handle: DbHandle,
         origin: Option<Origin>,
         client_id: ClientID,
-    ) -> Self {
-        let state = origin.map(|o| {
-            let db = txn.bind(&handle);
-            let begin_state = db.state_vector().unwrap();
-            Box::new(TransactionState::new(client_id, begin_state, Some(o)))
-        });
-        Self {
+    ) -> crate::Result<Self> {
+        let state = match origin {
+            None => None,
+            origin => {
+                let db = txn.bind(&handle);
+                let begin_state = db.state_vector().state_vector()?;
+                Some(Box::new(TransactionState::new(
+                    client_id,
+                    begin_state,
+                    origin,
+                )))
+            }
+        };
+        Ok(Self {
             txn,
             client_id,
             handle,
             state,
-        }
+        })
     }
 
     pub fn db(&self) -> Database<'_> {
@@ -246,14 +271,14 @@ impl<'db> Transaction<'db> {
     pub fn split_mut(&mut self) -> (Database<'_>, &mut TransactionState) {
         let db = self.txn.bind(&self.handle);
         let state = self.state.get_or_insert_with(|| {
-            let begin_state = db.state_vector().unwrap();
+            let begin_state = db.state_vector().state_vector().unwrap();
             Box::new(TransactionState::new(self.client_id, begin_state, None))
         });
         (db, state)
     }
 
     pub fn state_vector(&self) -> crate::Result<StateVector> {
-        self.db().state_vector()
+        self.db().state_vector().state_vector()
     }
 
     pub fn incremental_update(&self) -> crate::Result<Vec<u8>> {
@@ -275,17 +300,10 @@ impl<'db> Transaction<'db> {
         // wrote updates
         let current_state = self.state_vector()?;
         let db = self.db();
-        let mut block_cursor = db.new_cursor()?;
+        let blocks = db.blocks();
+        let mut block_cursor = blocks.cursor()?;
         // in order to build delete set we need to go through all the blocks anyway
-        if block_cursor
-            .to_gte_key(&[KEY_PREFIX_BLOCK].as_slice())
-            .optional()? // MdbError::NotFound - there are no blocks
-            .is_none()
-        {
-            writer.write_var(0)?; // no blocks
-            writer.write_var(0)?; // no elements in delete set
-            return Ok(());
-        }
+        block_cursor.start_from(ID::new(1.into(), 0.into()))?;
 
         let mut current_client = ClientID::ROOT;
         let mut min_state = Clock::new(0);
@@ -297,7 +315,8 @@ impl<'db> Transaction<'db> {
         let mut ds = IDSet::default();
         let mut client_block_count = 0;
         let mut first_block_clock = Clock::new(0);
-        while let Some(block) = block_cursor.get_block().optional()? {
+        let mut current = block_cursor.current().optional()?;
+        while let Some(block) = current.take() {
             let id = block.id();
             let len = block.clock_len();
 
@@ -327,9 +346,7 @@ impl<'db> Transaction<'db> {
             }
 
             // move to next block
-            if block_cursor.to_next_key().optional()?.is_none() {
-                break;
-            }
+            current = block_cursor.next()?;
         }
 
         if client_block_count != 0 {
@@ -339,29 +356,40 @@ impl<'db> Transaction<'db> {
         // on the second pass we go through blocks we're going to serialize
         // we don't cache them in memory as we don't know how much memory can we spare and how big
         // the document is. Hopefully LMDB will be able to cache it all.
-        let mut content_cursor = db.new_cursor()?;
+        let contents = db.contents();
+        let map_entries = db.map_entries();
+        let intern_strings = db.intern_strings();
 
         writer.write_var(blocks.len())?;
         for (client_id, (block_count, first_clock)) in blocks {
             writer.write_var(block_count)?;
             writer.write_client(client_id)?;
 
-            block_cursor.to_key(&BlockKey::new(ID::new(client_id, first_clock)))?;
-            let block = block_cursor.get_block()?;
+            let block = block_cursor.seek(ID::new(client_id, first_clock))?;
             let clock = since.get(&client_id).max(block.id().clock);
             writer.write_var(clock)?;
             // write first block
             Self::write_block(
                 &block,
                 clock - block.id().clock,
-                &mut content_cursor,
+                &contents,
+                &map_entries,
+                &intern_strings,
                 &mut writer,
             )?;
             // write rest of the blocks
             for _ in 1..block_count {
-                block_cursor.to_next_key()?;
-                let block = block_cursor.get_block()?;
-                Self::write_block(&block, Clock::new(0), &mut content_cursor, &mut writer)?;
+                match block_cursor.next()? {
+                    None => break,
+                    Some(block) => Self::write_block(
+                        &block,
+                        Clock::new(0),
+                        &contents,
+                        &map_entries,
+                        &intern_strings,
+                        &mut writer,
+                    )?,
+                }
             }
         }
 
@@ -374,7 +402,9 @@ impl<'db> Transaction<'db> {
     fn write_block<E: Encoder>(
         block: &Block<'_>,
         offset: Clock,
-        cursor: &mut lmdb_rs_m::Cursor<'_>,
+        content_store: &ContentStore<'_>,
+        map_entries: &MapEntriesStore<'_>,
+        strings: &InternStringsStore<'_>,
         writer: &mut E,
     ) -> crate::Result<()> {
         let id = block.id();
@@ -396,7 +426,7 @@ impl<'db> Transaction<'db> {
             // left/right origins were not provided
             let parent_id = block.parent();
             if parent_id.is_root() {
-                let parent_name = Self::parent_name(cursor, parent_id)?;
+                let parent_name = strings.get(parent_id.clock)?;
                 writer.write_parent_info(true)?;
                 writer.write_string(parent_name)?;
             } else {
@@ -404,48 +434,64 @@ impl<'db> Transaction<'db> {
                 writer.write_left_id(parent_id)?;
             }
             if let Some(key_hash) = block.key_hash() {
-                let entry_key = Self::entry_key_for(cursor, *parent_id, *key_hash, block.id())?;
+                let entry_key = Self::entry_key_for(map_entries, parent_id, key_hash, block.id())?;
                 writer.write_string(entry_key)?;
             }
         }
 
         let content_type = block.content_type();
+        let data = block.try_inline_data();
         match content_type {
             ContentType::Deleted => {
                 writer.write_len(block.clock_len().into())?;
             }
             ContentType::Binary => {
-                let content = cursor.content(*block.id())?;
+                let content = match data {
+                    Some(data) => data,
+                    None => content_store.get(*block.id())?,
+                };
                 writer.write_bytes(content)?;
             }
             ContentType::String => {
-                let content = cursor.content(*block.id())?;
+                let content = match data {
+                    Some(data) => data,
+                    None => content_store.get(*block.id())?,
+                };
                 let content = unsafe { std::str::from_utf8_unchecked(content) };
                 writer.write_string(content)?;
             }
             ContentType::Embed => {
-                let content = cursor.content(*block.id())?;
+                let content = match data {
+                    Some(data) => data,
+                    None => content_store.get(*block.id())?,
+                };
                 let json: serde_json::Value = serde_json::from_slice(content)?;
                 writer.write_json(&json)?;
             }
             ContentType::Format => {
-                let content = cursor.content(*block.id())?;
+                let content = match data {
+                    Some(data) => data,
+                    None => content_store.get(*block.id())?,
+                };
                 writer.write_all(content)?; // format is stored in the same shape
             }
             ContentType::Node => {
                 writer.write_type_ref(*block.node_type().unwrap() as u8)?;
             }
-            ContentType::Atom | ContentType::Json => {
-                writer.write_len(block.clock_len().into())?;
-                cursor.to_key(&BlockContentKey::new(*block.id()))?;
-                for _ in 0..block.clock_len().get() {
-                    let value: &[u8] = cursor.get_value()?;
-                    writer.write_all(&value[1..])?; // skip 1st byte (content_type)
-                    cursor.to_next_key()?;
+            ContentType::Atom | ContentType::Json => match data {
+                Some(data) => {
+                    writer.write_len(1.into())?;
+                    writer.write_all(data)?;
                 }
-            }
+                None => {
+                    let mut i = content_store.read_range(content_type, block.range());
+                    writer.write_len(block.clock_len().into())?;
+                    while let Some(content) = i.next()? {
+                        writer.write_all(content.bytes())?;
+                    }
+                }
+            },
             ContentType::Doc => {
-                let content = cursor.content(*block.id())?;
                 todo!()
             }
         }
@@ -454,38 +500,20 @@ impl<'db> Transaction<'db> {
     }
 
     fn entry_key_for<'a>(
-        cursor: &mut lmdb_rs_m::Cursor<'a>,
-        parent_id: NodeID,
-        key_hash: U32,
+        map_entries: &MapEntriesStore<'a>,
+        parent_id: &NodeID,
+        key_hash: &U32,
         block_id: &ID,
     ) -> crate::Result<&'a str> {
-        let bucket_key = MapBucketHashKey::new(parent_id, key_hash);
-        cursor.to_gte_key(&bucket_key)?;
-        while {
-            let key: &[u8] = cursor.get_key()?;
-            if key.starts_with(bucket_key.as_bytes()) {
-                let value = ID::parse(cursor.get_value()?)?;
-                if value == block_id {
-                    let entry_key = unsafe {
-                        std::str::from_utf8_unchecked(&key[size_of::<MapBucketHashKey>()..])
-                    };
-                    return Ok(entry_key);
-                }
-                true
-            } else {
-                false
+        let mut i = map_entries.keys_for_hash(parent_id, key_hash);
+        let mut found = None;
+        while let Some((key, id)) = i.next()? {
+            found = Some(key);
+            if id == block_id {
+                break;
             }
-        } {}
-
-        Err(crate::Error::NotFound)
-    }
-
-    fn parent_name<'a>(cursor: &mut lmdb_rs_m::Cursor<'a>, id: &NodeID) -> crate::Result<&'a str> {
-        let mut key: SmallVec<[u8; 5]> = smallvec![KEY_PREFIX_INTERN_STR];
-        key.extend_from_slice(id.clock.as_bytes());
-        cursor.to_key(&key.as_bytes())?;
-        let str = unsafe { std::str::from_utf8_unchecked(cursor.get_value()?) };
-        Ok(str)
+        }
+        found.ok_or_else(|| crate::Error::NotFound)
     }
 
     fn write_updates(
@@ -571,8 +599,7 @@ impl<'db> Transaction<'db> {
         }
         let pending_delete_set = self.apply_delete(&update.delete_set)?;
         if !remaining.is_empty() || !pending_delete_set.is_empty() {
-            self.db()
-                .insert_pending_update(&missing_sv, &remaining, &pending_delete_set)?;
+            todo!("insert pending data")
         }
         Ok(())
     }
@@ -584,7 +611,8 @@ impl<'db> Transaction<'db> {
         }
         let (mut db, state) = self.split_mut();
         // We can ignore the case of GC and Delete structs, because we are going to skip them
-        let mut cursor = db.new_cursor()?;
+        let blocks = db.blocks();
+        let mut block_cursor = blocks.cursor()?;
         for (&client, ranges) in delete_set.iter() {
             let current_clock = state.current_state.get(&client);
 
@@ -598,8 +626,8 @@ impl<'db> Transaction<'db> {
                     }
 
                     // We can ignore the case of GC and Delete structs, because we are going to skip them
-                    cursor.to_gte_key(&BlockKey::new(ID::new(client, clock_start)))?;
-                    if let Some(mut block) = cursor.get_block().optional()? {
+                    block_cursor.start_from(ID::new(client, clock_start))?;
+                    if let Some(mut block) = block_cursor.current().optional()? {
                         if block.id().client != client {
                             continue; // we shoot over the current client range
                         }
@@ -609,13 +637,11 @@ impl<'db> Transaction<'db> {
                             let offset = clock_start - block.id().clock;
                             let mut left: BlockMut = block.clone().into();
                             if let Some(right) = left.split(offset) {
-                                cursor.replace(&left.header().as_bytes())?;
-                                cursor.set(
-                                    &BlockKey::new(*right.id()),
-                                    &right.header().as_bytes(),
-                                    0,
-                                )?;
-                                block = cursor.get_block()?;
+                                block_cursor.update_current(left.header())?;
+                                block_cursor.insert(right.as_block())?;
+
+                                // block is the same as right, but we need specifically its reference residing in the db
+                                block = block_cursor.current()?;
                             }
                         }
 
@@ -625,21 +651,17 @@ impl<'db> Transaction<'db> {
                                     let offset = clock_end - block.id().clock;
                                     let mut left: BlockMut = block.clone().into();
                                     if let Some(right) = left.split(offset) {
-                                        cursor.replace(&left.header().as_bytes())?;
-                                        cursor.set(
-                                            &BlockKey::new(*right.id()),
-                                            &right.header().as_bytes(),
-                                            0,
-                                        )?;
-                                        cursor.to_prev_key()?;
-                                        block = cursor.get_block()?;
+                                        block_cursor.update_current(left.header())?;
+                                        block_cursor.insert(right.as_block())?;
+                                        block = block_cursor.prev()?.unwrap();
                                     }
                                 }
                                 let mut block: BlockMut = block.into();
-                                cursor.delete_current(state, &mut block, false)?;
+                                block.set_deleted();
+                                block_cursor.update_current(block.header())?;
+                                state.delete_set.insert(*block.id(), block.clock_len());
                             }
-                            cursor.to_next_key()?;
-                            block = match cursor.get_block().optional()? {
+                            block = match block_cursor.next()? {
                                 Some(b) => b,
                                 None => break,
                             };

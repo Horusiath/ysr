@@ -1,11 +1,16 @@
 use crate::block::InsertBlockData;
-use crate::content::ContentType;
+use crate::content::{Content, ContentType};
+use crate::integrate::IntegrationContext;
 use crate::lib0::Value;
-use crate::node::NodeType;
+use crate::node::{Node, NodeType};
 use crate::prelim::Prelim;
+use crate::store::Db;
 use crate::types::Capability;
-use crate::{Clock, In, Mounted, Transaction, Unmounted};
-use serde::de::DeserializeOwned;
+use crate::{
+    BlockMut, Clock, DynRef, ID, In, Mounted, Optional, Out, Transaction, Unmounted, lib0,
+};
+use lmdb_rs_m::Database;
+use std::borrow::Cow;
 use std::ops::{Deref, DerefMut, RangeBounds};
 
 pub type ListRef<Txn> = Mounted<List, Txn>;
@@ -22,9 +27,43 @@ impl Capability for List {
 impl<'tx, 'db> ListRef<&'tx Transaction<'db>> {
     pub fn get<T>(&self, index: usize) -> crate::Result<T>
     where
-        T: DeserializeOwned,
+        T: for<'a> TryFrom<Content<'a>, Error = crate::Error>,
     {
-        todo!()
+        if let Some(start) = self.block.start() {
+            let db = self.tx.db();
+            let blocks = db.blocks();
+            let mut cursor = blocks.cursor()?;
+
+            let mut current = *start;
+            let mut remaining = index;
+            while let Some(block) = cursor.seek(current).optional()? {
+                let block_len = block.clock_len().get() as usize;
+                if block_len > remaining {
+                    match block.try_inline_content() {
+                        Some(content) => return T::try_from(content),
+                        None => {
+                            let mut id = *block.id();
+                            id.clock += Clock::new(remaining as u32);
+                            let content = db.contents();
+                            let data = content.get(id)?;
+                            return T::try_from(Content::new(
+                                block.content_type(),
+                                Cow::Borrowed(data),
+                            ));
+                        }
+                    }
+                }
+
+                remaining -= block_len;
+                match block.right() {
+                    None => break,
+                    Some(right) => current = *right,
+                }
+            }
+            Err(crate::Error::NotFound)
+        } else {
+            Err(crate::Error::NotFound)
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -33,13 +72,26 @@ impl<'tx, 'db> ListRef<&'tx Transaction<'db>> {
 
     pub fn iter<T>(&self) -> Iter<'_, T>
     where
-        T: DeserializeOwned,
+        T: for<'a> TryFrom<Content<'a>, Error = crate::Error>,
     {
-        todo!()
+        Iter::new(&self.tx, self.block.start().copied())
     }
 
     pub fn to_value(&self) -> crate::Result<Value> {
-        todo!()
+        let mut buf = Vec::new();
+        let mut iter = self.iter::<crate::Out>();
+        while let Some(result) = iter.next() {
+            match result? {
+                Out::Value(value) => buf.push(value),
+                Out::Node(node) => {
+                    let unmounted = Unmounted::new(node.into());
+                    let mounted: DynRef<_> = unmounted.mount(self.tx)?;
+                    let value = mounted.to_value()?;
+                    buf.push(value);
+                }
+            }
+        }
+        Ok(lib0::Value::Array(buf))
     }
 }
 
@@ -48,7 +100,43 @@ impl<'tx, 'db> ListRef<&'tx mut Transaction<'db>> {
     where
         T: Prelim,
     {
-        todo!()
+        let mut remaining = Clock::new(index as u32);
+        let mut left: Option<ID> = None;
+        let mut right: Option<ID> = self.block.start().copied();
+
+        let (db, state) = self.tx.split_mut();
+        let blocks = db.blocks();
+        while let Some(id) = right
+            && remaining > Clock::new(0)
+        {
+            let block = blocks.get(id)?;
+            if block.clock_len() > remaining {
+                let id = block.id();
+                left = Some(ID::new(id.client, id.clock + remaining));
+                right = Some(ID::new(id.client, id.clock + remaining + 1));
+                remaining = Clock::new(0);
+                break;
+            } else {
+                remaining -= block.clock_len();
+                left = Some(block.last_id());
+                right = block.right().copied();
+            }
+        }
+
+        if remaining != 0 {
+            return Err(crate::Error::OutOfRange);
+        }
+
+        let node: Node = (*self.block.id()).into();
+        let id = state.next_id();
+        let left = left.as_ref();
+        let right = right.as_ref();
+        let mut insert =
+            InsertBlockData::new(id, Clock::new(1), left, right, left, right, node, None);
+        value.prepare(&mut insert)?;
+        let mut ctx = IntegrationContext::create(&mut insert, Clock::new(0), &blocks)?;
+        insert.integrate(&db, state, &mut ctx)?;
+        Ok(())
     }
 
     pub fn insert_range<T, I>(&mut self, index: usize, values: I) -> crate::Result<()>
@@ -98,19 +186,113 @@ impl<'tx, 'db> Deref for ListRef<&'tx mut Transaction<'db>> {
 }
 
 pub struct Iter<'a, T> {
-    list: &'a ListRef<&'a Transaction<'a>>,
-    index: usize,
+    state: IterState<'a>,
     _marker: std::marker::PhantomData<T>,
+}
+
+enum IterState<'a> {
+    Uninit {
+        tx: &'a Transaction<'a>,
+        start: Option<ID>,
+    },
+    Init {
+        db: Database<'a>,
+        current: BlockMut,
+        offset: Clock,
+    },
+    Finished,
+}
+
+impl<'a, T> Iter<'a, T>
+where
+    T: for<'b> TryFrom<Content<'b>, Error = crate::Error>,
+{
+    fn new(tx: &'a Transaction<'a>, start: Option<ID>) -> Iter<T> {
+        Iter {
+            state: IterState::Uninit { tx, start },
+            _marker: std::marker::PhantomData,
+        }
+    }
+
+    fn move_next(&mut self) -> crate::Result<Option<T>> {
+        match &mut self.state {
+            IterState::Uninit { tx, start } => {
+                let start = match start {
+                    None => return self.finish(),
+                    Some(id) => *id,
+                };
+                let db = tx.db();
+                let blocks = db.blocks();
+                let current: BlockMut = blocks.get(start)?.into();
+                let content = match current.try_inline_content() {
+                    Some(content) => content,
+                    None => {
+                        let contents = db.contents();
+                        let bytes = contents.get(*current.id())?;
+                        Content::new(current.content_type(), Cow::Borrowed(bytes))
+                    }
+                };
+                let value = T::try_from(content)?;
+                self.state = IterState::Init {
+                    db,
+                    current,
+                    offset: Clock::new(1),
+                };
+                Ok(Some(value))
+            }
+            IterState::Init {
+                db,
+                current,
+                offset,
+            } => {
+                if *offset >= current.clock_len() {
+                    // jump to next block
+                    match current.right() {
+                        None => return self.finish(),
+                        Some(&right) => {
+                            let blocks = db.blocks();
+                            *current = blocks.get(right)?.into();
+                            *offset = Clock::new(0);
+                        }
+                    }
+                }
+
+                let content = match current.try_inline_content() {
+                    Some(content) => content,
+                    None => {
+                        let contents = db.contents();
+                        let mut id = *current.id();
+                        id.clock += *offset;
+                        let bytes = contents.get(id)?;
+                        Content::new(current.content_type(), Cow::Borrowed(bytes))
+                    }
+                };
+                *offset += Clock::new(1);
+                let value = T::try_from(content)?;
+                Ok(Some(value))
+            }
+            IterState::Finished => Ok(None),
+        }
+    }
+
+    fn finish(&mut self) -> crate::Result<Option<T>> {
+        self.state = IterState::Finished;
+        Ok(None)
+    }
 }
 
 impl<'a, T> Iterator for Iter<'a, T>
 where
-    T: DeserializeOwned,
+    T: for<'b> TryFrom<Content<'b>, Error = crate::Error>,
 {
     type Item = crate::Result<T>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        todo!()
+        match self.move_next() {
+            Ok(Some(value)) => Some(Ok(value)),
+            Ok(None) => None,
+            Err(err) => Some(Err(err)),
+        }
     }
 }
 
@@ -140,7 +322,7 @@ impl Prelim for ListPrelim {
     ) -> crate::Result<Self::Return> {
         let unmounted: Unmounted<List> = Unmounted::nested(*insert.block.id());
         if !self.0.is_empty() {
-            let mut mounted = unmounted.mount(tx)?;
+            let mut mounted = unmounted.mount_mut(tx)?;
             for input in self.0 {
                 //TODO: optimize for batch insert
                 mounted.push_back(input)?;

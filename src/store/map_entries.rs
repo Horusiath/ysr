@@ -3,7 +3,7 @@ use crate::store::KEY_PREFIX_MAP;
 use crate::{ID, Optional};
 use lmdb_rs_m::core::MdbResult;
 use lmdb_rs_m::{Cursor, Database, MdbError, MdbValue, ToMdbValue};
-use smallvec::SmallVec;
+use smallvec::{ExtendFromSlice, SmallVec};
 use std::fmt::{Debug, Formatter};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
@@ -19,32 +19,13 @@ impl<'tx> MapEntriesStore<'tx> {
         Self { db }
     }
 
-    //pub fn current_key(&mut self) -> crate::Result<Option<MapKey<'tx>>> {
-    //    let key: &'tx [u8] = self.db.get_key()?;
-    //    match MapKey::parse(key) {
-    //        None => Ok(None),
-    //        Some(key) => Ok(Some(key)),
-    //    }
-    //}
-    //
-    //pub fn current_entry(&mut self) -> crate::Result<Option<(MapKey<'tx>, &'tx ID)>> {
-    //    match self.current_key()? {
-    //        None => Ok(None),
-    //        Some(key) => {
-    //            let value: &'tx [u8] = self.db.get_value()?;
-    //            let id: &'tx ID = ID::parse(value)?;
-    //            Ok(Some((key, id)))
-    //        }
-    //    }
-    //}
-
-    pub fn insert(&mut self, node_id: &NodeID, key: &str, id: &ID) -> crate::Result<()> {
+    pub fn insert(&self, node_id: &NodeID, key: &str, id: &ID) -> crate::Result<()> {
         let key = MapKey::create(node_id, key);
         self.db.set(&key.as_bytes(), &id.as_bytes())?;
         Ok(())
     }
 
-    pub fn get(&mut self, node_id: &NodeID, key: &str) -> crate::Result<Option<&'tx ID>> {
+    pub fn get(&self, node_id: &NodeID, key: &str) -> crate::Result<Option<&'tx ID>> {
         let key = MapKey::create(node_id, key);
         match self.db.get(&key.as_bytes()) {
             Ok(value) => Ok(Some(ID::parse(value)?)),
@@ -53,11 +34,15 @@ impl<'tx> MapEntriesStore<'tx> {
         }
     }
 
-    pub fn entries(&mut self, node_id: &NodeID) -> MapEntries<'tx> {
+    pub fn keys_for_hash(&self, node_id: &NodeID, hash: &crate::U32) -> HashKeys<'tx> {
+        HashKeys::new(self.db, node_id, hash)
+    }
+
+    pub fn entries(&self, node_id: &NodeID) -> MapEntries<'tx> {
         MapEntries::new(self.db, *node_id)
     }
 
-    pub fn remove_all(&mut self, node_id: &NodeID) -> crate::Result<usize> {
+    pub fn remove_all(&self, node_id: &NodeID) -> crate::Result<usize> {
         let key = MapEntriesKey::new(*node_id);
         let mut cursor = self.db.new_cursor()?;
         match cursor.to_gte_key(&key.as_bytes()) {
@@ -83,12 +68,81 @@ impl<'tx> MapEntriesStore<'tx> {
         Ok(deleted_entries)
     }
 
-    pub fn iter(&mut self) -> Iter<'tx> {
+    pub fn iter(&self) -> Iter<'tx> {
         Iter::new(self.db)
     }
 
     pub fn inspect(&self) -> Inspector<'tx> {
         Inspector { db: self.db }
+    }
+}
+
+pub struct HashKeys<'tx> {
+    prefix: [u8; 13],
+    state: HashKeysState<'tx>,
+}
+
+enum HashKeysState<'tx> {
+    Uninit(&'tx Database<'tx>),
+    Init(Cursor<'tx>),
+    Finished,
+}
+
+impl<'tx> HashKeys<'tx> {
+    pub fn new(db: &'tx Database<'tx>, node_id: &NodeID, hash: &crate::U32) -> Self {
+        let mut key: [u8; 13] = [0; 13];
+        key[0] = MapEntriesStore::PREFIX;
+        key[1..(1 + size_of::<NodeID>())].copy_from_slice(node_id.as_bytes());
+        key[(1 + size_of::<NodeID>())..].copy_from_slice(hash.as_bytes());
+
+        HashKeys {
+            prefix: key,
+            state: HashKeysState::Uninit(db),
+        }
+    }
+
+    pub fn next(&mut self) -> crate::Result<Option<(&'tx str, &'tx ID)>> {
+        match &mut self.state {
+            HashKeysState::Uninit(db) => {
+                let mut cursor = db.new_cursor()?;
+                match cursor.to_gte_key(&self.prefix.as_ref()) {
+                    Ok(_) => {
+                        let key: &'tx [u8] = cursor.get_key()?;
+                        if !key.starts_with(&self.prefix) {
+                            self.finish()
+                        } else {
+                            let value: &'tx ID = ID::parse(cursor.get_value()?)?;
+                            let str: &'tx [u8] = &key[self.prefix.len()..];
+                            let str = unsafe { std::str::from_utf8_unchecked(str) };
+                            Ok(Some((str, value)))
+                        }
+                    }
+                    Err(MdbError::NotFound) => self.finish(),
+                    Err(e) => Err(e.into()),
+                }
+            }
+            HashKeysState::Init(cursor) => match cursor.to_next_key() {
+                Ok(_) => {
+                    let key: &'tx [u8] = cursor.get_key()?;
+                    if !key.starts_with(&self.prefix) {
+                        self.finish()
+                    } else {
+                        let value: &'tx ID = ID::parse(cursor.get_value()?)?;
+                        let str: &'tx [u8] = &key[self.prefix.len()..];
+                        let str = unsafe { std::str::from_utf8_unchecked(str) };
+                        Ok(Some((str, value)))
+                    }
+                }
+                Err(MdbError::NotFound) => self.finish(),
+                Err(e) => Err(e.into()),
+            },
+            HashKeysState::Finished => Ok(None),
+        }
+    }
+
+    fn finish(&mut self) -> crate::Result<Option<(&'tx str, &'tx ID)>> {
+        self.state = HashKeysState::Finished;
+        Ok(None)
     }
 }
 
@@ -185,15 +239,24 @@ impl<'tx> MapKey<'tx> {
         NodeID::parse(slice).unwrap()
     }
 
+    pub fn key_hash(&self) -> &crate::U32 {
+        let slice = &self.data
+            [(1 + size_of::<NodeID>())..(1 + size_of::<NodeID>() + size_of::<crate::U32>())];
+        crate::U32::ref_from_bytes(slice).unwrap()
+    }
+
     pub fn key(&self) -> &'tx str {
-        let slice = &self.data[(1 + size_of::<NodeID>())..];
+        let slice = &self.data[(1 + size_of::<NodeID>() + size_of::<crate::U32>())..];
         unsafe { std::str::from_utf8_unchecked(slice) }
     }
 
     fn create(node_id: &NodeID, key: &str) -> SmallVec<[u8; 16]> {
-        let mut buf = SmallVec::with_capacity(1 + size_of::<NodeID>() + key.len());
+        let hash = crate::U32::new(twox_hash::XxHash32::oneshot(0, key.as_bytes()));
+        let mut buf =
+            SmallVec::with_capacity(1 + size_of::<NodeID>() + size_of::<crate::U32>() + key.len());
         buf.push(KEY_PREFIX_MAP);
         buf.extend_from_slice(node_id.as_bytes());
+        buf.extend_from_slice(hash.as_ref());
         buf.extend_from_slice(key.as_bytes());
         buf
     }

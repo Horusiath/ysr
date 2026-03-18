@@ -63,6 +63,16 @@ impl<'a> Node<'a> {
     }
 }
 
+impl From<NodeID> for Node<'static> {
+    fn from(value: NodeID) -> Self {
+        if value.is_root() {
+            Node::root_hashed(value)
+        } else {
+            Node::Nested(value)
+        }
+    }
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Named<'a> {
     Name(Cow<'a, str>),

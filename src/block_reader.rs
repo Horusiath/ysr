@@ -6,6 +6,7 @@ use crate::id_set::IDSet;
 use crate::integrate::IntegrationContext;
 use crate::node::{Node, NodeID, NodeType};
 use crate::read::{Decode, Decoder, ReadExt};
+use crate::store::Db;
 use crate::transaction::TransactionState;
 use crate::write::WriteExt;
 use crate::{ClientID, Clock, U32};
@@ -123,7 +124,7 @@ impl Update {
         let content_type = ContentType::try_from(info & CARRIER_INFO)?;
         header.set_content_type(content_type);
 
-        let content = Self::read_content(&mut header, decoder)?.unwrap_or_default();
+        let content = Self::read_content(&mut header, decoder)?;
         let block = InsertBlockData {
             block: BlockMut::new(id, header),
             content,
@@ -136,7 +137,7 @@ impl Update {
     fn read_content<'a>(
         block: &mut BlockHeader,
         decoder: &'a mut impl Decoder,
-    ) -> crate::Result<SmallVec<Content<'a>>> {
+    ) -> crate::Result<SmallVec<[Content<'static>; 1]>> {
         //TODO: a lot of the byte copying below could be just implemented via slices rather than Vec writes
         let mut result = SmallVec::new();
         match block.content_type() {
@@ -145,14 +146,12 @@ impl Update {
                 block.set_clock_len(deleted_len);
             }
             ContentType::Json => {
-                let content = copy_json(decoder)?;
-                block.set_clock_len(Clock::new(content.len() as u32));
-                result.push(content);
+                let len = copy_json(decoder, &mut result)?;
+                block.set_clock_len(len);
             }
             ContentType::Atom => {
-                let content = copy_lib0(decoder)?;
-                block.set_clock_len(Clock::new(content.len() as u32));
-                result.push(content);
+                let len = copy_lib0(decoder, &mut result)?;
+                block.set_clock_len(len);
             }
             ContentType::Binary => {
                 let mut w = Vec::new();
@@ -281,29 +280,33 @@ impl<'a, D: Decoder> Iterator for BlockReader<'a, D> {
     }
 }
 
-fn copy_lib0<D: Decoder>(decoder: &mut D) -> crate::Result<SmallVec<[Content; 1]>> {
+fn copy_lib0<D: Decoder>(
+    decoder: &mut D,
+    acc: &mut SmallVec<[Content<'static>; 1]>,
+) -> crate::Result<Clock> {
     let count = decoder.read_len()?;
-    let mut res = SmallVec::new();
-    res.try_reserve(count.get() as usize)?;
+    acc.try_reserve(count.get() as usize)?;
     for _ in 0u64..count.into() {
         let mut buf = Vec::new();
         crate::lib0::copy(decoder, &mut buf)?;
-        res.push(Content::new(ContentType::Atom, Cow::Owned(buf)));
+        acc.push(Content::new(ContentType::Atom, Cow::Owned(buf)));
     }
-    Ok(res)
+    Ok(count)
 }
 
-fn copy_json<D: Decoder>(decoder: &mut D) -> crate::Result<SmallVec<[Content; 1]>> {
+fn copy_json<D: Decoder>(
+    decoder: &mut D,
+    acc: &mut SmallVec<[Content<'static>; 1]>,
+) -> crate::Result<Clock> {
     let count = decoder.read_len()?;
-    let mut res = SmallVec::new();
-    res.try_reserve(count.get() as usize)?;
+    acc.try_reserve(count.get() as usize)?;
     for _ in 0u64..count.into() {
         let mut buf = Vec::new();
         let value: serde_json::Value = serde_json::from_reader(&mut *decoder)?;
         serde_json::to_writer(&mut buf, &value)?;
-        res.push(Content::new(ContentType::Json, Cow::Owned(buf)));
+        acc.push(Content::new(ContentType::Json, Cow::Owned(buf)));
     }
-    Ok(res)
+    Ok(count)
 }
 
 const CARRIER_INFO: u8 = 0b0001_1111;
@@ -374,7 +377,8 @@ impl Carrier {
             }
             Carrier::Block(mut block) => {
                 let id = *block.id();
-                let mut context = IntegrationContext::create(&mut block, offset, db)?;
+                let blocks = db.blocks();
+                let mut context = IntegrationContext::create(&mut block, offset, &blocks)?;
                 state
                     .current_state
                     .set_max(id.client, id.clock + block.clock_len());
@@ -477,7 +481,7 @@ mod test {
         assert_eq!(n.id(), &ID::new(CLIENT, 0.into()));
         assert_eq!(n.block.origin_right(), None);
         assert_eq!(n.block.origin_left(), None);
-        let Some(text) = n.content.as_str() else {
+        let Ok(text) = n.content[0].as_str() else {
             unreachable!()
         };
         assert_eq!(text, "0");
@@ -488,7 +492,7 @@ mod test {
         };
         assert_eq!(n.id(), &ID::new(CLIENT, 1.into()));
         assert_eq!(n.block.origin_right(), Some(&ID::new(CLIENT, 0.into())));
-        let Some(text) = n.content.as_str() else {
+        let Ok(text) = n.content[0].as_str() else {
             unreachable!()
         };
         assert_eq!(text, "1");
@@ -498,7 +502,7 @@ mod test {
             unreachable!()
         };
         assert_eq!(n.id(), &ID::new(CLIENT, 2.into()));
-        let Some(text) = n.content.as_str() else {
+        let Ok(text) = n.content[0].as_str() else {
             unreachable!()
         };
         assert_eq!(text, "2");

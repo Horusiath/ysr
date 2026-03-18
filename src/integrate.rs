@@ -1,6 +1,7 @@
 use crate::block::{BlockMut, InsertBlockData};
 use crate::node::NodeType;
-use crate::store::block_store::{BlockStore, SplitResult};
+use crate::store::Db;
+use crate::store::block_store::{BlockCursor, BlockStore, SplitResult};
 use crate::{Clock, Optional};
 use lmdb_rs_m::Database;
 use std::collections::HashSet;
@@ -17,10 +18,10 @@ impl IntegrationContext {
     pub fn create(
         target: &mut InsertBlockData,
         offset: Clock,
-        blocks: &mut BlockStore<'_>,
+        blocks: &BlockStore<'_>,
     ) -> crate::Result<Self> {
         let left = if let Some(&origin) = target.block.origin_left() {
-            Some(match db.split(origin)? {
+            Some(match blocks.split(origin)? {
                 SplitResult::Unchanged(left) => left.into(),
                 SplitResult::Split(left, _) => left,
             })
@@ -28,7 +29,7 @@ impl IntegrationContext {
             None
         };
         let right = if let Some(&origin) = target.block.origin_right() {
-            Some(match db.split(origin)? {
+            Some(match blocks.split(origin)? {
                 SplitResult::Unchanged(block) => block.into(),
                 SplitResult::Split(_, right) => right,
             })
@@ -49,13 +50,13 @@ impl IntegrationContext {
             }
         }
         let parent = match target.parent() {
-            Some(node) => match db.get_or_insert_node(node.clone(), NodeType::Unknown) {
+            Some(node) => match blocks.get_or_insert_node(node.clone(), NodeType::Unknown) {
                 Ok(block) => Some(block),
                 Err(crate::Error::NotFound) => None,
                 Err(e) => return Err(e),
             },
             None => {
-                let block = db.fetch_block(*target.block.parent(), true)?;
+                let block = blocks.get(*target.block.parent())?;
                 Some(block.into())
             }
         };
@@ -82,13 +83,17 @@ impl IntegrationContext {
         target: &mut InsertBlockData,
         db: &Database,
     ) -> crate::Result<()> {
+        let blocks = db.blocks();
+        let mut cursor = blocks.cursor()?;
         let parent = self.parent.as_mut().unwrap();
         let mut o = if let Some(left) = &self.left {
             left.right().cloned()
         } else if let Some(sub) = target.entry_key() {
-            let mut o = db.entry(*parent.id(), sub).optional()?.copied();
+            let map_entries = db.map_entries();
+            let mut o = map_entries.get(parent.id(), sub)?.copied();
+            //let mut o = db.entry(*parent.id(), sub).optional()?.copied();
             while let Some(id) = o {
-                let item = db.fetch_block(id, true)?;
+                let item = cursor.seek_containing(id)?;
                 if let Some(&left) = item.left() {
                     o = Some(left);
                     continue;
@@ -114,7 +119,7 @@ impl IntegrationContext {
             items_before_origin.insert(item.clone());
             conflicting_items.insert(item.clone());
 
-            let item = db.fetch_block(item, true)?;
+            let item = blocks.get(item)?;
             if target.block.origin_left() == item.origin_left() {
                 // case 1
                 let item_id = item.id();
@@ -128,10 +133,7 @@ impl IntegrationContext {
                     break;
                 }
             } else {
-                if let Some(origin_left) = item
-                    .origin_left()
-                    .and_then(|&id| db.fetch_block(id, true).ok())
-                {
+                if let Some(origin_left) = item.origin_left().and_then(|&id| blocks.get(id).ok()) {
                     if items_before_origin.contains(&origin_left.id()) {
                         if !conflicting_items.contains(&origin_left.id()) {
                             left = Some(origin_left.id().clone());

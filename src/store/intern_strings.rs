@@ -42,14 +42,14 @@ impl<'tx> InternStringsStore<'tx> {
         Ok(())
     }
 
-    pub fn get(&mut self, hash: crate::U32) -> crate::Result<Option<&'tx str>> {
+    pub fn get(&self, hash: crate::U32) -> crate::Result<&'tx str> {
         let key = InternStringsKey::new(hash);
         match self.db.get(&key) {
             Ok(value) => {
                 let str = unsafe { std::str::from_utf8_unchecked(value) };
-                Ok(Some(str))
+                Ok(str)
             }
-            Err(MdbError::NotFound) => Ok(None),
+            Err(MdbError::NotFound) => Err(crate::Error::NotFound),
             Err(e) => Err(e.into()),
         }
     }

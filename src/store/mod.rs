@@ -1,5 +1,6 @@
 use crate::store::block_store::BlockStore;
 use crate::store::content_store::ContentStore;
+use crate::store::delete_set::DeleteSetStore;
 use crate::store::inspect::DbInspector;
 use crate::store::intern_strings::InternStringsStore;
 pub(crate) use crate::store::map_entries::MapEntriesStore;
@@ -9,6 +10,7 @@ use std::fmt::{Debug, Formatter};
 
 pub(crate) mod block_store;
 pub(crate) mod content_store;
+mod delete_set;
 pub mod inspect;
 pub(crate) mod intern_strings;
 pub(crate) mod map_entries;
@@ -29,6 +31,7 @@ pub trait Db<'tx> {
     fn intern_strings(&self) -> InternStringsStore<'_>;
     fn map_entries(&self) -> MapEntriesStore<'_>;
     fn state_vector(&self) -> StateVectorStore<'_>;
+    fn delete_set(&self) -> DeleteSetStore<'_>;
 }
 
 impl<'tx> Db<'tx> for lmdb_rs_m::Database<'tx> {
@@ -55,6 +58,10 @@ impl<'tx> Db<'tx> for lmdb_rs_m::Database<'tx> {
 
     fn state_vector(&self) -> StateVectorStore<'_> {
         StateVectorStore::new(self)
+    }
+
+    fn delete_set(&self) -> DeleteSetStore<'_> {
+        DeleteSetStore::new(self)
     }
 }
 

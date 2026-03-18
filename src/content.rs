@@ -3,11 +3,13 @@ use crate::block::{
     CONTENT_TYPE_EMBED, CONTENT_TYPE_FORMAT, CONTENT_TYPE_JSON, CONTENT_TYPE_NODE,
     CONTENT_TYPE_STRING,
 };
-use crate::lib0;
 use crate::lib0::Value;
-use crate::node::NodeID;
+use crate::node::{Named, Node, NodeID};
 use crate::read::{Decoder, ReadExt};
-use crate::write::WriteExt;
+use crate::write::{Encoder, WriteExt};
+use crate::{Out, Unmounted, lib0};
+use bytes::Bytes;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::fmt::{Debug, Display, Formatter};
@@ -116,7 +118,7 @@ impl TryFrom<u8> for ContentType {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Content<'a> {
     content_type: ContentType,
-    data: Cow<'a, [u8]>,
+    pub(crate) data: Cow<'a, [u8]>,
 }
 
 impl Content<'static> {
@@ -173,12 +175,13 @@ impl<'a> Content<'a> {
         self.content_type
     }
 
-    pub fn bytes(&self) -> &'a [u8] {
+    pub fn bytes(&self) -> &[u8] {
         self.data.as_ref()
     }
 
     pub fn to_owned(&self) -> Content<'static> {
-        Self::new(self.content_type, self.data.to_owned())
+        let owned: Cow<'static, [u8]> = Cow::Owned(self.data.to_vec());
+        Content::new(self.content_type, owned)
     }
 
     pub fn binary<B: AsRef<[u8]>>(data: &'a B) -> Self {
@@ -199,7 +202,10 @@ impl<'a> Content<'a> {
         Self::new(ContentType::Doc, Cow::Borrowed(doc_id.as_bytes()))
     }
 
-    pub fn as_json<T: Deserialize<'a>>(&self) -> crate::Result<T> {
+    pub fn as_json<T>(&self) -> crate::Result<T>
+    where
+        T: DeserializeOwned,
+    {
         if self.content_type != ContentType::Json {
             return Err(crate::Error::InvalidMapping("json"));
         }
@@ -207,7 +213,10 @@ impl<'a> Content<'a> {
         Ok(json)
     }
 
-    pub fn as_atom<T: Deserialize<'a>>(&self) -> crate::Result<T> {
+    pub fn as_atom<T>(&self) -> crate::Result<T>
+    where
+        T: DeserializeOwned,
+    {
         if self.content_type != ContentType::Json {
             return Err(crate::Error::InvalidMapping("atom"));
         }
@@ -236,7 +245,8 @@ impl<'a> Content<'a> {
         if self.content_type != ContentType::Node {
             return Err(crate::Error::InvalidMapping("node"));
         }
-        let node_id = NodeID::ref_from_bytes(self.data.as_ref())?;
+        let node_id = NodeID::ref_from_bytes(self.data.as_ref())
+            .map_err(|_| crate::Error::InvalidMapping("NodeID"))?;
         Ok(node_id)
     }
 
@@ -250,7 +260,7 @@ impl<'a> Content<'a> {
         }
     }
 
-    pub fn as_format(&self) -> crate::Result<FormatAttribute<'a>> {
+    pub fn as_format(&self) -> crate::Result<FormatAttribute<'_>> {
         if self.content_type != ContentType::Json {
             return Err(crate::Error::InvalidMapping("format attribute"));
         }
@@ -260,31 +270,31 @@ impl<'a> Content<'a> {
         }
     }
 
-    pub fn split(&self, utf16_offset: usize) -> Option<(Self, Self)> {
-        /// Map offset given as UTF16 code points to byte offset in UTF8 encoded string.
-        fn map_offset(str: &str, utf16: usize) -> Option<usize> {
-            let mut offset = 0;
-            for ch in str.encode_utf16() {
-                if offset == utf16 {
-                    break;
-                }
-                offset += 1;
-            }
-
-            if offset == utf16 { Some(offset) } else { None }
-        }
-
+    pub fn split<'b>(&'b self, utf16_offset: usize) -> Option<(Content<'b>, Content<'b>)> {
         if self.content_type != ContentType::String {
             return None; // only strings can be split. JSON and atoms are multipart.
         }
 
-        let str: &'a str = unsafe { std::str::from_utf8_unchecked(&self.data) };
-        let offset = map_offset(str, utf16_offset)?;
+        let str: &str = unsafe { std::str::from_utf8_unchecked(self.data.as_ref()) };
+        let offset = utf16_to_utf8(str, utf16_offset)?;
         let (left, right) = self.data.split_at(offset);
-        let left = Self::new(self.content_type, left.into());
-        let right = Self::new(self.content_type, right.into());
+        let left: Content<'b> = Content::new(self.content_type, left.into());
+        let right: Content<'b> = Content::new(self.content_type, right.into());
         Some((left, right))
     }
+}
+
+/// Map offset given as UTF16 code points to byte offset in UTF8 encoded string.
+pub(crate) fn utf16_to_utf8(str: &str, utf16: usize) -> Option<usize> {
+    let mut offset = 0;
+    for ch in str.encode_utf16() {
+        if offset == utf16 {
+            break;
+        }
+        offset += 1;
+    }
+
+    if offset == utf16 { Some(offset) } else { None }
 }
 
 impl<'a> Display for Content<'a> {
@@ -341,23 +351,125 @@ impl<'a> TryFrom<Content<'a>> for Value {
     }
 }
 
+impl<'a> TryFrom<Content<'a>> for serde_json::Value {
+    type Error = crate::Error;
+
+    fn try_from(value: Content<'a>) -> Result<Self, Self::Error> {
+        match value.content_type() {
+            ContentType::Json => Ok(serde_json::from_slice(value.bytes())?),
+            _ => Err(crate::Error::InvalidMapping("json")),
+        }
+    }
+}
+
+impl<'a> TryFrom<Content<'a>> for String {
+    type Error = crate::Error;
+
+    fn try_from(value: Content<'a>) -> Result<Self, Self::Error> {
+        match value.content_type() {
+            ContentType::String => {
+                let str = String::from_utf8(value.data.to_vec())
+                    .map_err(|_| crate::Error::InvalidMapping("string"))?;
+                Ok(str)
+            }
+            _ => Err(crate::Error::InvalidMapping("string")),
+        }
+    }
+}
+
+impl<'a> TryFrom<Content<'a>> for Vec<u8> {
+    type Error = crate::Error;
+
+    fn try_from(value: Content<'a>) -> Result<Self, Self::Error> {
+        match value.content_type() {
+            ContentType::Binary => Ok(value.data.to_vec()),
+            _ => Err(crate::Error::InvalidMapping("binary")),
+        }
+    }
+}
+
+impl<'a> TryFrom<Content<'a>> for NodeID {
+    type Error = crate::Error;
+
+    fn try_from(value: Content<'a>) -> Result<Self, Self::Error> {
+        match value.content_type() {
+            ContentType::Node => {
+                let node_id = *NodeID::ref_from_bytes(value.data.as_ref())
+                    .map_err(|_| crate::Error::InvalidMapping("NodeID"))?;
+                Ok(node_id)
+            }
+            _ => return Err(crate::Error::InvalidMapping("node")),
+        }
+    }
+}
+
+impl<'a> TryFrom<Content<'a>> for Node<'static> {
+    type Error = crate::Error;
+
+    fn try_from(value: Content<'a>) -> Result<Self, Self::Error> {
+        let node_id = NodeID::try_from(value)?;
+        Ok(if node_id.is_root() {
+            Node::Root(Named::Hash(node_id))
+        } else {
+            Node::Nested(node_id)
+        })
+    }
+}
+
+impl<'a, Cap> TryFrom<Content<'a>> for Unmounted<Cap> {
+    type Error = crate::Error;
+
+    fn try_from(value: Content<'a>) -> Result<Self, Self::Error> {
+        let node = Node::try_from(value)?;
+        Ok(Unmounted::new(node))
+    }
+}
+
+impl<'a> TryFrom<Content<'a>> for crate::Out {
+    type Error = crate::Error;
+
+    fn try_from(value: Content<'a>) -> Result<Self, Self::Error> {
+        match value.content_type() {
+            ContentType::Json => {
+                let value: lib0::Value = serde_json::from_slice(value.data.as_ref())?;
+                Ok(Out::Value(value))
+            }
+            ContentType::Atom => {
+                let value: lib0::Value = lib0::from_slice(value.data.as_ref())?;
+                Ok(Out::Value(value))
+            }
+            ContentType::Node => Ok(Out::Node(NodeID::try_from(value)?)),
+            ContentType::String => {
+                let str = String::from_utf8(value.data.to_vec())
+                    .map_err(|_| crate::Error::InvalidMapping("string"))?;
+                Ok(Out::Value(Value::String(str)))
+            }
+            ContentType::Binary => match value.data {
+                Cow::Borrowed(bytes) => {
+                    Ok(Out::Value(Value::ByteArray(Bytes::copy_from_slice(bytes))))
+                }
+                Cow::Owned(bytes) => Ok(Out::Value(Value::ByteArray(bytes.into()))),
+            },
+            _ => Err(crate::Error::InvalidMapping("Out")),
+        }
+    }
+}
+
 impl<'a> TryFrom<Content<'a>> for FormatAttribute<'a> {
     type Error = crate::Error;
 
     fn try_from(value: Content<'a>) -> Result<Self, Self::Error> {
         match value.content_type() {
-            ContentType::Format => Ok(FormatAttribute {
-                data: value.bytes(),
-            }),
+            ContentType::Format => Ok(FormatAttribute { data: value.data }),
             _ => Err(crate::Error::InvalidMapping("format attribute")),
         }
     }
 }
 
 #[repr(transparent)]
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FormatAttribute<'a> {
-    data: &'a [u8],
+    data: Cow<'a, [u8]>,
 }
 
 impl FormatAttribute<'static> {
@@ -369,12 +481,18 @@ impl FormatAttribute<'static> {
 
         let mut buf = Vec::with_capacity(key_len as usize + 8);
         buf.write_var(key_len)?;
-        std::io::copy(&mut decoder.take(key_len), &mut buf)?;
+        std::io::copy(&mut (&mut *decoder).take(key_len), &mut buf)?;
 
         let value_len: u64 = decoder.read_var()?;
         buf.write_var(value_len)?;
-        std::io::copy(&mut decoder.take(value_len), &mut buf)?;
+        std::io::copy(&mut (&mut *decoder).take(value_len), &mut buf)?;
         Ok(buf)
+    }
+
+    pub fn encode(&self, encoder: &mut impl Encoder) -> crate::Result<()> {
+        // data is already in correct format
+        encoder.write_all(&self.data)?;
+        Ok(())
     }
 
     pub fn compose<T: Serialize>(key: &str, value: &T) -> crate::Result<Vec<u8>> {
@@ -399,16 +517,18 @@ impl<'a> FormatAttribute<'a> {
         if data.len() < len + 1 {
             return None;
         }
-        Some(Self { data })
+        Some(Self {
+            data: Cow::Borrowed(data),
+        })
     }
 
-    pub fn key(&self) -> &'a str {
+    pub fn key(&self) -> &str {
         let len = self.data[0] as usize;
-        let key: &'a [u8] = &self.data[1..(len + 1)];
+        let key: &[u8] = &self.data[1..(len + 1)];
         unsafe { std::str::from_utf8_unchecked(key) }
     }
 
-    pub fn value(&self) -> &'a [u8] {
+    pub fn value(&self) -> &[u8] {
         let len = self.data[0] as usize;
         &self.data[(len + 1)..]
     }

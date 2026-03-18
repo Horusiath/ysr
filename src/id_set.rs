@@ -2,6 +2,7 @@ use crate::block::ID;
 use crate::read::{Decode, Decoder, ReadExt};
 use crate::write::{Encode, Encoder, WriteExt};
 use crate::{ClientID, Clock};
+use smallvec::{SmallVec, smallvec};
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 use std::ops::Range;
@@ -54,7 +55,7 @@ impl IDSet {
                 r.into_mut().push(range);
             }
             Entry::Vacant(e) => {
-                e.insert(IDRange::Continuous(range));
+                e.insert(IDRange::from(smallvec![range]));
             }
         }
     }
@@ -89,10 +90,10 @@ impl IDSet {
 impl Encode for IDSet {
     fn encode_with<E: Encoder>(&self, encoder: &mut E) -> crate::Result<()> {
         encoder.write_var(self.0.len() as u32)?;
-        for (&client_id, block) in self.0.iter() {
+        for (&client_id, range) in self.0.iter() {
             encoder.reset_ds_cur_val();
             encoder.write_var(client_id)?;
-            block.encode_with(encoder)?;
+            range.encode_with(encoder)?;
         }
         Ok(())
     }
@@ -118,94 +119,53 @@ pub(crate) type Ranges<'a> = std::collections::btree_map::Iter<'a, ClientID, IDR
 
 /// [IDRange] describes a single space of an [ID] clock values, belonging to the same client.
 /// It can contain from a single continuous space, or multiple ones having "holes" between them.
-#[derive(Clone, PartialEq, Eq)]
-pub enum IDRange {
-    /// A single continuous range of clocks.
-    Continuous(Range<Clock>),
-    /// A multiple ranges containing clock values, separated from each other by other clock ranges
-    /// not included in this [IDRange].
-    Fragmented(Vec<Range<Clock>>),
-}
+#[repr(transparent)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct IDRange(SmallVec<[Range<Clock>; 1]>);
 
 impl IDRange {
     pub fn with_capacity(capacity: usize) -> Self {
-        IDRange::Fragmented(Vec::with_capacity(capacity))
+        IDRange(SmallVec::with_capacity(capacity))
     }
 
     /// Check if range is empty (doesn't cover any clock space).
     pub fn is_empty(&self) -> bool {
-        match self {
-            IDRange::Continuous(r) => r.start == r.end,
-            IDRange::Fragmented(rs) => rs.is_empty(),
-        }
+        self.0.is_empty()
     }
 
     /// Inverts current [IDRange], returning another [IDRange] that contains all
     /// "holes" (ranges not included in current range). If current range is a continuous space
     /// starting from the initial clock (eg. [0..5)), then returned range will be empty.
-    pub fn invert(&self) -> IDRange {
-        match self {
-            IDRange::Continuous(range) => IDRange::Continuous(0.into()..range.start),
-            IDRange::Fragmented(ranges) => {
-                let mut inv = Vec::new();
-                let mut start: Clock = 0.into();
-                for range in ranges.iter() {
-                    if range.start > start {
-                        inv.push(start..range.start);
-                    }
-                    start = range.end;
-                }
-                match inv.len() {
-                    0 => IDRange::Continuous(Clock::default()..Clock::default()),
-                    1 => IDRange::Continuous(inv[0].clone()),
-                    _ => IDRange::Fragmented(inv),
-                }
+    pub fn invert(&self) -> Self {
+        let mut inv = SmallVec::new();
+        let mut start: Clock = 0.into();
+        for range in self.0.iter() {
+            if range.start > start {
+                inv.push(start..range.start);
             }
+            start = range.end;
         }
+        IDRange(inv)
     }
 
     /// Check if given clock exists within current [IDRange].
     pub fn contains(&self, clock: &Clock) -> bool {
-        match self {
-            IDRange::Continuous(range) => range.contains(clock),
-            IDRange::Fragmented(ranges) => ranges.iter().any(|r| r.contains(clock)),
-        }
+        self.0.iter().any(|r| r.contains(clock))
     }
 
     /// Iterate over ranges described by current [IDRange].
-    pub fn iter(&self) -> IDRangeIter<'_> {
-        let (range, inner) = match self {
-            IDRange::Continuous(range) => (Some(range), None),
-            IDRange::Fragmented(ranges) => (None, Some(ranges.iter())),
-        };
-        IDRangeIter { range, inner }
+    pub fn iter(&self) -> std::slice::Iter<'_, Range<Clock>> {
+        self.0.iter()
     }
 
     fn push(&mut self, range: Range<Clock>) {
-        match self {
-            IDRange::Continuous(r) => {
-                if r.end >= range.start {
-                    if r.start > range.end {
-                        *self = IDRange::Fragmented(vec![range, r.clone()])
-                    } else {
-                        // two ranges overlap - merge them
-                        r.end = range.end.max(r.end);
-                        r.start = range.start.min(r.start);
-                    }
-                } else {
-                    *self = IDRange::Fragmented(vec![r.clone(), range])
-                }
-            }
-            IDRange::Fragmented(ranges) => {
-                if ranges.is_empty() {
-                    *self = IDRange::Continuous(range);
-                } else {
-                    let last_idx = ranges.len() - 1;
-                    let last = &mut ranges[last_idx];
-                    if !Self::try_join(last, &range) {
-                        ranges.push(range);
-                    }
-                }
+        if self.0.is_empty() {
+            self.0.push(range);
+        } else {
+            let last_idx = self.0.len() - 1;
+            let last = &mut self.0[last_idx];
+            if !Self::try_join(last, &range) {
+                self.0.push(range);
             }
         }
     }
@@ -213,108 +173,69 @@ impl IDRange {
     /// Alters current [IDRange] by compacting its internal implementation (in fragmented case).
     /// Example: fragmented space of [0,3), [3,5), [6,7) will be compacted into [0,5), [6,7).
     fn squash(&mut self) {
-        if let IDRange::Fragmented(ranges) = self {
-            if !ranges.is_empty() {
-                ranges.sort_by(|a, b| a.start.cmp(&b.start));
-                let mut new_len = 1;
+        let ranges = &mut self.0;
+        if !ranges.is_empty() {
+            ranges.sort_by(|a, b| a.start.cmp(&b.start));
+            let mut new_len = 1;
 
-                let len = ranges.len() as isize;
-                let head = ranges.as_mut_ptr();
-                let mut current = unsafe { head.as_mut().unwrap() };
-                let mut i = 1;
-                while i < len {
-                    let next = unsafe { head.offset(i).as_ref().unwrap() };
-                    if !Self::try_join(current, next) {
-                        // current and next are disjoined eg. [0,5) & [6,9)
+            let len = ranges.len() as isize;
+            let head = ranges.as_mut_ptr();
+            let mut current = unsafe { head.as_mut().unwrap() };
+            let mut i = 1;
+            while i < len {
+                let next = unsafe { head.offset(i).as_ref().unwrap() };
+                if !Self::try_join(current, next) {
+                    // current and next are disjoined eg. [0,5) & [6,9)
 
-                        // move current pointer one index to the left: by using new_len we
-                        // squash ranges possibly already merged to current
-                        current = unsafe { head.offset(new_len).as_mut().unwrap() };
+                    // move current pointer one index to the left: by using new_len we
+                    // squash ranges possibly already merged to current
+                    current = unsafe { head.offset(new_len).as_mut().unwrap() };
 
-                        // make next a new current
-                        current.start = next.start;
-                        current.end = next.end;
-                        new_len += 1;
-                    }
-
-                    i += 1;
+                    // make next a new current
+                    current.start = next.start;
+                    current.end = next.end;
+                    new_len += 1;
                 }
 
-                if new_len == 1 {
-                    *self = IDRange::Continuous(ranges[0].clone())
-                } else if ranges.len() != new_len as usize {
-                    ranges.truncate(new_len as usize);
-                }
+                i += 1;
+            }
+
+            if new_len == 1 {
+                self.0 = smallvec![ranges[0].clone()];
+            } else if ranges.len() != new_len as usize {
+                ranges.truncate(new_len as usize);
             }
         }
     }
 
     fn is_squashed(&self) -> bool {
-        match self {
-            IDRange::Continuous(_) => true,
-            IDRange::Fragmented(ranges) => {
-                let mut i = ranges.iter();
-                if let Some(r) = i.next() {
-                    let mut prev_start = r.start;
-                    let mut prev_end = r.end;
-                    while let Some(r) = i.next() {
-                        if r.start < prev_end {
-                            return false;
-                        }
-                        prev_start = r.start;
-                        prev_end = r.end;
-                    }
-                    true
-                } else {
-                    true
+        let mut i = self.0.iter();
+        if let Some(r) = i.next() {
+            let mut prev_start = r.start;
+            let mut prev_end = r.end;
+            while let Some(r) = i.next() {
+                if r.start < prev_end {
+                    return false;
                 }
+                prev_start = r.start;
+                prev_end = r.end;
             }
+            true
+        } else {
+            true
         }
     }
 
-    fn merge(&mut self, other: IDRange) {
-        let raw = std::mem::take(self);
-        *self = match (raw, other) {
-            (IDRange::Continuous(mut a), IDRange::Continuous(b)) => {
-                let never_intersect = a.end < b.start || b.end < a.start;
-                if never_intersect {
-                    IDRange::Fragmented(vec![a, b])
-                } else {
-                    a.start = a.start.min(b.start);
-                    a.end = a.end.max(b.end);
-                    IDRange::Continuous(a)
-                }
-            }
-            (IDRange::Fragmented(mut a), IDRange::Continuous(b)) => {
-                a.push(b);
-                IDRange::Fragmented(a)
-            }
-            (IDRange::Continuous(a), IDRange::Fragmented(b)) => {
-                let mut v = b;
-                v.push(a);
-                IDRange::Fragmented(v)
-            }
-            (IDRange::Fragmented(mut a), IDRange::Fragmented(mut b)) => {
-                a.append(&mut b);
-                IDRange::Fragmented(a)
-            }
-        };
+    fn merge(&mut self, mut other: IDRange) {
+        self.0.append(&mut other.0);
     }
 
     fn encode_raw<E: Encoder>(&self, encoder: &mut E) -> crate::Result<()> {
-        match self {
-            IDRange::Continuous(range) => {
-                encoder.write_var(1u32)?;
-                range.encode_with(encoder)
-            }
-            IDRange::Fragmented(ranges) => {
-                encoder.write_var(ranges.len() as u64)?;
-                for range in ranges.iter() {
-                    range.encode_with(encoder)?;
-                }
-                Ok(())
-            }
+        encoder.write_var(self.0.len() as u64)?;
+        for range in self.iter() {
+            range.encode_with(encoder)?;
         }
+        Ok(())
     }
 
     #[inline]
@@ -334,9 +255,10 @@ impl IDRange {
     }
 }
 
-impl Default for IDRange {
-    fn default() -> Self {
-        IDRange::Continuous(0.into()..0.into())
+impl From<SmallVec<[Range<Clock>; 1]>> for IDRange {
+    #[inline]
+    fn from(value: SmallVec<[Range<Clock>; 1]>) -> Self {
+        IDRange(value)
     }
 }
 
@@ -355,47 +277,13 @@ impl Encode for IDRange {
 
 impl Decode for IDRange {
     fn decode_with<D: Decoder>(decoder: &mut D) -> crate::Result<Self> {
-        match decoder.read_var::<u32>()? {
-            1 => {
-                let range = Range::decode_with(decoder)?;
-                Ok(IDRange::Continuous(range))
-            }
-            len => {
-                let mut ranges = Vec::with_capacity(len as usize);
-                let mut i = 0;
-                while i < len {
-                    ranges.push(Range::decode_with(decoder)?);
-                    i += 1;
-                }
-                Ok(IDRange::Fragmented(ranges))
-            }
+        let len = decoder.read_var::<u32>()?;
+        let mut ranges = SmallVec::with_capacity(len as usize);
+        let mut i = 0;
+        while i < len {
+            ranges.push(Range::decode_with(decoder)?);
+            i += 1;
         }
-    }
-}
-pub struct IDRangeIter<'a> {
-    inner: Option<std::slice::Iter<'a, Range<Clock>>>,
-    range: Option<&'a Range<Clock>>,
-}
-
-impl<'a> Iterator for IDRangeIter<'a> {
-    type Item = &'a Range<Clock>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if let Some(inner) = &mut self.inner {
-            inner.next()
-        } else {
-            self.range.take()
-        }
-    }
-}
-
-/// Implement this to efficiently let IdRange iterator work in descending order
-impl<'a> DoubleEndedIterator for IDRangeIter<'a> {
-    fn next_back(&mut self) -> Option<Self::Item> {
-        if let Some(inner) = &mut self.inner {
-            inner.next_back()
-        } else {
-            self.range.take()
-        }
+        Ok(IDRange(ranges))
     }
 }
