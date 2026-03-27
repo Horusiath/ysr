@@ -1,6 +1,6 @@
 use crate::lib0::{
-    ExpectedString, Tag, Value, TAG_ARRAY, TAG_BYTE_ARRAY, TAG_FALSE, TAG_FLOAT32, TAG_FLOAT64,
-    TAG_NULL, TAG_OBJECT, TAG_STRING, TAG_TRUE, TAG_UNDEFINED,
+    ExpectedString, TAG_ARRAY, TAG_BYTE_ARRAY, TAG_FALSE, TAG_FLOAT32, TAG_FLOAT64, TAG_NULL,
+    TAG_OBJECT, TAG_STRING, TAG_TRUE, TAG_UNDEFINED, Tag, Value,
 };
 use crate::read::ReadExt;
 use serde::de;
@@ -517,7 +517,7 @@ where
                 return Err(super::Error::invalid_length(
                     0,
                     &"newtype variant with >1 element",
-                ))
+                ));
             }
             Some(value) => value,
         };

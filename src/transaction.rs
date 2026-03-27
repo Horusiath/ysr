@@ -259,7 +259,7 @@ impl<'db> Transaction<'db> {
         })
     }
 
-    pub fn db(&self) -> Database<'_> {
+    pub fn db<'tx>(&'tx self) -> Database<'tx> {
         self.txn.bind(&self.handle)
     }
 

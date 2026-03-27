@@ -9,11 +9,10 @@ use crate::read::{Decoder, ReadExt};
 use crate::write::{Encoder, WriteExt};
 use crate::{Out, Unmounted, lib0};
 use bytes::Bytes;
+use serde::Serialize;
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::fmt::{Debug, Display, Formatter};
-use std::io::Write;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, TryFromBytes};
 
 #[repr(u8)]
@@ -473,19 +472,24 @@ pub struct FormatAttribute<'a> {
 }
 
 impl FormatAttribute<'static> {
-    pub fn decode(decoder: &mut impl Decoder) -> crate::Result<Vec<u8>> {
+    pub fn decode<D: Decoder>(decoder: &mut D) -> crate::Result<Vec<u8>> {
         let key_len: u64 = decoder.read_var()?;
         if key_len >= u8::MAX as u64 {
             return Err(crate::Error::KeyTooLong);
         }
 
-        let mut buf = Vec::with_capacity(key_len as usize + 8);
+        let mut buf = Vec::with_capacity(key_len as usize + 10);
         buf.write_var(key_len)?;
-        std::io::copy(&mut (&mut *decoder).take(key_len), &mut buf)?;
+        let buf_len = buf.len();
+        unsafe { buf.set_len(buf_len + key_len as usize) };
+        decoder.read_exact(&mut buf[buf_len..])?;
 
         let value_len: u64 = decoder.read_var()?;
         buf.write_var(value_len)?;
-        std::io::copy(&mut (&mut *decoder).take(value_len), &mut buf)?;
+        let buf_len = buf.len();
+        buf.reserve(value_len as usize);
+        unsafe { buf.set_len(buf_len + value_len as usize) };
+        decoder.read_exact(&mut buf[buf_len..])?;
         Ok(buf)
     }
 

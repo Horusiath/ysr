@@ -1,7 +1,6 @@
-use crate::node::{Node, NodeID};
-use crate::store::KEY_PREFIX_MAP;
-use crate::{ID, Optional};
-use lmdb_rs_m::core::MdbResult;
+use crate::ID;
+use crate::node::NodeID;
+use crate::store::{Db, KEY_PREFIX_MAP};
 use lmdb_rs_m::{Cursor, Database, MdbError, MdbValue, ToMdbValue};
 use smallvec::{ExtendFromSlice, SmallVec};
 use std::fmt::{Debug, Formatter};
@@ -44,7 +43,7 @@ impl<'tx> MapEntriesStore<'tx> {
 
     pub fn remove_all(&self, node_id: &NodeID) -> crate::Result<usize> {
         let key = MapEntriesKey::new(*node_id);
-        let mut cursor = self.db.new_cursor()?;
+        let mut cursor = self.db.cursor()?;
         match cursor.to_gte_key(&key.as_bytes()) {
             Ok(_) => { /* cursor position set */ }
             Err(MdbError::NotFound) => return Ok(0),
@@ -104,7 +103,7 @@ impl<'tx> HashKeys<'tx> {
     pub fn next(&mut self) -> crate::Result<Option<(&'tx str, &'tx ID)>> {
         match &mut self.state {
             HashKeysState::Uninit(db) => {
-                let mut cursor = db.new_cursor()?;
+                let mut cursor = db.cursor()?;
                 match cursor.to_gte_key(&self.prefix.as_ref()) {
                     Ok(_) => {
                         let key: &'tx [u8] = cursor.get_key()?;
@@ -178,7 +177,7 @@ impl<'tx> MapEntries<'tx> {
     pub fn next(&mut self) -> crate::Result<Option<MapKey<'tx>>> {
         match &mut self.state {
             MapEntriesState::Uninit(db) => {
-                let mut cursor = db.new_cursor()?;
+                let mut cursor = db.cursor()?;
                 let key = MapEntriesKey::new(self.node_id);
                 match cursor.to_gte_key(&key.as_bytes()) {
                     Err(MdbError::NotFound) => {
@@ -309,7 +308,7 @@ impl<'tx> Iter<'tx> {
     pub fn next(&mut self) -> crate::Result<Option<(MapKey<'tx>, &'tx ID)>> {
         match &mut self.state {
             IterState::Uninit(db) => {
-                let mut cursor = db.new_cursor()?;
+                let mut cursor = db.cursor()?;
                 match cursor.to_gte_key(&[MapEntriesStore::PREFIX].as_bytes()) {
                     Err(MdbError::NotFound) => {
                         self.state = IterState::Finished;

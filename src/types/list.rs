@@ -67,7 +67,7 @@ impl<'tx, 'db> ListRef<&'tx Transaction<'db>> {
     }
 
     pub fn len(&self) -> usize {
-        self.block.clock_len().get() as usize
+        self.block.node_len()
     }
 
     pub fn iter<T>(&self) -> Iter<'_, T>

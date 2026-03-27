@@ -1,7 +1,7 @@
 use crate::ID;
 use crate::block_reader::BlockRange;
 use crate::content::{Content, ContentType};
-use crate::store::{KEY_PREFIX_CONTENT, ReadableBytes};
+use crate::store::{Db, KEY_PREFIX_CONTENT, ReadableBytes};
 use lmdb_rs_m::{Cursor, Database, MdbError, MdbValue, ToMdbValue};
 use std::borrow::Cow;
 use std::fmt::{Debug, Formatter};
@@ -31,7 +31,7 @@ impl<'a> ContentStore<'a> {
 
     pub fn insert(&mut self, id: &ID, content: &[Content<'_>]) -> crate::Result<()> {
         let mut id = *id;
-        let mut cursor = self.db.new_cursor()?;
+        let mut cursor = self.db.cursor()?;
         for content in content {
             let key = BlockContentKey::new(id);
             cursor.set(&key, &content.bytes(), 0)?;
@@ -56,7 +56,7 @@ impl<'a> ContentStore<'a> {
                 true // these types can be stored on multiple entries
             }
         };
-        let mut cursor = self.db.new_cursor()?;
+        let mut cursor = self.db.cursor()?;
         let mut curr = *range.head();
         let key = BlockContentKey::new(curr);
         cursor.to_key(&key)?;
@@ -106,7 +106,7 @@ impl<'tx> Debug for Inspect<'tx> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let mut s = f.debug_map();
 
-        let mut cursor = self.db.new_cursor().map_err(|_| std::fmt::Error)?;
+        let mut cursor = self.db.cursor().map_err(|_| std::fmt::Error)?;
         cursor
             .to_gte_key(&[ContentStore::PREFIX].as_ref())
             .map_err(|_| std::fmt::Error)?;
@@ -163,7 +163,7 @@ impl<'a> ReadRange<'a> {
                 }
             }
             ReadRangeState::Uninit(db) => {
-                let mut cursor = db.new_cursor()?;
+                let mut cursor = db.cursor()?;
                 let key = BlockContentKey::new(*self.range.head());
                 let value = match cursor.to_key(&key.as_bytes()) {
                     Ok(_) => Content::new(self.content_type, Cow::Borrowed(cursor.get_value()?)),

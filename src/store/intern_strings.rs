@@ -1,5 +1,5 @@
 use crate::Optional;
-use crate::store::KEY_PREFIX_INTERN_STR;
+use crate::store::{Db, KEY_PREFIX_INTERN_STR};
 use lmdb_rs_m::{Database, MdbError, MdbValue, ToMdbValue};
 use std::fmt::{Debug, Formatter};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
@@ -26,7 +26,7 @@ impl<'tx> InternStringsStore<'tx> {
 
     pub fn insert(&mut self, value: &str, hash: crate::U32) -> crate::Result<()> {
         let key = InternStringsKey::new(hash);
-        let mut cursor = self.db.new_cursor()?;
+        let mut cursor = self.db.cursor()?;
         match cursor.to_key(&key.as_bytes()) {
             Err(MdbError::NotFound) => {
                 cursor.set(&key.as_bytes(), &value.as_bytes(), 0)?;
@@ -76,7 +76,7 @@ impl<'tx> Iter<'tx> {
     pub fn next(&mut self) -> crate::Result<Option<(&'tx crate::U32, &'tx str)>> {
         match self {
             Iter::UnInit(db) => {
-                let mut cursor = db.new_cursor()?;
+                let mut cursor = db.cursor()?;
                 match cursor.to_gte_key(&InternStringsKey::new(0.into())) {
                     Ok(_) => {
                         *self = Iter::Init(cursor);
@@ -149,7 +149,7 @@ pub struct Inspector<'tx> {
 impl<'tx> Debug for Inspector<'tx> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let mut s = f.debug_map();
-        let mut cursor = self.db.new_cursor().map_err(|_| std::fmt::Error)?;
+        let mut cursor = self.db.cursor().map_err(|_| std::fmt::Error)?;
         cursor
             .to_gte_key(&InternStringsKey::new(0.into()))
             .map_err(|_| std::fmt::Error)?;

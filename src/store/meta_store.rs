@@ -1,4 +1,4 @@
-use crate::store::{KEY_PREFIX_META, ReadableBytes};
+use crate::store::{Db, KEY_PREFIX_META, ReadableBytes};
 use lmdb_rs_m::{Database, MdbError};
 use smallvec::SmallVec;
 use std::fmt::{Debug, Formatter};
@@ -54,7 +54,7 @@ impl<'a> Iter<'a> {
     pub fn next(&mut self) -> crate::Result<Option<(&'a str, &'a [u8])>> {
         match self {
             Iter::UnInit(db) => {
-                let mut cursor = db.new_cursor()?;
+                let mut cursor = db.cursor()?;
                 match cursor.to_gte_key(&[KEY_PREFIX_META].as_ref()) {
                     Ok(_) => {
                         let key: &'a [u8] = cursor.get_key()?;

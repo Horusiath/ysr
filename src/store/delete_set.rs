@@ -1,4 +1,5 @@
 use crate::id_set::IDRange;
+use crate::store::Db;
 use crate::{ClientID, Clock, ID};
 use lmdb_rs_m::{Cursor, Database, MdbError};
 use smallvec::SmallVec;
@@ -115,7 +116,7 @@ impl<'tx> Iter<'tx> {
     pub fn next(&mut self) -> crate::Result<Option<(ClientID, Ranges<'tx>)>> {
         match &mut self.state {
             IterState::Uninit(db) => {
-                let mut cursor = db.new_cursor()?;
+                let mut cursor = db.cursor()?;
                 match cursor.to_gte_key(&[DeleteSetStore::PREFIX].as_bytes()) {
                     Ok(_) => {
                         let key = match DeleteSetKey::parse(cursor.get_key()?) {

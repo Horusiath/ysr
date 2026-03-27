@@ -1,8 +1,10 @@
 use crate::node::{Node, NodeType};
-use crate::store::KEY_PREFIX_BLOCK;
+use crate::store::{Db, KEY_PREFIX_BLOCK};
 use crate::{Block, BlockHeader, BlockMut, Error, ID, Optional};
 use lmdb_rs_m::{Database, MdbError, MdbValue, ToMdbValue};
 use std::fmt::{Debug, Formatter};
+use std::ops::{Deref, DerefMut};
+use std::pin::Pin;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, TryFromBytes};
 
 #[repr(transparent)]
@@ -17,8 +19,8 @@ impl<'tx> BlockStore<'tx> {
     }
 
     pub fn cursor(&self) -> crate::Result<BlockCursor<'tx>> {
-        let cursor = self.db.new_cursor()?;
-        Ok(BlockCursor { cursor })
+        let cursor = self.db.cursor()?;
+        Ok(BlockCursor::new(cursor))
     }
 
     pub fn get(&self, id: ID) -> crate::Result<Block<'tx>> {
@@ -75,6 +77,10 @@ pub struct BlockCursor<'tx> {
 
 impl<'tx> BlockCursor<'tx> {
     const PREFIX: u8 = KEY_PREFIX_BLOCK;
+
+    pub fn new(cursor: lmdb_rs_m::Cursor<'tx>) -> Self {
+        BlockCursor { cursor }
+    }
 
     pub fn insert(&mut self, block: Block<'_>) -> crate::Result<()> {
         let key = BlockKey::new(*block.id());
@@ -277,7 +283,7 @@ pub struct Inspector<'tx> {
 impl<'tx> Debug for Inspector<'tx> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let mut s = f.debug_list();
-        let cursor = self.db.new_cursor().map_err(|_| std::fmt::Error)?;
+        let cursor = self.db.cursor().map_err(|_| std::fmt::Error)?;
         let mut c = BlockCursor { cursor };
         // we need to set cursor position at the beginning of the space
         let _ = c.seek(ID::new(0.into(), 0.into()));

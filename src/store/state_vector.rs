@@ -1,4 +1,4 @@
-use crate::store::KEY_PREFIX_STATE_VECTOR;
+use crate::store::{Db, KEY_PREFIX_STATE_VECTOR};
 use crate::{ClientID, Clock, Optional, StateVector};
 use lmdb_rs_m::{MdbError, MdbValue, ToMdbValue};
 use std::collections::BTreeMap;
@@ -16,7 +16,7 @@ impl<'tx> StateVectorStore<'tx> {
 
     pub fn state_vector(&mut self) -> crate::Result<StateVector> {
         let mut buf = BTreeMap::new();
-        let mut cursor = self.db.new_cursor()?;
+        let mut cursor = self.db.cursor()?;
 
         let key = StateVectorKey::new(unsafe { ClientID::new_unchecked(0) });
         match cursor.to_gte_key(&key) {
@@ -39,7 +39,7 @@ impl<'tx> StateVectorStore<'tx> {
     pub fn update(&mut self, client: ClientID, clock: Clock) -> crate::Result<Clock> {
         let key = StateVectorKey::new(client);
         let value = clock.as_bytes();
-        let mut cursor = self.db.new_cursor()?;
+        let mut cursor = self.db.cursor()?;
         match cursor.to_key(&key) {
             Ok(_) => {
                 let local_clock = *Clock::ref_from_bytes(cursor.get_value()?)

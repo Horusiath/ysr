@@ -122,7 +122,7 @@ impl<'de> Deserialize<'de> for ID {
 pub struct BlockHeader {
     /// Yjs-compatible length of the block. Counted as a number of countable elements or
     /// UTF-16 characters.
-    clock_len: Clock,
+    len: Clock,
     /// Flags that define the block's state, including presence/absence of other fields like
     /// neighbor blocks or origins.
     flags: BlockFlags,
@@ -154,7 +154,7 @@ impl BlockHeader {
 
     pub fn empty() -> Self {
         BlockHeader {
-            clock_len: Clock::new(0),
+            len: Clock::new(0),
             flags: BlockFlags::default(),
             node_type: NodeType::default(),
             content_type: ContentType::Deleted,
@@ -197,7 +197,7 @@ impl BlockHeader {
             U32::new(0)
         };
         Self {
-            clock_len: len,
+            len: len,
             flags,
             node_type: NodeType::Unknown,
             content_type: ContentType::Deleted,
@@ -225,7 +225,7 @@ impl BlockHeader {
     pub fn contains(&self, id: &ID) -> bool {
         id.client == self.left.client // same client
             && id.clock >= self.left.clock // id is larger or equal to block's start clock
-            && id.clock < self.left.clock + self.clock_len // id is smaller than block's end clock
+            && id.clock < self.left.clock + self.len // id is smaller than block's end clock
     }
 
     pub fn left(&self) -> Option<&ID> {
@@ -367,18 +367,31 @@ impl BlockHeader {
         }
     }
 
+    /// Number of countable elements within this block. The rules are:
+    /// - [ContentType::Atom]/[ContentType::Json] return a number of elements represented by a single block.
+    /// - [ContentType::String] returns a number of UTF-16 characters.
+    /// - Other content types return `1`.
     #[inline]
     pub fn clock_len(&self) -> Clock {
-        self.clock_len
+        match self.content_type() {
+            ContentType::String | ContentType::Atom | ContentType::Json => self.len,
+            _ => Clock::new(1),
+        }
     }
 
-    pub fn len(&self) -> Clock {
-        self.clock_len
+    /// Returns a number of elements stored within this Y-collection.
+    /// Works only on nodes (current block has [ContentType::Node]).
+    pub fn node_len(&self) -> usize {
+        if self.content_type() == ContentType::Node {
+            self.len.get() as usize
+        } else {
+            0
+        }
     }
 
     #[inline]
     pub fn set_clock_len(&mut self, len: Clock) {
-        self.clock_len = len;
+        self.len = len;
     }
 
     pub fn is_deleted(&self) -> bool {
@@ -452,7 +465,7 @@ impl<'a> Block<'a> {
 
     pub fn range(&self) -> BlockRange {
         let id = *self.id();
-        BlockRange::new(id, id.clock + self.clock_len)
+        BlockRange::new(id, id.clock + self.len)
     }
 
     pub(crate) fn info_flags(&self) -> u8 {
@@ -540,11 +553,11 @@ impl BlockMut {
     pub fn split(&mut self, offset: Clock) -> Option<Self> {
         let is_deleted = self.is_deleted(); //TODO: should we also delete is_deleted blocks
         let is_countable = self.is_countable();
-        if offset == 0 || offset > self.clock_len || !(is_countable || is_deleted) {
+        if offset == 0 || offset > self.len || !(is_countable || is_deleted) {
             None
         } else {
-            let clock_len = self.clock_len;
-            self.clock_len = offset;
+            let clock_len = self.len;
+            self.len = offset;
 
             let mut flags = self.flags;
             flags |= BlockFlags::ORIGIN_LEFT;
@@ -571,7 +584,7 @@ impl BlockMut {
             }
 
             let right = BlockHeader {
-                clock_len: clock_len - offset,
+                len: clock_len - offset,
                 flags,
                 node_type: Default::default(),
                 content_type: self.content_type(),
@@ -590,7 +603,7 @@ impl BlockMut {
 
     pub fn merge(&mut self, other: Block<'_>) -> bool {
         if self.can_merge(&other) {
-            self.clock_len += other.clock_len;
+            self.len += other.len;
             self.set_right(other.right());
             // other.right.left points to the last id, so we don't need to update it
             true
@@ -711,7 +724,7 @@ impl InsertBlockData {
             block: BlockMut::new(
                 id,
                 BlockHeader {
-                    clock_len: 1.into(),
+                    len: 1.into(),
                     flags: BlockFlags::COUNTABLE,
                     node_type: kind,
                     content_type: ContentType::Node,
@@ -941,6 +954,10 @@ impl InsertBlockData {
         blocks.insert(self.as_block())?;
 
         let parent_deleted = if let Some(parent_block) = context.parent.as_mut() {
+            if self.block.is_countable() && !self.block.is_deleted() {
+                let parent_len = Clock::new(parent_block.node_len() as u32);
+                parent_block.set_clock_len(parent_len + self.block.clock_len());
+            }
             let parent = parent_block.as_block();
             let is_deleted = parent.id.is_nested() && parent.is_deleted();
             tx_state.add_changed_type(parent.id, is_deleted, self.block.key_hash());
@@ -1067,7 +1084,7 @@ impl Display for BlockHeader {
             write!(f, ", hash_key: {}", key)?;
         }
         if self.flags.contains(BlockFlags::COUNTABLE) || self.flags.contains(BlockFlags::DELETED) {
-            write!(f, ", clock-len: {}", self.clock_len)?;
+            write!(f, ", clock-len: {}", self.len)?;
         }
         if self.flags.contains(BlockFlags::LEFT) {
             write!(f, ", left: {}", self.left)?;
