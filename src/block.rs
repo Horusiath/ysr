@@ -9,7 +9,7 @@ use crate::{ClientID, Clock, Optional, U32};
 use crate::{Error, Result};
 use bitflags::{Flags, bitflags};
 use bytes::Bytes;
-use lmdb_rs_m::{Database, MdbValue, ToMdbValue};
+use crate::lmdb::Database;
 use serde::de::{SeqAccess, Visitor};
 use serde::ser::SerializeTuple;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -443,11 +443,6 @@ impl BlockHeader {
     }
 }
 
-impl ToMdbValue for BlockHeader {
-    fn to_mdb_value(&self) -> MdbValue<'_> {
-        MdbValue::new_from_sized(self)
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct Block<'a> {

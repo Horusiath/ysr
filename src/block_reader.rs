@@ -4,19 +4,18 @@ use crate::block::{
 use crate::content::{Content, ContentType, FormatAttribute};
 use crate::id_set::IDSet;
 use crate::integrate::IntegrationContext;
+use crate::lmdb::Database;
 use crate::node::{Node, NodeID, NodeType};
 use crate::read::{Decode, Decoder, ReadExt};
 use crate::store::Db;
 use crate::transaction::TransactionState;
-use crate::write::WriteExt;
 use crate::{ClientID, Clock, U32};
 use bytes::{BufMut, BytesMut};
-use lmdb_rs_m::Database;
 use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt::{Display, Formatter};
-use std::io::{Read, Write};
+use std::io::Read;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 #[derive(Default)]

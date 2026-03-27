@@ -994,13 +994,6 @@ impl<'a> Display for BlockContentRef<'a> {
     }
 }
 
-impl<'a> ToMdbValue for BlockContentRef<'a> {
-    fn to_mdb_value(&self) -> MdbValue<'_> {
-        let data = self.data.as_ptr() as *const c_void;
-        let len = self.data.len();
-        unsafe { MdbValue::new(data, len) }
-    }
-}
 
 pub struct ContentIter<'a, E> {
     data: &'a [InlineBytes],

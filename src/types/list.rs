@@ -9,7 +9,7 @@ use crate::types::Capability;
 use crate::{
     BlockMut, Clock, DynRef, ID, In, Mounted, Optional, Out, Transaction, Unmounted, lib0,
 };
-use lmdb_rs_m::Database;
+use crate::lmdb::Database;
 use std::borrow::Cow;
 use std::ops::{Deref, DerefMut, RangeBounds};
 

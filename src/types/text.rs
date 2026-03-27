@@ -2,6 +2,7 @@ use crate::block::{BlockMut, ID, InsertBlockData};
 use crate::content::{Content, ContentType};
 use crate::integrate::IntegrationContext;
 use crate::lib0::Value;
+use crate::lmdb::Database;
 use crate::node::{Named, Node, NodeType};
 use crate::prelim::Prelim;
 use crate::state_vector::Snapshot;
@@ -9,7 +10,6 @@ use crate::store::Db;
 use crate::store::block_store::BlockCursor;
 use crate::types::Capability;
 use crate::{Block, Clock, In, Mounted, Out, Transaction};
-use lmdb_rs_m::Database;
 use serde::{Deserialize, Serialize};
 use smallvec::smallvec;
 use std::cmp::Ordering;
@@ -114,7 +114,7 @@ impl<'tx, 'db> Display for TextRef<&'tx Transaction<'db>> {
     }
 }
 
-impl<'db, 'tx: 'db> TextRef<&'tx mut Transaction<'db>> {
+impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
     pub fn cursor_mut(&mut self) -> crate::Result<TextCursor<'tx, 'db>> {
         let parent = *self.block.id();
         let parent = if parent.is_root() {
@@ -294,7 +294,7 @@ pub struct TextCursor<'tx, 'db> {
     attributes: Attrs,
 }
 
-impl<'db, 'tx: 'db> TextCursor<'tx, 'db> {
+impl<'db, 'tx> TextCursor<'tx, 'db> {
     pub fn new(
         tx: &'tx mut Transaction<'db>,
         parent: Node<'static>,

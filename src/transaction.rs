@@ -2,6 +2,7 @@ use crate::block::{Block, BlockMut, ID};
 use crate::block_reader::{BlockRange, Carrier, Update};
 use crate::content::{ContentType, FormatAttribute};
 use crate::id_set::IDSet;
+use crate::lmdb::{Database, Dbi, RwTxn};
 use crate::node::{Node, NodeID};
 use crate::read::Decoder;
 use crate::state_vector::Snapshot;
@@ -14,7 +15,6 @@ use crate::write::{Encode, Encoder, EncoderV1, WriteExt};
 use crate::{ClientID, Clock, Optional, StateVector, U32};
 use bitflags::bitflags;
 use bytes::{BufMut, Bytes, BytesMut};
-use lmdb_rs_m::{Database, DbHandle};
 use smallvec::{SmallVec, smallvec};
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
@@ -146,7 +146,7 @@ impl TransactionState {
         Ok(true)
     }
 
-    fn precommit<'db>(
+    fn precommit(
         &mut self,
         db: Database<'_>,
         summary: Option<&mut TransactionSummary>,
@@ -226,16 +226,16 @@ impl TransactionState {
 }
 
 pub struct Transaction<'db> {
-    txn: lmdb_rs_m::Transaction<'db>,
+    txn: RwTxn<'db>,
     client_id: ClientID,
-    handle: DbHandle,
+    handle: Dbi,
     state: Option<Box<TransactionState>>,
 }
 
 impl<'db> Transaction<'db> {
     pub(crate) fn read_write(
-        txn: lmdb_rs_m::Transaction<'db>,
-        handle: DbHandle,
+        txn: RwTxn<'db>,
+        handle: Dbi,
         origin: Option<Origin>,
         client_id: ClientID,
     ) -> crate::Result<Self> {
@@ -259,7 +259,7 @@ impl<'db> Transaction<'db> {
         })
     }
 
-    pub fn db<'tx>(&'tx self) -> Database<'tx> {
+    pub fn db(&self) -> Database<'_> {
         self.txn.bind(&self.handle)
     }
 

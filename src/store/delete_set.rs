@@ -1,7 +1,6 @@
 use crate::id_set::IDRange;
-use crate::store::Db;
+use crate::lmdb::{Cursor, Database, Error as LmdbError};
 use crate::{ClientID, Clock, ID};
-use lmdb_rs_m::{Cursor, Database, MdbError};
 use smallvec::SmallVec;
 use std::ops::Range;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
@@ -20,7 +19,7 @@ impl<'tx> DeleteSetStore<'tx> {
 
     pub fn contains(&self, id: &ID) -> crate::Result<bool> {
         let key = DeleteSetKey::new(id.client);
-        match self.db.get(&key.as_bytes()) {
+        match self.db.get(key.as_bytes()) {
             Ok(value) => {
                 let ranges = Ranges::new(value);
                 for range in ranges {
@@ -30,7 +29,7 @@ impl<'tx> DeleteSetStore<'tx> {
                 }
                 Ok(false)
             }
-            Err(MdbError::NotFound) => Ok(false),
+            Err(LmdbError::NOT_FOUND) => Ok(false),
             Err(e) => Err(e.into()),
         }
     }
@@ -41,15 +40,15 @@ impl<'tx> DeleteSetStore<'tx> {
         ranges: I,
     ) -> crate::Result<()> {
         let key = DeleteSetKey::new(client_id);
-        match self.db.get(&key.as_bytes()) {
+        match self.db.get(key.as_bytes()) {
             Ok(value) => {
                 let current = Ranges::new(value);
                 let merged = current.merge(ranges);
-                self.db.set(&key.as_bytes(), &merged)?;
+                self.db.put(key.as_bytes(), &merged)?;
             }
-            Err(MdbError::NotFound) => {
+            Err(LmdbError::NOT_FOUND) => {
                 let ranges = Ranges::create(ranges);
-                self.db.set(&key.as_bytes(), &ranges)?;
+                self.db.put(key.as_bytes(), &ranges)?;
             }
             Err(e) => return Err(e.into()),
         }
@@ -117,30 +116,30 @@ impl<'tx> Iter<'tx> {
         match &mut self.state {
             IterState::Uninit(db) => {
                 let mut cursor = db.cursor()?;
-                match cursor.to_gte_key(&[DeleteSetStore::PREFIX].as_bytes()) {
+                match cursor.set_range(&[DeleteSetStore::PREFIX]) {
                     Ok(_) => {
-                        let key = match DeleteSetKey::parse(cursor.get_key()?) {
+                        let key = match DeleteSetKey::parse(cursor.key()?) {
                             Some(key) => key,
                             None => return self.finish(),
                         };
-                        let ranges = Ranges::new(cursor.get_value()?);
+                        let ranges = Ranges::new(cursor.value()?);
                         self.state = IterState::Init(cursor);
                         Ok(Some((key.client, ranges)))
                     }
-                    Err(MdbError::NotFound) => self.finish(),
+                    Err(LmdbError::NOT_FOUND) => self.finish(),
                     Err(e) => Err(e.into()),
                 }
             }
-            IterState::Init(cursor) => match cursor.to_next_key() {
+            IterState::Init(cursor) => match cursor.next() {
                 Ok(_) => {
-                    let key = match DeleteSetKey::parse(cursor.get_key()?) {
+                    let key = match DeleteSetKey::parse(cursor.key()?) {
                         Some(key) => key,
                         None => return self.finish(),
                     };
-                    let ranges = Ranges::new(cursor.get_value()?);
+                    let ranges = Ranges::new(cursor.value()?);
                     Ok(Some((key.client, ranges)))
                 }
-                Err(MdbError::NotFound) => self.finish(),
+                Err(LmdbError::NOT_FOUND) => self.finish(),
                 Err(e) => Err(e.into()),
             },
             IterState::Finished => Ok(None),

@@ -1,16 +1,16 @@
+use crate::lmdb::{Database, Error as LmdbError};
 use crate::store::{Db, KEY_PREFIX_STATE_VECTOR};
 use crate::{ClientID, Clock, Optional, StateVector};
-use lmdb_rs_m::{MdbError, MdbValue, ToMdbValue};
 use std::collections::BTreeMap;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 #[repr(transparent)]
 pub struct StateVectorStore<'tx> {
-    db: &'tx lmdb_rs_m::Database<'tx>,
+    db: &'tx Database<'tx>,
 }
 
 impl<'tx> StateVectorStore<'tx> {
-    pub fn new(db: &'tx lmdb_rs_m::Database<'tx>) -> Self {
+    pub fn new(db: &'tx Database<'tx>) -> Self {
         Self { db }
     }
 
@@ -19,19 +19,19 @@ impl<'tx> StateVectorStore<'tx> {
         let mut cursor = self.db.cursor()?;
 
         let key = StateVectorKey::new(unsafe { ClientID::new_unchecked(0) });
-        match cursor.to_gte_key(&key) {
+        match cursor.set_range(key.as_bytes()) {
             Ok(_) => {
-                while let Some(key) = StateVectorKey::parse(cursor.get_key()?) {
-                    let clock = *Clock::ref_from_bytes(cursor.get_value()?)
+                while let Some(key) = StateVectorKey::parse(cursor.key()?) {
+                    let clock = *Clock::ref_from_bytes(cursor.value()?)
                         .map_err(|_| crate::Error::InvalidMapping("Clock"))?;
                     buf.insert(key.client, clock);
-                    if cursor.to_next_key().optional()?.is_none() {
+                    if cursor.next().optional()?.is_none() {
                         break;
                     }
                 }
                 Ok(StateVector::new(buf))
             }
-            Err(MdbError::NotFound) => Ok(StateVector::new(buf)),
+            Err(LmdbError::NOT_FOUND) => Ok(StateVector::new(buf)),
             Err(e) => Err(crate::Error::from(e)),
         }
     }
@@ -40,17 +40,17 @@ impl<'tx> StateVectorStore<'tx> {
         let key = StateVectorKey::new(client);
         let value = clock.as_bytes();
         let mut cursor = self.db.cursor()?;
-        match cursor.to_key(&key) {
+        match cursor.set_key(key.as_bytes()) {
             Ok(_) => {
-                let local_clock = *Clock::ref_from_bytes(cursor.get_value()?)
+                let local_clock = *Clock::ref_from_bytes(cursor.value()?)
                     .map_err(|_| crate::Error::InvalidMapping("Clock"))?;
                 if local_clock < clock {
-                    cursor.replace(&value)?;
+                    cursor.put_current(value)?;
                 }
                 Ok(local_clock)
             }
-            Err(MdbError::NotFound) => {
-                cursor.set(&key, &value, 0)?;
+            Err(LmdbError::NOT_FOUND) => {
+                cursor.put(key.as_bytes(), value, 0)?;
                 Ok(Clock::new(0))
             }
             Err(e) => Err(e.into()),
@@ -59,13 +59,13 @@ impl<'tx> StateVectorStore<'tx> {
 
     pub fn get_clock(&mut self, client_id: ClientID) -> crate::Result<Option<&'tx Clock>> {
         let key = StateVectorKey::new(client_id);
-        match self.db.get(&key) {
+        match self.db.get(key.as_bytes()) {
             Ok(value) => {
                 let clock = Clock::ref_from_bytes(value)
                     .map_err(|_| crate::Error::InvalidMapping("Clock"))?;
                 Ok(Some(clock))
             }
-            Err(MdbError::NotFound) => Ok(None),
+            Err(LmdbError::NOT_FOUND) => Ok(None),
             Err(e) => Err(e.into()),
         }
     }
@@ -93,13 +93,5 @@ impl StateVectorKey {
         } else {
             None
         }
-    }
-}
-
-impl ToMdbValue for StateVectorKey {
-    fn to_mdb_value(&self) -> MdbValue<'_> {
-        let slice = self.as_bytes();
-        let ptr = slice.as_ptr() as *const _;
-        unsafe { MdbValue::new(ptr, slice.len()) }
     }
 }

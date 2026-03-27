@@ -1,5 +1,5 @@
+use crate::lmdb::{Cursor, Database, Error as LmdbError};
 use crate::store::{Db, KEY_PREFIX_META, ReadableBytes};
-use lmdb_rs_m::{Database, MdbError};
 use smallvec::SmallVec;
 use std::fmt::{Debug, Formatter};
 
@@ -16,16 +16,16 @@ impl<'tx> MetaStore<'tx> {
 
     pub fn get(&mut self, key: &str) -> crate::Result<Option<&'tx [u8]>> {
         let key = meta_key(key);
-        match self.db.get(&key.as_ref()) {
+        match self.db.get(key.as_ref()) {
             Ok(value) => Ok(Some(value)),
-            Err(MdbError::NotFound) => Ok(None),
+            Err(LmdbError::NOT_FOUND) => Ok(None),
             Err(e) => Err(e.into()),
         }
     }
 
     pub fn insert(&mut self, key: &str, value: &[u8]) -> crate::Result<()> {
         let key = meta_key(key);
-        self.db.set(&key.as_ref(), &value)?;
+        self.db.put(key.as_ref(), value)?;
         Ok(())
     }
 
@@ -47,7 +47,7 @@ fn meta_key(key: &str) -> SmallVec<[u8; 24]> {
 
 pub enum Iter<'a> {
     UnInit(&'a Database<'a>),
-    Init(lmdb_rs_m::Cursor<'a>),
+    Init(Cursor<'a>),
 }
 
 impl<'a> Iter<'a> {
@@ -55,29 +55,29 @@ impl<'a> Iter<'a> {
         match self {
             Iter::UnInit(db) => {
                 let mut cursor = db.cursor()?;
-                match cursor.to_gte_key(&[KEY_PREFIX_META].as_ref()) {
+                match cursor.set_range(&[KEY_PREFIX_META]) {
                     Ok(_) => {
-                        let key: &'a [u8] = cursor.get_key()?;
+                        let key: &'a [u8] = cursor.key()?;
                         let key: &'a str = unsafe { std::str::from_utf8_unchecked(key) };
-                        let value: &'a [u8] = cursor.get_value()?;
+                        let value: &'a [u8] = cursor.value()?;
                         *self = Iter::Init(cursor);
                         Ok(Some((key, value)))
                     }
-                    Err(MdbError::NotFound) => Ok(None),
+                    Err(LmdbError::NOT_FOUND) => Ok(None),
                     Err(e) => Err(e.into()),
                 }
             }
-            Iter::Init(cursor) => match cursor.to_next_key() {
+            Iter::Init(cursor) => match cursor.next() {
                 Ok(_) => {
-                    let key: &'a [u8] = cursor.get_key()?;
+                    let key: &'a [u8] = cursor.key()?;
                     if key[0] != KEY_PREFIX_META {
                         return Ok(None);
                     }
                     let key: &'a str = unsafe { std::str::from_utf8_unchecked(key) };
-                    let value: &'a [u8] = cursor.get_value()?;
+                    let value: &'a [u8] = cursor.value()?;
                     Ok(Some((key, value)))
                 }
-                Err(MdbError::NotFound) => Ok(None),
+                Err(LmdbError::NOT_FOUND) => Ok(None),
                 Err(e) => Err(e.into()),
             },
         }

@@ -1,18 +1,15 @@
 use crate::block::{BlockMut, ID, InsertBlockData};
 use crate::content::{Content, ContentType};
 use crate::integrate::IntegrationContext;
+use crate::lmdb::Database;
 use crate::node::{Node, NodeID, NodeType};
 use crate::prelim::Prelim;
-use crate::store::block_store::{BlockCursor, BlockStore};
 use crate::store::map_entries::{MapEntries, MapKey};
 use crate::store::{Db, MapEntriesStore};
 use crate::types::Capability;
 use crate::{Clock, Error, In, Mounted, Optional, Transaction, Unmounted, lib0};
-use lmdb_rs_m::{Database, MdbError};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
-use std::marker::PhantomData;
-use std::mem::MaybeUninit;
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
 

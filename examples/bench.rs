@@ -1,11 +1,10 @@
-use lmdb_rs_m::EnvBuilder;
 use std::time::Instant;
 use ysr::{DecoderV1, MultiDoc, TextRef, Unmounted};
 
 fn main() {
     let data = std::fs::read("./examples/data/b4-update.bin").unwrap();
     let dir = tempfile::tempdir().unwrap();
-    let env = EnvBuilder::new()
+    let env = ysr::lmdb::Env::builder()
         .max_dbs(1)
         .map_size(10 * 1024 * 1024)
         .open(dir.path(), 0o777)

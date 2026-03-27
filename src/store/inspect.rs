@@ -1,5 +1,5 @@
+use crate::lmdb::Database;
 use crate::store::Db;
-use lmdb_rs_m::Database;
 use std::fmt::Debug;
 
 pub struct DbInspector<'tx> {

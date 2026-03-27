@@ -1,12 +1,11 @@
+use crate::lmdb::{Cursor, Database};
 use crate::store::block_store::BlockStore;
 use crate::store::content_store::ContentStore;
 use crate::store::delete_set::DeleteSetStore;
-use crate::store::inspect::DbInspector;
 use crate::store::intern_strings::InternStringsStore;
 pub(crate) use crate::store::map_entries::MapEntriesStore;
 use crate::store::meta_store::MetaStore;
 use crate::store::state_vector::StateVectorStore;
-use lmdb_rs_m::Cursor;
 use std::fmt::{Debug, Formatter};
 
 pub(crate) mod block_store;
@@ -26,7 +25,7 @@ pub(super) const KEY_PREFIX_MAP: u8 = 0x04;
 pub(super) const KEY_PREFIX_CONTENT: u8 = 0x05;
 
 pub trait Db<'tx> {
-    fn cursor(&self) -> crate::Result<lmdb_rs_m::Cursor<'tx>>;
+    fn cursor(&self) -> crate::Result<Cursor<'tx>>;
     fn meta(&self) -> MetaStore<'_>;
     fn blocks(&self) -> BlockStore<'_>;
     fn contents(&self) -> ContentStore<'_>;
@@ -36,12 +35,9 @@ pub trait Db<'tx> {
     fn delete_set(&self) -> DeleteSetStore<'_>;
 }
 
-impl<'tx> Db<'tx> for lmdb_rs_m::Database<'tx> {
+impl<'tx> Db<'tx> for Database<'tx> {
     fn cursor(&self) -> crate::Result<Cursor<'tx>> {
-        let cursor: lmdb_rs_m::Cursor<'_> = self.new_cursor()?;
-        // lmdb_rs crate lifetimes for cursor are wrong
-        let cursor_fixed: lmdb_rs_m::Cursor<'tx> = unsafe { std::mem::transmute(cursor) };
-        Ok(cursor_fixed)
+        Ok(self.cursor()?)
     }
 
     fn meta(&self) -> MetaStore<'_> {
