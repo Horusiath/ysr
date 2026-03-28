@@ -1,9 +1,11 @@
-use crate::block::{Block, BlockMut, ID};
+use crate::block::{Block, BlockMut, ID, InsertBlockData};
 use crate::block_reader::{BlockRange, Carrier, Update};
 use crate::content::{ContentType, FormatAttribute};
 use crate::id_set::IDSet;
+use crate::integrate::IntegrationContext;
 use crate::lmdb::{Database, Dbi, RwTxn};
 use crate::node::{Node, NodeID};
+use crate::prelim::Prelim;
 use crate::read::Decoder;
 use crate::state_vector::Snapshot;
 use crate::store::block_store::{BlockCursor, BlockStore};

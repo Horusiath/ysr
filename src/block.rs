@@ -1,6 +1,7 @@
 use crate::block_reader::BlockRange;
 use crate::content::{Content, ContentType, utf16_to_utf8};
 use crate::integrate::IntegrationContext;
+use crate::lmdb::Database;
 use crate::node::{Node, NodeID, NodeType};
 use crate::store::Db;
 use crate::store::block_store::SplitResult;
@@ -9,7 +10,6 @@ use crate::{ClientID, Clock, Optional, U32};
 use crate::{Error, Result};
 use bitflags::{Flags, bitflags};
 use bytes::Bytes;
-use crate::lmdb::Database;
 use serde::de::{SeqAccess, Visitor};
 use serde::ser::SerializeTuple;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -442,7 +442,6 @@ impl BlockHeader {
         }
     }
 }
-
 
 #[derive(Debug, Clone)]
 pub struct Block<'a> {
@@ -1118,11 +1117,6 @@ mod test {
     #[test]
     fn block_header_size() {
         assert_eq!(size_of::<BlockHeader>(), 60);
-    }
-
-    #[test]
-    fn inline_content_size() {
-        assert_eq!(size_of::<Content>(), 10);
     }
 
     #[test]

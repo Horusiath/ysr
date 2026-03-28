@@ -532,19 +532,18 @@ impl<'a> FormatAttribute<'a> {
         unsafe { std::str::from_utf8_unchecked(key) }
     }
 
-    pub fn value(&self) -> &[u8] {
+    pub fn value<T: DeserializeOwned>(&self) -> crate::Result<T> {
         let len = self.data[0] as usize;
-        &self.data[(len + 1)..]
+        let data = &self.data[(len + 1)..];
+        let value = lib0::from_slice::<T>(data)?;
+        Ok(value)
     }
 }
 
 impl<'a> Display for FormatAttribute<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let key = self.key();
-        let value: lib0::Value = match lib0::from_slice(self.value()) {
-            Ok(v) => v,
-            Err(_) => return Err(std::fmt::Error),
-        };
+        let value: lib0::Value = self.value().map_err(|_| std::fmt::Error)?;
         write!(f, "\"{}\"={}", key, value)
     }
 }
