@@ -374,7 +374,9 @@ impl BlockHeader {
     #[inline]
     pub fn clock_len(&self) -> Clock {
         match self.content_type() {
-            ContentType::String | ContentType::Atom | ContentType::Json => self.len,
+            ContentType::String | ContentType::Atom | ContentType::Json | ContentType::Deleted => {
+                self.len
+            }
             _ => Clock::new(1),
         }
     }
@@ -409,7 +411,7 @@ impl BlockHeader {
     pub fn set_inline_content(&mut self, content: Content<'_>) -> bool {
         let bytes = content.bytes();
         if bytes.len() <= Self::INLINE_CONTENT_LEN {
-            self.inline_content.copy_from_slice(bytes);
+            self.inline_content[..bytes.len()].copy_from_slice(bytes);
             self.inline_content_len = bytes.len() as u8;
             self.set_content_type(content.content_type());
             self.flags |= BlockFlags::INLINE_CONTENT;
@@ -571,8 +573,9 @@ impl BlockMut {
                 let source = unsafe { std::str::from_utf8_unchecked(bytes) };
                 let utf16_offset = offset.get() as usize;
                 if let Some(utf8_offset) = utf16_to_utf8(source, utf16_offset) {
-                    inline_content.copy_from_slice(&bytes[utf8_offset..]);
-                    inline_content_len = (bytes.len() - utf8_offset) as u8;
+                    let bytes = &bytes[utf8_offset..];
+                    inline_content[..bytes.len()].copy_from_slice(bytes);
+                    inline_content_len = bytes.len() as u8;
                     self.inline_content_len = utf8_offset as u8; // we don't need to truncate content itself
                 }
             }
@@ -600,6 +603,15 @@ impl BlockMut {
             self.len += other.len;
             self.set_right(other.right());
             // other.right.left points to the last id, so we don't need to update it
+            if self.content_type() == ContentType::String
+                && self.clock_len().get() + other.clock_len().get()
+                    <= BlockHeader::INLINE_CONTENT_LEN as u32
+            {
+                let size = self.inline_content_len as usize;
+                let other_size = other.inline_content_len as usize;
+                self.inline_content[size..(size + other_size)]
+                    .copy_from_slice(&other.inline_content[..other_size]);
+            }
             true
         } else {
             false
@@ -1275,7 +1287,7 @@ mod test {
         assert_eq!(left.clock_len(), Clock::new(7));
         assert_eq!(left.try_inline_data().unwrap(), b"hello w");
         assert_eq!(left.left(), Some(&ID::new(1.into(), 4.into())));
-        assert_eq!(left.left(), Some(&ID::new(1.into(), 16.into())));
+        assert_eq!(left.right(), Some(&ID::new(1.into(), 16.into())));
     }
 
     #[test]
@@ -1297,36 +1309,34 @@ mod test {
 
         let right = left.split(3.into()).unwrap();
 
-        assert_eq!(
-            left,
-            BlockMut::new(
-                ID::new(CLIENT, 5.into()),
-                BlockHeader::new(
-                    3.into(),
-                    Some(&ID::new(CLIENT, 4.into())),
-                    Some(&ID::new(CLIENT, 8.into())),
-                    Some(&ID::new(CLIENT, 4.into())),
-                    Some(&ID::new(CLIENT, 10.into())),
-                    parent,
-                    None,
-                ),
-            )
+        let mut expected = BlockMut::new(
+            ID::new(CLIENT, 5.into()),
+            BlockHeader::new(
+                3.into(),
+                Some(&ID::new(CLIENT, 4.into())),
+                Some(&ID::new(CLIENT, 8.into())),
+                Some(&ID::new(CLIENT, 4.into())),
+                Some(&ID::new(CLIENT, 10.into())),
+                parent,
+                None,
+            ),
         );
-        assert_eq!(
-            right,
-            BlockMut::new(
-                ID::new(CLIENT, 8.into()),
-                BlockHeader::new(
-                    2.into(),
-                    Some(&ID::new(CLIENT, 7.into())),
-                    Some(&ID::new(CLIENT, 10.into())),
-                    Some(&ID::new(CLIENT, 7.into())),
-                    Some(&ID::new(CLIENT, 10.into())),
-                    parent,
-                    None,
-                ),
-            )
+        expected.set_deleted();
+        assert_eq!(left, expected);
+        let mut expected = BlockMut::new(
+            ID::new(CLIENT, 8.into()),
+            BlockHeader::new(
+                2.into(),
+                Some(&ID::new(CLIENT, 7.into())),
+                Some(&ID::new(CLIENT, 10.into())),
+                Some(&ID::new(CLIENT, 7.into())),
+                Some(&ID::new(CLIENT, 10.into())),
+                parent,
+                None,
+            ),
         );
+        expected.set_deleted();
+        assert_eq!(right, expected);
     }
 
     #[test]
@@ -1388,7 +1398,11 @@ mod test {
             entry,
         );
         insert.block.set_content_type(content.content_type());
-        insert.content = smallvec![content];
+        if content.len() <= 8 {
+            insert.block.set_inline_content(content);
+        } else {
+            insert.content = smallvec![content];
+        }
         insert
     }
 }

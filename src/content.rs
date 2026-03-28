@@ -189,7 +189,7 @@ impl<'a> Content<'a> {
 
     pub fn str<S: AsRef<str>>(data: &'a S) -> Self {
         let str = data.as_ref();
-        Self::new(ContentType::Binary, Cow::Borrowed(str.as_bytes()))
+        Self::new(ContentType::String, Cow::Borrowed(str.as_bytes()))
     }
 
     pub fn node(node_id: &'a NodeID) -> Self {
