@@ -604,13 +604,13 @@ impl BlockMut {
             self.set_right(other.right());
             // other.right.left points to the last id, so we don't need to update it
             if self.content_type() == ContentType::String
-                && self.clock_len().get() + other.clock_len().get()
-                    <= BlockHeader::INLINE_CONTENT_LEN as u32
+                && self.len.get() <= BlockHeader::INLINE_CONTENT_LEN as u32
             {
                 let size = self.inline_content_len as usize;
                 let other_size = other.inline_content_len as usize;
                 self.inline_content[size..(size + other_size)]
                     .copy_from_slice(&other.inline_content[..other_size]);
+                self.inline_content_len += other_size as u8;
             }
             true
         } else {
@@ -1148,16 +1148,7 @@ mod test {
         let right = ID::new(CLIENT, 4.into());
         let o_right = ID::new(CLIENT, 4.into());
 
-        let insert = block(
-            1,
-            2,
-            3,
-            4,
-            13,
-            4,
-            Some("key"),
-            Content::atom(&lib0!({"x":1})).unwrap(),
-        );
+        let insert = block(1, 2, 3, 4, 13, 4, Some("key"), Content::str(&"hello"));
 
         assert_eq!(insert.block.left(), Some(&left));
         assert_eq!(insert.block.right(), Some(&right));
@@ -1167,8 +1158,8 @@ mod test {
 
         assert_eq!(insert.block.clock_len(), Clock::new(2));
         let content = &insert.block.try_inline_content().unwrap();
-        assert_eq!(content.len(), 1);
-        assert_eq!(content.content_type(), ContentType::Atom);
+        assert_eq!(content.len(), 5);
+        assert_eq!(content.content_type(), ContentType::String);
         assert_eq!(insert.entry_key(), Some("key"));
     }
 
@@ -1243,14 +1234,14 @@ mod test {
         assert_eq!(left.clock_len(), Clock::new(5));
         assert_eq!(left.content_type(), ContentType::String);
         assert_eq!(left.try_inline_data().unwrap(), b"hello");
-        assert_eq!(left.left(), Some(&ID::new(1.into(), 4.into())));
-        assert_eq!(left.right(), Some(&ID::new(1.into(), 11.into())));
+        assert_eq!(left.left(), Some(&ID::new(CLIENT, 4.into())));
+        assert_eq!(left.right(), Some(&ID::new(1.into(), 10.into())));
 
         assert_eq!(right.clock_len(), Clock::new(2));
         assert_eq!(right.content_type(), ContentType::String);
         assert_eq!(right.try_inline_data().unwrap(), b" w");
-        assert_eq!(right.left(), Some(&ID::new(1.into(), 10.into())));
-        assert_eq!(right.right(), Some(&ID::new(1.into(), 16.into())));
+        assert_eq!(right.left(), Some(&ID::new(1.into(), 9.into())));
+        assert_eq!(right.right(), Some(&ID::new(CLIENT, 16.into())));
     }
 
     #[test]
@@ -1263,7 +1254,7 @@ mod test {
                 Some(&ID::new(CLIENT, 4.into())),
                 Some(&ID::new(CLIENT, 10.into())),
                 Some(&ID::new(CLIENT, 4.into())),
-                Some(&ID::new(CLIENT, 10.into())),
+                Some(&ID::new(CLIENT, 16.into())),
                 parent,
                 None,
             ),
@@ -1273,9 +1264,9 @@ mod test {
             ID::new(CLIENT, 10.into()),
             BlockHeader::new(
                 2.into(),
-                Some(&ID::new(CLIENT, 4.into())),
+                Some(&ID::new(CLIENT, 9.into())),
                 Some(&ID::new(CLIENT, 16.into())),
-                Some(&ID::new(CLIENT, 4.into())),
+                Some(&ID::new(CLIENT, 9.into())),
                 Some(&ID::new(CLIENT, 16.into())),
                 parent,
                 None,
@@ -1286,8 +1277,8 @@ mod test {
         assert!(left.merge(right.as_block()));
         assert_eq!(left.clock_len(), Clock::new(7));
         assert_eq!(left.try_inline_data().unwrap(), b"hello w");
-        assert_eq!(left.left(), Some(&ID::new(1.into(), 4.into())));
-        assert_eq!(left.right(), Some(&ID::new(1.into(), 16.into())));
+        assert_eq!(left.left(), Some(&ID::new(CLIENT, 4.into())));
+        assert_eq!(left.right(), Some(&ID::new(CLIENT, 16.into())));
     }
 
     #[test]
