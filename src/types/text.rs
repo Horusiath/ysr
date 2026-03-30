@@ -8,9 +8,8 @@ use crate::state_vector::Snapshot;
 use crate::store::Db;
 use crate::store::content_store::ContentStore;
 use crate::types::Capability;
-use crate::{Block, Clock, In, Mounted, Out, Transaction, lib0};
+use crate::{Block, BlockHeader, Clock, In, Mounted, Out, Transaction, lib0};
 use serde::{Deserialize, Serialize};
-use smallvec::smallvec;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
@@ -280,6 +279,10 @@ impl<'a> StringPrelim<'a> {
     fn new(data: &'a str) -> Self {
         StringPrelim { data }
     }
+
+    fn can_inline(&self) -> bool {
+        self.data.len() <= BlockHeader::INLINE_CONTENT_LEN
+    }
 }
 
 impl<'a> Prelim for StringPrelim<'a> {
@@ -293,7 +296,7 @@ impl<'a> Prelim for StringPrelim<'a> {
     fn prepare(&self, insert: &mut InsertBlockData) -> crate::Result<()> {
         let block = insert.as_block_mut();
         block.set_content_type(ContentType::String);
-        insert.content = smallvec![Content::string(self.data)];
+        block.set_inline_content(Content::str(&self.data));
         Ok(())
     }
 
@@ -302,6 +305,11 @@ impl<'a> Prelim for StringPrelim<'a> {
         insert: &mut InsertBlockData,
         tx: &mut Transaction,
     ) -> crate::Result<Self::Return> {
+        if !self.can_inline() {
+            let db = tx.db();
+            let mut contents = db.contents();
+            contents.insert(insert.block.id(), &[Content::str(&self.data)])?;
+        }
         Ok(())
     }
 }
@@ -454,8 +462,7 @@ mod test {
     use crate::test_util::{multi_doc, sync};
     use crate::types::text::{Attrs, Chunk, Delta};
     use crate::write::Encode;
-    use crate::{ListPrelim, Map, MapPrelim, MapRef, Out, StateVector, Text, Unmounted, lib0};
-    use std::pin::Pin;
+    use crate::{ListPrelim, Map, MapPrelim, Out, StateVector, Text, Unmounted, lib0};
 
     #[test]
     fn insert_empty_string() {

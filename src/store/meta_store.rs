@@ -58,7 +58,10 @@ impl<'a> Iter<'a> {
                 match cursor.set_range(&[KEY_PREFIX_META]) {
                     Ok(_) => {
                         let key: &'a [u8] = cursor.key()?;
-                        let key: &'a str = unsafe { std::str::from_utf8_unchecked(key) };
+                        if key[0] != KEY_PREFIX_META {
+                            return Ok(None);
+                        }
+                        let key: &'a str = unsafe { std::str::from_utf8_unchecked(&key[1..]) };
                         let value: &'a [u8] = cursor.value()?;
                         *self = Iter::Init(cursor);
                         Ok(Some((key, value)))
@@ -73,7 +76,7 @@ impl<'a> Iter<'a> {
                     if key[0] != KEY_PREFIX_META {
                         return Ok(None);
                     }
-                    let key: &'a str = unsafe { std::str::from_utf8_unchecked(key) };
+                    let key: &'a str = unsafe { std::str::from_utf8_unchecked(&key[1..]) };
                     let value: &'a [u8] = cursor.value()?;
                     Ok(Some((key, value)))
                 }

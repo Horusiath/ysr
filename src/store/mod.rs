@@ -1,7 +1,8 @@
-use crate::lmdb::{Cursor, Database};
+use crate::lmdb::Database;
 use crate::store::block_store::BlockStore;
 use crate::store::content_store::ContentStore;
 use crate::store::delete_set::DeleteSetStore;
+use crate::store::inspect::DbInspector;
 use crate::store::intern_strings::InternStringsStore;
 pub(crate) use crate::store::map_entries::MapEntriesStore;
 use crate::store::meta_store::MetaStore;
@@ -25,7 +26,6 @@ pub(super) const KEY_PREFIX_MAP: u8 = 0x04;
 pub(super) const KEY_PREFIX_CONTENT: u8 = 0x05;
 
 pub trait Db<'tx> {
-    fn cursor(&self) -> crate::Result<Cursor<'tx>>;
     fn meta(&self) -> MetaStore<'_>;
     fn blocks(&self) -> BlockStore<'_>;
     fn contents(&self) -> ContentStore<'_>;
@@ -33,13 +33,10 @@ pub trait Db<'tx> {
     fn map_entries(&self) -> MapEntriesStore<'_>;
     fn state_vector(&self) -> StateVectorStore<'_>;
     fn delete_set(&self) -> DeleteSetStore<'_>;
+    fn inspect<'a>(&'a self) -> DbInspector<'a, 'tx>;
 }
 
 impl<'tx> Db<'tx> for Database<'tx> {
-    fn cursor(&self) -> crate::Result<Cursor<'tx>> {
-        Ok(self.cursor()?)
-    }
-
     fn meta(&self) -> MetaStore<'_> {
         MetaStore::new(self)
     }
@@ -67,6 +64,10 @@ impl<'tx> Db<'tx> for Database<'tx> {
 
     fn delete_set(&self) -> DeleteSetStore<'_> {
         DeleteSetStore::new(self)
+    }
+
+    fn inspect<'a>(&'a self) -> DbInspector<'a, 'tx> {
+        DbInspector::new(self)
     }
 }
 

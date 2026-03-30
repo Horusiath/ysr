@@ -2,6 +2,7 @@ use crate::block::InsertBlockData;
 use crate::content::{Content, ContentType};
 use crate::integrate::IntegrationContext;
 use crate::lib0::Value;
+use crate::lmdb::Database;
 use crate::node::{Node, NodeType};
 use crate::prelim::Prelim;
 use crate::store::Db;
@@ -9,7 +10,6 @@ use crate::types::Capability;
 use crate::{
     BlockMut, Clock, DynRef, ID, In, Mounted, Optional, Out, Transaction, Unmounted, lib0,
 };
-use crate::lmdb::Database;
 use std::borrow::Cow;
 use std::ops::{Deref, DerefMut, RangeBounds};
 
