@@ -1,6 +1,7 @@
 use crate::content::ContentType;
 use crate::lmdb::{Cursor, Database, Error as LmdbError};
-use crate::node::{Node, NodeType};
+use crate::node::{Named, Node, NodeType};
+use crate::store::intern_strings::InternStringsStore;
 use crate::store::{Db, KEY_PREFIX_BLOCK};
 use crate::{Block, BlockHeader, BlockMut, Error, ID, Optional};
 use std::fmt::{Debug, Formatter};
@@ -48,6 +49,10 @@ impl<'tx> BlockStore<'tx> {
                 Ok(BlockMut::new(node_id, header.clone()))
             }
             Err(LmdbError::NOT_FOUND) if node_id.is_root() => {
+                if let Node::Root(Named::Name(name)) = node {
+                    let strings = InternStringsStore::new(self.db);
+                    strings.intern(name.as_ref())?;
+                }
                 // root types don't carry over extra data
                 let mut header = BlockHeader::empty();
                 header.set_content_type(ContentType::Node);

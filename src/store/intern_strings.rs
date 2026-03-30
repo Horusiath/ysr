@@ -17,14 +17,14 @@ impl<'tx> InternStringsStore<'tx> {
         Self { db }
     }
 
-    pub fn intern(&mut self, value: &str) -> crate::Result<crate::U32> {
+    pub fn intern(&self, value: &str) -> crate::Result<crate::U32> {
         let hash = twox_hash::XxHash32::oneshot(0, value.as_bytes());
         let hash = crate::U32::new(hash);
         self.insert(value, hash)?;
         Ok(hash)
     }
 
-    pub fn insert(&mut self, value: &str, hash: crate::U32) -> crate::Result<()> {
+    pub fn insert(&self, value: &str, hash: crate::U32) -> crate::Result<()> {
         let key = InternStringsKey::new(hash);
         let mut cursor = self.db.cursor()?;
         match cursor.set_key(key.as_bytes()) {
