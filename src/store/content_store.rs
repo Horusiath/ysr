@@ -29,7 +29,7 @@ impl<'a> ContentStore<'a> {
         }
     }
 
-    pub fn insert(&mut self, id: &ID, content: &[Content<'_>]) -> crate::Result<()> {
+    pub fn insert(&self, id: &ID, content: &[Content<'_>]) -> crate::Result<()> {
         let mut id = *id;
         let mut cursor = self.db.cursor()?;
         for content in content {

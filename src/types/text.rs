@@ -297,7 +297,7 @@ impl<'a> Prelim for StringPrelim<'a> {
     fn prepare(&self, insert: &mut InsertBlockData) -> crate::Result<()> {
         let block = insert.as_block_mut();
         block.set_content_type(ContentType::String);
-        block.set_inline_content(Content::str(&self.data));
+        block.set_inline_content(&Content::str(&self.data));
         Ok(())
     }
 
@@ -308,7 +308,7 @@ impl<'a> Prelim for StringPrelim<'a> {
     ) -> crate::Result<Self::Return> {
         if !self.can_inline() {
             let db = tx.db();
-            let mut contents = db.contents();
+            let contents = db.contents();
             contents.insert(insert.block.id(), &[Content::str(&self.data)])?;
         }
         Ok(())

@@ -329,7 +329,7 @@ impl BlockHeader {
         match id {
             Some(id) => {
                 let content = Content::new(ContentType::Node, Cow::Borrowed(id.as_bytes()));
-                self.set_inline_content(content);
+                self.set_inline_content(&content);
             }
             None => {
                 self.clear_inline_content();
@@ -408,7 +408,7 @@ impl BlockHeader {
         self.flags.contains(BlockFlags::COUNTABLE)
     }
 
-    pub fn set_inline_content(&mut self, content: Content<'_>) -> bool {
+    pub fn set_inline_content(&mut self, content: &Content<'_>) -> bool {
         let bytes = content.bytes();
         if bytes.len() <= Self::INLINE_CONTENT_LEN {
             self.inline_content[..bytes.len()].copy_from_slice(bytes);
@@ -952,6 +952,15 @@ impl InsertBlockData {
             _ => { /* do nothing */ }
         }
 
+        let content_inlined = if self.content.len() == 1 {
+            self.block.set_inline_content(&self.content[0])
+        } else {
+            false
+        };
+        if !content_inlined {
+            let contents = db.contents();
+            contents.insert(self.block.id(), self.content.as_ref())?;
+        }
         blocks.insert(self.as_block())?;
 
         let parent_deleted = if let Some(parent_block) = context.parent.as_mut() {
@@ -1223,7 +1232,7 @@ mod test {
             None,
         );
         let mut left = BlockMut::new(ID::new(1.into(), 5.into()), header);
-        assert!(left.set_inline_content(Content::str(&"hello w")));
+        assert!(left.set_inline_content(&Content::str(&"hello w")));
 
         let right = left.split(5.into()).unwrap();
 
@@ -1255,7 +1264,7 @@ mod test {
                 None,
             ),
         );
-        left.set_inline_content(Content::str(&"hello"));
+        left.set_inline_content(&Content::str(&"hello"));
         let mut right = BlockMut::new(
             ID::new(CLIENT, 10.into()),
             BlockHeader::new(
@@ -1268,7 +1277,7 @@ mod test {
                 None,
             ),
         );
-        right.set_inline_content(Content::str(&" w"));
+        right.set_inline_content(&Content::str(&" w"));
 
         assert!(left.merge(right.as_block()));
         assert_eq!(left.clock_len(), Clock::new(7));
@@ -1386,7 +1395,7 @@ mod test {
         );
         insert.block.set_content_type(content.content_type());
         if content.len() <= 8 {
-            insert.block.set_inline_content(content);
+            insert.block.set_inline_content(&content);
         } else {
             insert.content = smallvec![content];
         }
