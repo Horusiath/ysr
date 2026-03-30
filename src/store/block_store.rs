@@ -1,3 +1,4 @@
+use crate::content::ContentType;
 use crate::lmdb::{Cursor, Database, Error as LmdbError};
 use crate::node::{Node, NodeType};
 use crate::store::{Db, KEY_PREFIX_BLOCK};
@@ -49,6 +50,7 @@ impl<'tx> BlockStore<'tx> {
             Err(LmdbError::NOT_FOUND) if node_id.is_root() => {
                 // root types don't carry over extra data
                 let mut header = BlockHeader::empty();
+                header.set_content_type(ContentType::Node);
                 header.set_node_type(node_type);
                 let block = BlockMut::new(node_id, header);
                 self.db.put(key.as_bytes(), block.header().as_bytes())?;
