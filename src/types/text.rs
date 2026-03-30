@@ -136,9 +136,10 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
         let value = StringPrelim::new(chunk.as_ref());
         value.prepare(&mut insert)?;
         let blocks = db.blocks();
-        let mut context = IntegrationContext::create(&mut insert, Clock::new(0), &blocks)?;
-        insert.integrate(&mut db, state, &mut context)?;
+        let mut ctx = IntegrationContext::create(&mut insert, Clock::new(0), &blocks)?;
+        insert.integrate(&mut db, state, &mut ctx)?;
         value.integrate(&mut insert, &mut self.tx)?;
+        self.block = ctx.parent.unwrap();
         Ok(())
     }
 

@@ -131,9 +131,10 @@ impl<'tx, 'db> MapRef<&'tx mut Transaction<'db>> {
         );
         value.prepare(&mut insert)?;
         let blocks = db.blocks();
-        let mut context = IntegrationContext::create(&mut insert, Clock::new(0), &blocks)?;
-        insert.integrate(&mut db, state, &mut context)?;
+        let mut ctx = IntegrationContext::create(&mut insert, Clock::new(0), &blocks)?;
+        insert.integrate(&mut db, state, &mut ctx)?;
         value.integrate(&mut insert, &mut self.tx)?;
+        self.block = ctx.parent.unwrap();
         Ok(())
     }
 
