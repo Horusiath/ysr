@@ -928,11 +928,6 @@ impl InsertBlockData {
             }
         }
 
-        if self.entry_key().is_none() && !self.block.is_deleted() {
-            //TODO: adjust parent length
-            //TODO: linked type joining
-        }
-
         match self.block.content_type() {
             ContentType::Deleted => {
                 tx_state
@@ -960,10 +955,11 @@ impl InsertBlockData {
         blocks.insert(self.as_block())?;
 
         let parent_deleted = if let Some(parent_block) = context.parent.as_mut() {
-            if self.block.is_countable() && !self.block.is_deleted() {
+            if self.entry_key().is_none() && self.block.is_countable() && !self.block.is_deleted() {
                 let parent_len = Clock::new(parent_block.node_len() as u32);
                 parent_block.set_clock_len(parent_len + self.block.clock_len());
             }
+
             let parent = parent_block.as_block();
             let is_deleted = parent.id.is_nested() && parent.is_deleted();
             tx_state.add_changed_type(parent.id, is_deleted, self.block.key_hash());

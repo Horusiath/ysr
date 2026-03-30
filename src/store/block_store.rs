@@ -94,7 +94,8 @@ impl<'tx> BlockCursor<'tx> {
     /// a database before.
     pub fn update(&mut self, block: Block<'_>) -> crate::Result<()> {
         let key = BlockKey::new(*block.id());
-        if self.current_id()? != Some(block.id()) {
+        // cursor may be at invalid position
+        if self.current_id().ok().flatten() != Some(block.id()) {
             self.cursor.set_key(key.as_bytes())?;
         }
         self.cursor.put_current(block.header().as_bytes())?;
