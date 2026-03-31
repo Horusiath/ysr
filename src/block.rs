@@ -228,6 +228,9 @@ impl BlockHeader {
             && id.clock < self.left.clock + self.len // id is smaller than block's end clock
     }
 
+    /// Identifier of the left neighbor block of the current one.
+    /// [Block::left] should always point at the [Block::last_id] of the left block,
+    /// so always seek it using [crate::store::block_store::BlockCursor::seek_containing].
     pub fn left(&self) -> Option<&ID> {
         if self.flags.contains(BlockFlags::LEFT) {
             Some(&self.left)
@@ -248,6 +251,9 @@ impl BlockHeader {
         }
     }
 
+    /// Identifier of the right neighbor block of the current one.
+    /// [Block::right] should always point at the beginning of the block,
+    /// so further seek using [crate::store::block_store::BlockCursor::seek] should work.
     pub fn right(&self) -> Option<&ID> {
         if self.flags.contains(BlockFlags::RIGHT) {
             Some(&self.right)
@@ -959,7 +965,7 @@ impl InsertBlockData {
         };
         if !content_inlined {
             let contents = db.contents();
-            contents.insert(self.block.id(), self.content.as_ref())?;
+            contents.insert_range(*self.block.id(), self.content.as_ref())?;
         }
         blocks.insert(self.as_block())?;
 

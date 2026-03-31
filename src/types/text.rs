@@ -93,8 +93,10 @@ impl<'tx, 'db> Display for TextRef<&'tx Transaction<'db>> {
         let blocks = db.blocks();
         let mut cursor = blocks.cursor().map_err(|_| std::fmt::Error)?;
         let contents = db.contents();
-        while let Some(id) = next {
-            let block = cursor.seek(id).map_err(|_| std::fmt::Error)?;
+        while let Some(right_id) = next {
+            // right id should always point at the beginning of the block, so
+            // direct seek should be fine
+            let block = cursor.seek(right_id).map_err(|_| std::fmt::Error)?;
             if block.is_countable() && !block.is_deleted() {
                 if block.content_type() == ContentType::String {
                     let data = match block.try_inline_data() {
@@ -117,7 +119,12 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
     where
         S: AsRef<str>,
     {
-        let value = StringPrelim::new(chunk.as_ref());
+        let chunk = chunk.as_ref();
+        if chunk.is_empty() {
+            return Ok(());
+        }
+
+        let value = StringPrelim::new(chunk);
         let pos = BlockPosition::seek(self.tx, self.block.start().copied(), index)?;
         let node_id = *self.node_id();
         let (mut db, state) = self.tx.split_mut();
@@ -126,7 +133,7 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
         let right = pos.right.as_ref();
         let mut insert = InsertBlockData::new(
             id,
-            Clock::new(1),
+            value.clock_len(),
             left,
             right,
             left,
@@ -190,7 +197,8 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
     where
         S: AsRef<str>,
     {
-        todo!()
+        let len = self.len();
+        self.insert(len, chunk)
     }
 
     pub fn remove_range<R>(&mut self, range: R) -> crate::Result<()>
@@ -309,7 +317,7 @@ impl<'a> Prelim for StringPrelim<'a> {
         if !self.can_inline() {
             let db = tx.db();
             let contents = db.contents();
-            contents.insert(insert.block.id(), &[Content::str(&self.data)])?;
+            contents.insert(*insert.block.id(), self.data.as_bytes())?;
         }
         Ok(())
     }
@@ -695,7 +703,7 @@ mod test {
 
         drop(txt1);
 
-        let (d2, _) = multi_doc(1);
+        let (d2, _) = multi_doc(2);
         let mut t2 = d2.transact_mut("test").unwrap();
 
         let d2_sv = t2.state_vector().unwrap().encode().unwrap();

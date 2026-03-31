@@ -1,8 +1,10 @@
-use crate::content::ContentType;
+use crate::block::BlockFlags;
+use crate::content::{ContentType, utf16_to_utf8};
 use crate::lmdb::{Cursor, Database, Error as LmdbError};
 use crate::node::{Named, Node, NodeType};
+use crate::store::KEY_PREFIX_BLOCK;
+use crate::store::content_store::ContentStore;
 use crate::store::intern_strings::InternStringsStore;
-use crate::store::{Db, KEY_PREFIX_BLOCK};
 use crate::{Block, BlockHeader, BlockMut, Error, ID, Optional};
 use std::fmt::{Debug, Formatter};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, TryFromBytes};
@@ -68,7 +70,28 @@ impl<'tx> BlockStore<'tx> {
 
     pub fn split(&self, id: ID) -> crate::Result<SplitResult> {
         let mut cursor = self.cursor()?;
-        cursor.split(id)
+        let result = cursor.split(id)?;
+        if let SplitResult::Split(ref left, ref right) = result {
+            // If the block had non-inline string content, we need to split the content store entry too.
+            if left.content_type() == ContentType::String
+                && !left.flags().contains(BlockFlags::INLINE_CONTENT)
+            {
+                let contents = ContentStore::new(self.db);
+                if let Ok(data) = contents.get(*left.id()) {
+                    let source = unsafe { std::str::from_utf8_unchecked(data) };
+                    let utf16_offset = left.clock_len().get() as usize;
+                    if let Some(utf8_offset) = utf16_to_utf8(source, utf16_offset) {
+                        // Copy data before writing, since LMDB may invalidate the pointer
+                        let data = data.to_vec();
+                        let left_bytes = &data[..utf8_offset];
+                        let right_bytes = &data[utf8_offset..];
+                        contents.insert(*left.id(), &left_bytes)?;
+                        contents.insert(*right.id(), &right_bytes)?;
+                    }
+                }
+            }
+        }
+        Ok(result)
     }
 
     pub fn inspect(&self) -> Inspector<'_> {
@@ -254,11 +277,8 @@ impl<'tx> BlockCursor<'tx> {
             Some(right) => {
                 self.update_current(left.header())?;
                 let key = BlockKey::new(*right.id());
-                self.cursor.put(
-                    key.as_bytes(),
-                    right.as_block().header().as_bytes(),
-                    0,
-                )?;
+                self.cursor
+                    .put(key.as_bytes(), right.as_block().header().as_bytes(), 0)?;
                 Ok(SplitResult::Split(left, right))
             }
         }
