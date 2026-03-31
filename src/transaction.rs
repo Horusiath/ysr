@@ -1,8 +1,11 @@
-use crate::block::{Block, BlockMut, ID};
+use crate::block::{Block, BlockMut, ID, InsertBlockData};
 use crate::block_reader::{BlockRange, Carrier, Update};
 use crate::content::{ContentType, FormatAttribute};
 use crate::id_set::IDSet;
+use crate::integrate::IntegrationContext;
+use crate::lmdb::{Database, Dbi, RwTxn};
 use crate::node::{Node, NodeID};
+use crate::prelim::Prelim;
 use crate::read::Decoder;
 use crate::state_vector::Snapshot;
 use crate::store::block_store::{BlockCursor, BlockStore};
@@ -14,7 +17,6 @@ use crate::write::{Encode, Encoder, EncoderV1, WriteExt};
 use crate::{ClientID, Clock, Optional, StateVector, U32};
 use bitflags::bitflags;
 use bytes::{BufMut, Bytes, BytesMut};
-use lmdb_rs_m::{Database, DbHandle};
 use smallvec::{SmallVec, smallvec};
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
@@ -47,8 +49,8 @@ impl TransactionState {
         }
     }
 
-    pub fn next_id(&mut self) -> ID {
-        let clock = self.current_state.inc_by(self.client_id, Clock::new(1));
+    pub fn next_id(&mut self, clock_len: Clock) -> ID {
+        let clock = self.current_state.inc_by(self.client_id, clock_len);
         ID::new(self.client_id, clock)
     }
 
@@ -146,7 +148,7 @@ impl TransactionState {
         Ok(true)
     }
 
-    fn precommit<'db>(
+    fn precommit(
         &mut self,
         db: Database<'_>,
         summary: Option<&mut TransactionSummary>,
@@ -179,7 +181,7 @@ impl TransactionState {
         for (client, &clock) in self.current_state.iter() {
             let before_clock = self.begin_state.get(client);
             if before_clock != clock {
-                cursor.seek_containing(ID::new(*client, clock))?;
+                cursor.seek_containing(ID::new(*client, before_clock))?;
                 Self::merge_with_lefts(&mut cursor, &mut key_changes)?;
             }
         }
@@ -226,16 +228,16 @@ impl TransactionState {
 }
 
 pub struct Transaction<'db> {
-    txn: lmdb_rs_m::Transaction<'db>,
+    txn: RwTxn<'db>,
     client_id: ClientID,
-    handle: DbHandle,
+    handle: Dbi,
     state: Option<Box<TransactionState>>,
 }
 
 impl<'db> Transaction<'db> {
     pub(crate) fn read_write(
-        txn: lmdb_rs_m::Transaction<'db>,
-        handle: DbHandle,
+        txn: RwTxn<'db>,
+        handle: Dbi,
         origin: Option<Origin>,
         client_id: ClientID,
     ) -> crate::Result<Self> {
@@ -259,7 +261,7 @@ impl<'db> Transaction<'db> {
         })
     }
 
-    pub fn db<'tx>(&'tx self) -> Database<'tx> {
+    pub fn db(&self) -> Database<'_> {
         self.txn.bind(&self.handle)
     }
 
@@ -278,7 +280,11 @@ impl<'db> Transaction<'db> {
     }
 
     pub fn state_vector(&self) -> crate::Result<StateVector> {
-        self.db().state_vector().state_vector()
+        if let Some(state) = self.state.as_ref() {
+            Ok(state.current_state.clone())
+        } else {
+            self.db().state_vector().state_vector()
+        }
     }
 
     pub fn incremental_update(&self) -> crate::Result<Vec<u8>> {

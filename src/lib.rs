@@ -5,6 +5,7 @@ mod id_set;
 mod input;
 mod integrate;
 pub mod lib0;
+pub mod lmdb;
 mod multi_doc;
 mod node;
 mod output;
@@ -22,7 +23,6 @@ mod write;
 
 pub use crate::block::{Block, BlockHeader, BlockMut, ID};
 pub use input::In;
-use lmdb_rs_m::MdbError;
 pub use multi_doc::MultiDoc;
 pub use output::Out;
 pub use read::DecoderV1;
@@ -79,7 +79,7 @@ pub enum Error {
     #[error("Client ID is not valid 53-bit integer")]
     ClientIDOutOfRange,
     #[error("LMDB error: {0}")]
-    Lmdb(#[from] lmdb_rs_m::MdbError),
+    Lmdb(#[from] crate::lmdb::Error),
     #[error("expected value couldn't be fit into containing data")]
     ValueTooLarge,
     #[error("hash collision detected on {0}")]
@@ -127,13 +127,13 @@ impl<T> Optional for Result<T, Error> {
     }
 }
 
-impl<T> Optional for Result<T, MdbError> {
-    type Return = Result<Option<T>, MdbError>;
+impl<T> Optional for Result<T, crate::lmdb::Error> {
+    type Return = Result<Option<T>, crate::lmdb::Error>;
 
     fn optional(self) -> Self::Return {
         match self {
             Ok(value) => Ok(Some(value)),
-            Err(MdbError::NotFound) => Ok(None),
+            Err(crate::lmdb::Error::NOT_FOUND) => Ok(None),
             Err(err) => Err(err),
         }
     }

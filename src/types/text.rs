@@ -1,18 +1,16 @@
-use crate::block::{BlockMut, ID, InsertBlockData};
+use crate::block::{ID, InsertBlockData};
 use crate::content::{Content, ContentType};
 use crate::integrate::IntegrationContext;
 use crate::lib0::Value;
-use crate::node::{Named, Node, NodeType};
+use crate::node::{Node, NodeType};
 use crate::prelim::Prelim;
 use crate::state_vector::Snapshot;
 use crate::store::Db;
-use crate::store::block_store::BlockCursor;
+use crate::store::content_store::ContentStore;
 use crate::types::Capability;
-use crate::{Block, Clock, In, Mounted, Out, Transaction};
-use lmdb_rs_m::Database;
+use crate::{Block, BlockHeader, Clock, In, Mounted, Out, Transaction, lib0};
 use serde::{Deserialize, Serialize};
-use smallvec::smallvec;
-use std::cmp::Ordering;
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 use std::ops::{Deref, RangeBounds};
@@ -114,24 +112,34 @@ impl<'tx, 'db> Display for TextRef<&'tx Transaction<'db>> {
     }
 }
 
-impl<'db, 'tx: 'db> TextRef<&'tx mut Transaction<'db>> {
-    pub fn cursor_mut(&mut self) -> crate::Result<TextCursor<'tx, 'db>> {
-        let parent = *self.block.id();
-        let parent = if parent.is_root() {
-            Node::Root(Named::Hash(parent))
-        } else {
-            Node::Nested(parent)
-        };
-        TextCursor::new(self.tx, parent, self.block.start().copied())
-    }
-
+impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
     pub fn insert<S>(&mut self, index: usize, chunk: S) -> crate::Result<()>
     where
         S: AsRef<str>,
     {
-        let mut cursor = self.cursor_mut()?;
-        cursor.seek(index)?;
-        cursor.insert(StringPrelim::new(chunk.as_ref()))?;
+        let value = StringPrelim::new(chunk.as_ref());
+        let pos = BlockPosition::seek(self.tx, self.block.start().copied(), index)?;
+        let node_id = *self.node_id();
+        let (mut db, state) = self.tx.split_mut();
+        let id = state.next_id(value.clock_len());
+        let left = pos.left.as_ref();
+        let right = pos.right.as_ref();
+        let mut insert = InsertBlockData::new(
+            id,
+            Clock::new(1),
+            left,
+            right,
+            left,
+            right,
+            Node::Nested(node_id),
+            None,
+        );
+        value.prepare(&mut insert)?;
+        let blocks = db.blocks();
+        let mut ctx = IntegrationContext::create(&mut insert, Clock::new(0), &blocks)?;
+        insert.integrate(&mut db, state, &mut ctx)?;
+        value.integrate(&mut insert, &mut self.tx)?;
+        self.block = ctx.parent.unwrap();
         Ok(())
     }
 
@@ -143,40 +151,24 @@ impl<'db, 'tx: 'db> TextRef<&'tx mut Transaction<'db>> {
     ) -> crate::Result<()>
     where
         S1: AsRef<str>,
-        S2: AsRef<str>,
-        V: Prelim,
+        S2: Into<String>,
+        V: Into<lib0::Value>,
         A: IntoIterator<Item = (S2, V)>,
     {
-        let mut cursor = self.cursor_mut()?;
-        cursor.seek(index)?;
-
-        let attributes: Vec<_> = attrs.into_iter().collect();
-        if !attributes.is_empty() {
-            todo!("minimize attributes")
+        let mut pos = BlockPosition::seek(self.tx, self.block.start().copied(), index)?;
+        let mut attributes = Attrs::new();
+        for (key, value) in attrs {
+            attributes.insert(key.into(), value.into());
         }
 
-        let mut negated_attrs = Vec::with_capacity(attributes.len());
-        for (attr, value) in attributes {
-            cursor.insert(FormatPrelim::new(attr.as_ref(), value))?;
-            negated_attrs.push(attr);
-        }
-
-        cursor.insert(StringPrelim::new(chunk.as_ref()))?;
-
-        while let Some(attr) = negated_attrs.pop() {
-            cursor.insert(FormatPrelim::<'_, V>::negated(attr.as_ref()))?;
-        }
-
-        Ok(())
+        todo!()
     }
 
     pub fn insert_embed<V>(&mut self, index: usize, value: V) -> crate::Result<V::Return>
     where
         V: Prelim,
     {
-        let mut cursor = self.cursor_mut()?;
-        cursor.seek(index)?;
-        cursor.insert(value)
+        todo!()
     }
 
     pub fn insert_embed_with<S, A, V1, V2>(
@@ -279,145 +271,6 @@ where
     }
 }
 
-pub struct TextCursor<'tx, 'db> {
-    /// Transaction.
-    tx: &'tx mut Transaction<'db>,
-    db: Database<'tx>,
-    block_cursor: BlockCursor<'tx>,
-    left: Option<Block<'tx>>,
-    right: Option<Block<'tx>>,
-    /// Offset within the block, cursor is pointing at.
-    offset: usize,
-    /// Current position of the cursor within the iterated collection.
-    index: usize,
-    /// Attributes applicable at the current cursor's position.
-    attributes: Attrs,
-}
-
-impl<'db, 'tx: 'db> TextCursor<'tx, 'db> {
-    pub fn new(
-        tx: &'tx mut Transaction<'db>,
-        parent: Node<'static>,
-        start: Option<ID>,
-    ) -> crate::Result<Self> {
-        let db = tx.db();
-        let block_cursor = BlockCursor::new(db.cursor()?);
-        Ok(TextCursor {
-            tx,
-            db,
-            block_cursor,
-            left: None,
-            right: None,
-            index: 0,
-            offset: 0,
-            attributes: Default::default(),
-        })
-    }
-    pub fn seek(&mut self, pos: usize) -> crate::Result<()> {
-        match pos.cmp(&self.index) {
-            Ordering::Less => self.backward(self.index - pos),
-            Ordering::Equal => Ok(()),
-            Ordering::Greater => self.forward(pos - self.index),
-        }
-    }
-
-    fn forward(&mut self, mut remaining: usize) -> crate::Result<()> {
-        let db = self.tx.db();
-        let blocks = db.blocks();
-
-        while remaining > 0 {
-            if let Some(block) = &self.curr {
-                if block.is_countable() {
-                    let len = block.len().get() as usize;
-                    if len > remaining {
-                        self.offset = remaining;
-                        break;
-                    } else if len < remaining {
-                        remaining -= len;
-                    }
-                }
-                match block.right() {
-                    None => {
-                        self.curr = None;
-                        break;
-                    }
-                    Some(&right_id) => {
-                        //TODO: use cursor to advance over neighbour blocks
-                        self.curr = Some(blocks.get(right_id)?.into());
-                    }
-                }
-            } else {
-                return Err(crate::Error::OutOfRange);
-            }
-        }
-        Ok(())
-    }
-
-    fn backward(&mut self, mut remaining: usize) -> crate::Result<()> {
-        let db = self.tx.db();
-        let blocks = db.blocks();
-
-        while remaining > 0 {
-            if let Some(block) = &self.curr {
-                if block.is_countable() {
-                    let len = block.len().get() as usize;
-                    if len > remaining {
-                        self.offset = len - remaining;
-                        break;
-                    } else if len < remaining {
-                        remaining -= len;
-                    }
-                }
-                match block.left() {
-                    None => {
-                        self.curr = None;
-                        break;
-                    }
-                    Some(&right_id) => {
-                        //TODO: use cursor to advance over neighbour blocks
-                        self.curr = Some(blocks.get(right_id)?.into());
-                    }
-                }
-            } else {
-                return Err(crate::Error::OutOfRange);
-            }
-        }
-        Ok(())
-    }
-
-    pub fn insert<P: Prelim>(&mut self, prelim: P) -> crate::Result<P::Return> {
-        let left = self.left_id();
-        let right = self.right_id();
-        let (db, state) = self.tx.split_mut();
-        let id = state.next_id();
-        let clock_len = prelim.clock_len();
-        let parent = self.parent.clone();
-        let left = left.as_ref();
-        let right = right.as_ref();
-        let mut insert: InsertBlockData =
-            InsertBlockData::new(id, clock_len, left, right, left, right, parent, None);
-        let result = prelim.integrate(&mut insert, &mut self.tx)?;
-        let (db, state) = self.tx.split_mut();
-        let blocks = db.blocks();
-        if self.offset != 0 {
-            todo!("split block?");
-        }
-        let mut ctx = IntegrationContext::create(&mut insert, Clock::new(0), &blocks)?;
-        insert.integrate(&db, state, &mut ctx)?;
-        Ok(result)
-    }
-
-    pub fn delete(&mut self, len: u32) -> crate::Result<()> {
-        let (mut db, state) = self.tx.split_mut();
-
-        todo!("");
-    }
-
-    fn left_id(&mut self) -> Option<ID> {}
-
-    fn right_id(&mut self) -> Option<ID> {}
-}
-
 #[repr(transparent)]
 struct StringPrelim<'a> {
     data: &'a str,
@@ -426,6 +279,10 @@ struct StringPrelim<'a> {
 impl<'a> StringPrelim<'a> {
     fn new(data: &'a str) -> Self {
         StringPrelim { data }
+    }
+
+    fn can_inline(&self) -> bool {
+        self.data.len() <= BlockHeader::INLINE_CONTENT_LEN
     }
 }
 
@@ -440,7 +297,7 @@ impl<'a> Prelim for StringPrelim<'a> {
     fn prepare(&self, insert: &mut InsertBlockData) -> crate::Result<()> {
         let block = insert.as_block_mut();
         block.set_content_type(ContentType::String);
-        insert.content = smallvec![Content::string(self.data)];
+        block.set_inline_content(&Content::str(&self.data));
         Ok(())
     }
 
@@ -449,6 +306,11 @@ impl<'a> Prelim for StringPrelim<'a> {
         insert: &mut InsertBlockData,
         tx: &mut Transaction,
     ) -> crate::Result<Self::Return> {
+        if !self.can_inline() {
+            let db = tx.db();
+            let contents = db.contents();
+            contents.insert(insert.block.id(), &[Content::str(&self.data)])?;
+        }
         Ok(())
     }
 }
@@ -502,6 +364,97 @@ impl Delta<In> {
     }
 }
 
+struct BlockPosition {
+    attrs: Attrs,
+    index: usize,
+    left: Option<ID>,
+    right: Option<ID>,
+}
+
+impl BlockPosition {
+    fn seek(tx: &Transaction, start: Option<ID>, index: usize) -> crate::Result<Self> {
+        let mut pos = BlockPosition {
+            attrs: Attrs::default(),
+            index: 0,
+            left: None,
+            right: start,
+        };
+        let mut remaining = index;
+        let db = tx.db();
+        let blocks = db.blocks();
+        let mut blocks_cursor = blocks.cursor()?;
+        let contents = db.contents();
+
+        while let Some(right_id) = &pos.right
+            && remaining != 0
+        {
+            let right = blocks_cursor.seek(*right_id)?;
+            if !right.is_deleted() {
+                if right.content_type() == ContentType::Format {
+                    let content = get_content(&right, &contents)?;
+                    let fmt = content.as_format()?;
+                    let fmt_value: lib0::Value = fmt.value()?;
+                    if fmt_value.is_null() {
+                        pos.attrs.remove(fmt.key());
+                    } else {
+                        pos.attrs.insert(fmt.key().to_owned(), fmt_value);
+                    }
+                } else {
+                    let len = right.clock_len().get() as usize;
+                    if remaining < len {
+                        // split right item
+                        let mut split_id = *right_id;
+                        split_id.clock += Clock::new(remaining as u32);
+                        pos.left = Some(split_id);
+                        split_id.clock += Clock::new(1);
+                        pos.right = Some(split_id);
+                        pos.index += remaining;
+                        break;
+                    } else {
+                        remaining -= len;
+                        pos.index += len;
+                    }
+                }
+            }
+            // move to the right
+            pos.left = Some(right.last_id());
+            pos.right = right.right().copied();
+        }
+        Ok(pos)
+    }
+
+    fn minimize(&mut self, attrs: &Attrs) -> crate::Result<()> {
+        todo!()
+        // go right while attrs[right.key] === right.value (or right is deleted)
+        //while let Some(i) = self.right.as_deref() {
+        //    if !i.is_deleted() {
+        //        if let ItemContent::Format(k, v) = &i.content {
+        //            if let Some(v2) = attrs.get(k) {
+        //                if (v.as_ref()).eq(v2) {
+        //                    pos.forward();
+        //                    continue;
+        //                }
+        //            }
+        //        }
+        //
+        //        break;
+        //    } else {
+        //        pos.forward();
+        //    }
+        //}
+    }
+}
+
+fn get_content<'a>(block: &Block<'a>, contents: &'a ContentStore) -> crate::Result<Content<'a>> {
+    match block.try_inline_content() {
+        Some(content) => Ok(content),
+        None => {
+            let data = contents.get(*block.id())?;
+            Ok(Content::new(block.content_type(), Cow::Borrowed(data)))
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
     use crate::block::ID;
@@ -510,8 +463,7 @@ mod test {
     use crate::test_util::{multi_doc, sync};
     use crate::types::text::{Attrs, Chunk, Delta};
     use crate::write::Encode;
-    use crate::{ListPrelim, Map, MapPrelim, MapRef, Out, StateVector, Text, Unmounted, lib0};
-    use std::pin::Pin;
+    use crate::{ListPrelim, Map, MapPrelim, Out, StateVector, Text, Unmounted, lib0};
 
     #[test]
     fn insert_empty_string() {
@@ -804,7 +756,7 @@ mod test {
         txt.insert(0, "aaa").unwrap();
         txt.remove_range(0..3).unwrap();
 
-        assert_eq!(txt.len().unwrap(), 3);
+        assert_eq!(txt.len(), 3);
         assert_eq!(txt.to_string(), "bbb");
 
         tx.commit(None).unwrap();

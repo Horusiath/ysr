@@ -54,18 +54,14 @@ impl<Cap> Unmounted<Cap>
 where
     Cap: Capability,
 {
-    pub fn mount_mut<'tx, 'db, Txn>(
+    pub fn mount_mut<'tx, 'db>(
         &self,
-        tx: &'tx mut Txn,
-    ) -> crate::Result<Mounted<Cap, &'tx mut Transaction<'db>>>
-    where
-        Txn: BorrowMut<Transaction<'db>>,
-    {
-        let borrowed = tx.borrow_mut();
-        let db = borrowed.db();
+        tx: &'tx mut Transaction<'db>,
+    ) -> crate::Result<Mounted<Cap, &'tx mut Transaction<'db>>> {
+        let db = tx.db();
         let blocks = db.blocks();
         let block = blocks.get_or_insert_node(self.node.clone(), Cap::node_type())?;
-        Ok(Mounted::new(block, borrowed))
+        Ok(Mounted::new(block, tx))
     }
 
     pub fn mount<'tx, 'db, Txn>(
@@ -117,5 +113,10 @@ impl<Cap, Txn> Mounted<Cap, Txn> {
 
     pub fn split(self) -> (BlockMut, Txn) {
         (self.block, self.tx)
+    }
+
+    #[inline]
+    pub fn dismount(self) -> Txn {
+        self.tx
     }
 }

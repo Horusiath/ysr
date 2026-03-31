@@ -189,7 +189,7 @@ impl<'a> Content<'a> {
 
     pub fn str<S: AsRef<str>>(data: &'a S) -> Self {
         let str = data.as_ref();
-        Self::new(ContentType::Binary, Cow::Borrowed(str.as_bytes()))
+        Self::new(ContentType::String, Cow::Borrowed(str.as_bytes()))
     }
 
     pub fn node(node_id: &'a NodeID) -> Self {
@@ -532,19 +532,18 @@ impl<'a> FormatAttribute<'a> {
         unsafe { std::str::from_utf8_unchecked(key) }
     }
 
-    pub fn value(&self) -> &[u8] {
+    pub fn value<T: DeserializeOwned>(&self) -> crate::Result<T> {
         let len = self.data[0] as usize;
-        &self.data[(len + 1)..]
+        let data = &self.data[(len + 1)..];
+        let value = lib0::from_slice::<T>(data)?;
+        Ok(value)
     }
 }
 
 impl<'a> Display for FormatAttribute<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let key = self.key();
-        let value: lib0::Value = match lib0::from_slice(self.value()) {
-            Ok(v) => v,
-            Err(_) => return Err(std::fmt::Error),
-        };
+        let value: lib0::Value = self.value().map_err(|_| std::fmt::Error)?;
         write!(f, "\"{}\"={}", key, value)
     }
 }
@@ -994,13 +993,6 @@ impl<'a> Display for BlockContentRef<'a> {
     }
 }
 
-impl<'a> ToMdbValue for BlockContentRef<'a> {
-    fn to_mdb_value(&self) -> MdbValue<'_> {
-        let data = self.data.as_ptr() as *const c_void;
-        let len = self.data.len();
-        unsafe { MdbValue::new(data, len) }
-    }
-}
 
 pub struct ContentIter<'a, E> {
     data: &'a [InlineBytes],

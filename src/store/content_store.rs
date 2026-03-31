@@ -1,8 +1,8 @@
 use crate::ID;
 use crate::block_reader::BlockRange;
 use crate::content::{Content, ContentType};
+use crate::lmdb::{Cursor, Database, Error as LmdbError};
 use crate::store::{Db, KEY_PREFIX_CONTENT, ReadableBytes};
-use lmdb_rs_m::{Cursor, Database, MdbError, MdbValue, ToMdbValue};
 use std::borrow::Cow;
 use std::fmt::{Debug, Formatter};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
@@ -22,19 +22,19 @@ impl<'a> ContentStore<'a> {
 
     pub fn get(&self, key: ID) -> crate::Result<&'a [u8]> {
         let key = BlockContentKey::new(key);
-        match self.db.get(&key.as_bytes()) {
+        match self.db.get(key.as_bytes()) {
             Ok(value) => Ok(value),
-            Err(MdbError::NotFound) => Err(crate::Error::NotFound),
+            Err(LmdbError::NOT_FOUND) => Err(crate::Error::NotFound),
             Err(e) => Err(e.into()),
         }
     }
 
-    pub fn insert(&mut self, id: &ID, content: &[Content<'_>]) -> crate::Result<()> {
+    pub fn insert(&self, id: &ID, content: &[Content<'_>]) -> crate::Result<()> {
         let mut id = *id;
         let mut cursor = self.db.cursor()?;
         for content in content {
             let key = BlockContentKey::new(id);
-            cursor.set(&key, &content.bytes(), 0)?;
+            cursor.put(key.as_bytes(), &content.bytes(), 0)?;
             id.clock += 1; // this will only happen for multipart
         }
         Ok(())
@@ -59,15 +59,15 @@ impl<'a> ContentStore<'a> {
         let mut cursor = self.db.cursor()?;
         let mut curr = *range.head();
         let key = BlockContentKey::new(curr);
-        cursor.to_key(&key)?;
+        cursor.set_key(key.as_bytes())?;
         cursor.del()?;
         let mut deleted_entries = 1;
 
         if is_multipart {
             let end = ID::new(curr.client, range.end());
             while curr != end {
-                cursor.to_next_key()?;
-                curr = match parse_id(cursor.get_key()?)? {
+                cursor.next()?;
+                curr = match parse_id(cursor.key()?)? {
                     Some(id) => *id,
                     None => break,
                 };
@@ -108,16 +108,16 @@ impl<'tx> Debug for Inspect<'tx> {
 
         let mut cursor = self.db.cursor().map_err(|_| std::fmt::Error)?;
         cursor
-            .to_gte_key(&[ContentStore::PREFIX].as_ref())
+            .set_range(&[ContentStore::PREFIX])
             .map_err(|_| std::fmt::Error)?;
         while let Some(id) =
-            parse_id(cursor.get_key().map_err(|_| std::fmt::Error)?).map_err(|_| std::fmt::Error)?
+            parse_id(cursor.key().map_err(|_| std::fmt::Error)?).map_err(|_| std::fmt::Error)?
         {
             s.key(id);
             s.value(&ReadableBytes::new(
-                cursor.get_value().map_err(|_| std::fmt::Error)?,
+                cursor.value().map_err(|_| std::fmt::Error)?,
             ));
-            cursor.to_next_key().map_err(|_| std::fmt::Error)?;
+            cursor.next().map_err(|_| std::fmt::Error)?;
         }
         s.finish()
     }
@@ -136,9 +136,9 @@ enum ReadRangeState<'a> {
 }
 
 impl<'a> ReadRange<'a> {
-    fn new(cursor: &'a Database<'a>, content_type: ContentType, range: BlockRange) -> Self {
+    fn new(db: &'a Database<'a>, content_type: ContentType, range: BlockRange) -> Self {
         ReadRange {
-            state: ReadRangeState::Uninit(cursor),
+            state: ReadRangeState::Uninit(db),
             range,
             content_type,
         }
@@ -148,12 +148,12 @@ impl<'a> ReadRange<'a> {
         match &mut self.state {
             ReadRangeState::Finished => Ok(None),
             ReadRangeState::Init(cursor) => {
-                cursor.to_next_key()?;
+                cursor.next()?;
                 let end = ID::new(self.range.head().client, self.range.end());
-                match parse_id(cursor.get_key()?)? {
+                match parse_id(cursor.key()?)? {
                     Some(&id) if id <= end => {
                         let content =
-                            Content::new(self.content_type, Cow::Borrowed(cursor.get_value()?));
+                            Content::new(self.content_type, Cow::Borrowed(cursor.value()?));
                         Ok(Some(content))
                     }
                     _ => {
@@ -165,9 +165,9 @@ impl<'a> ReadRange<'a> {
             ReadRangeState::Uninit(db) => {
                 let mut cursor = db.cursor()?;
                 let key = BlockContentKey::new(*self.range.head());
-                let value = match cursor.to_key(&key.as_bytes()) {
-                    Ok(_) => Content::new(self.content_type, Cow::Borrowed(cursor.get_value()?)),
-                    Err(MdbError::NotFound) => {
+                let value = match cursor.set_key(key.as_bytes()) {
+                    Ok(_) => Content::new(self.content_type, Cow::Borrowed(cursor.value()?)),
+                    Err(LmdbError::NOT_FOUND) => {
                         self.state = ReadRangeState::Finished;
                         return Ok(None);
                     }
@@ -205,12 +205,5 @@ impl BlockContentKey {
             tag: KEY_PREFIX_CONTENT,
             id,
         }
-    }
-}
-
-impl ToMdbValue for BlockContentKey {
-    fn to_mdb_value(&self) -> MdbValue<'_> {
-        let ptr = std::ptr::from_ref(self) as *const _;
-        unsafe { MdbValue::new(ptr, size_of::<Self>()) }
     }
 }

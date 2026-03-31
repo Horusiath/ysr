@@ -2,6 +2,7 @@ use crate::block::InsertBlockData;
 use crate::content::{Content, ContentType};
 use crate::integrate::IntegrationContext;
 use crate::lib0::Value;
+use crate::lmdb::Database;
 use crate::node::{Node, NodeType};
 use crate::prelim::Prelim;
 use crate::store::Db;
@@ -9,7 +10,6 @@ use crate::types::Capability;
 use crate::{
     BlockMut, Clock, DynRef, ID, In, Mounted, Optional, Out, Transaction, Unmounted, lib0,
 };
-use lmdb_rs_m::Database;
 use std::borrow::Cow;
 use std::ops::{Deref, DerefMut, RangeBounds};
 
@@ -128,7 +128,7 @@ impl<'tx, 'db> ListRef<&'tx mut Transaction<'db>> {
         }
 
         let node: Node = (*self.block.id()).into();
-        let id = state.next_id();
+        let id = state.next_id(value.clock_len());
         let left = left.as_ref();
         let right = right.as_ref();
         let mut insert =
@@ -136,6 +136,7 @@ impl<'tx, 'db> ListRef<&'tx mut Transaction<'db>> {
         value.prepare(&mut insert)?;
         let mut ctx = IntegrationContext::create(&mut insert, Clock::new(0), &blocks)?;
         insert.integrate(&db, state, &mut ctx)?;
+        self.block = ctx.parent.unwrap();
         Ok(())
     }
 

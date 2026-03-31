@@ -1,21 +1,21 @@
+use crate::lmdb::{Env, MDB_DB_CREATE};
 use crate::transaction::Origin;
 use crate::{ClientID, Transaction};
-use lmdb_rs_m::{DbFlags, Environment};
 use rand::random;
 
 pub struct MultiDoc {
     client_id: ClientID,
-    env: Environment,
+    env: Env,
 }
 
 impl MultiDoc {
-    pub fn new(env: Environment, client_id: ClientID) -> Self {
+    pub fn new(env: Env, client_id: ClientID) -> Self {
         MultiDoc { env, client_id }
     }
 
     pub fn transact_mut(&self, doc_id: &str) -> crate::Result<Transaction<'_>> {
-        let handle = self.env.create_db(doc_id, DbFlags::DbCreate)?;
-        let tx = self.env.new_transaction()?;
+        let handle = self.env.create_db(doc_id, MDB_DB_CREATE)?;
+        let tx = self.env.begin_rw_txn()?;
         Transaction::read_write(tx, handle, None, self.client_id)
     }
 
@@ -25,15 +25,15 @@ impl MultiDoc {
         origin: O,
     ) -> crate::Result<Transaction<'_>> {
         let origin = origin.into();
-        let handle = self.env.create_db(doc_id, DbFlags::DbCreate)?;
-        let tx = self.env.new_transaction()?;
+        let handle = self.env.create_db(doc_id, MDB_DB_CREATE)?;
+        let tx = self.env.begin_rw_txn()?;
         Transaction::read_write(tx, handle, Some(origin), self.client_id)
     }
 }
 
-impl From<Environment> for MultiDoc {
+impl From<Env> for MultiDoc {
     #[inline]
-    fn from(value: Environment) -> Self {
+    fn from(value: Env) -> Self {
         Self::new(value, random::<u32>().into())
     }
 }
@@ -88,13 +88,15 @@ mod test {
         // create new document at A and add some initial text to it
         let (d1, _) = multi_doc(1);
         let mut t1 = d1.transact_mut("test").unwrap();
-        let mut txt1 = txt.mount_mut(&mut t1).unwrap();
+        {
+            let mut txt1 = txt.mount_mut(&mut t1).unwrap();
 
-        txt1.insert(0, "hello").unwrap();
-        txt1.insert(5, " ").unwrap();
-        txt1.insert(6, "world").unwrap();
+            txt1.insert(0, "hello").unwrap();
+            txt1.insert(5, " ").unwrap();
+            txt1.insert(6, "world").unwrap();
 
-        assert_eq!(txt1.to_string(), "hello world");
+            assert_eq!(txt1.to_string(), "hello world");
+        }
 
         // create document at B
         let (d2, _) = multi_doc(2);

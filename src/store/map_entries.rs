@@ -1,7 +1,7 @@
 use crate::ID;
+use crate::lmdb::{Cursor, Database, Error as LmdbError};
 use crate::node::NodeID;
 use crate::store::{Db, KEY_PREFIX_MAP};
-use lmdb_rs_m::{Cursor, Database, MdbError, MdbValue, ToMdbValue};
 use smallvec::{ExtendFromSlice, SmallVec};
 use std::fmt::{Debug, Formatter};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
@@ -9,26 +9,26 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 #[repr(transparent)]
 #[derive(Clone, Copy)]
 pub struct MapEntriesStore<'tx> {
-    db: &'tx lmdb_rs_m::Database<'tx>,
+    db: &'tx Database<'tx>,
 }
 
 impl<'tx> MapEntriesStore<'tx> {
     pub const PREFIX: u8 = KEY_PREFIX_MAP;
-    pub fn new(db: &'tx lmdb_rs_m::Database<'tx>) -> Self {
+    pub fn new(db: &'tx Database<'tx>) -> Self {
         Self { db }
     }
 
     pub fn insert(&self, node_id: &NodeID, key: &str, id: &ID) -> crate::Result<()> {
         let key = MapKey::create(node_id, key);
-        self.db.set(&key.as_bytes(), &id.as_bytes())?;
+        self.db.put(key.as_bytes(), id.as_bytes())?;
         Ok(())
     }
 
     pub fn get(&self, node_id: &NodeID, key: &str) -> crate::Result<Option<&'tx ID>> {
         let key = MapKey::create(node_id, key);
-        match self.db.get(&key.as_bytes()) {
+        match self.db.get(key.as_bytes()) {
             Ok(value) => Ok(Some(ID::parse(value)?)),
-            Err(MdbError::NotFound) => Ok(None),
+            Err(LmdbError::NOT_FOUND) => Ok(None),
             Err(e) => Err(e.into()),
         }
     }
@@ -44,23 +44,23 @@ impl<'tx> MapEntriesStore<'tx> {
     pub fn remove_all(&self, node_id: &NodeID) -> crate::Result<usize> {
         let key = MapEntriesKey::new(*node_id);
         let mut cursor = self.db.cursor()?;
-        match cursor.to_gte_key(&key.as_bytes()) {
+        match cursor.set_range(key.as_bytes()) {
             Ok(_) => { /* cursor position set */ }
-            Err(MdbError::NotFound) => return Ok(0),
+            Err(LmdbError::NOT_FOUND) => return Ok(0),
             Err(e) => return Err(e.into()),
         }
 
         let mut deleted_entries = 0;
-        while let Some(key) = MapKey::parse(cursor.get_key()?) {
+        while let Some(key) = MapKey::parse(cursor.key()?) {
             if key.node_id() != node_id {
                 break;
             }
 
             cursor.del()?;
             deleted_entries += 1;
-            match cursor.to_next_key() {
+            match cursor.next() {
                 Ok(_) => {}
-                Err(MdbError::NotFound) => break,
+                Err(LmdbError::NOT_FOUND) => break,
                 Err(e) => return Err(e.into()),
             }
         }
@@ -104,35 +104,36 @@ impl<'tx> HashKeys<'tx> {
         match &mut self.state {
             HashKeysState::Uninit(db) => {
                 let mut cursor = db.cursor()?;
-                match cursor.to_gte_key(&self.prefix.as_ref()) {
+                match cursor.set_range(self.prefix.as_ref()) {
                     Ok(_) => {
-                        let key: &'tx [u8] = cursor.get_key()?;
+                        let key: &'tx [u8] = cursor.key()?;
                         if !key.starts_with(&self.prefix) {
                             self.finish()
                         } else {
-                            let value: &'tx ID = ID::parse(cursor.get_value()?)?;
+                            let value: &'tx ID = ID::parse(cursor.value()?)?;
                             let str: &'tx [u8] = &key[self.prefix.len()..];
                             let str = unsafe { std::str::from_utf8_unchecked(str) };
+                            self.state = HashKeysState::Init(cursor);
                             Ok(Some((str, value)))
                         }
                     }
-                    Err(MdbError::NotFound) => self.finish(),
+                    Err(LmdbError::NOT_FOUND) => self.finish(),
                     Err(e) => Err(e.into()),
                 }
             }
-            HashKeysState::Init(cursor) => match cursor.to_next_key() {
+            HashKeysState::Init(cursor) => match cursor.next() {
                 Ok(_) => {
-                    let key: &'tx [u8] = cursor.get_key()?;
+                    let key: &'tx [u8] = cursor.key()?;
                     if !key.starts_with(&self.prefix) {
                         self.finish()
                     } else {
-                        let value: &'tx ID = ID::parse(cursor.get_value()?)?;
+                        let value: &'tx ID = ID::parse(cursor.value()?)?;
                         let str: &'tx [u8] = &key[self.prefix.len()..];
                         let str = unsafe { std::str::from_utf8_unchecked(str) };
                         Ok(Some((str, value)))
                     }
                 }
-                Err(MdbError::NotFound) => self.finish(),
+                Err(LmdbError::NOT_FOUND) => self.finish(),
                 Err(e) => Err(e.into()),
             },
             HashKeysState::Finished => Ok(None),
@@ -166,7 +167,7 @@ impl<'tx> MapEntries<'tx> {
 
     pub fn block_id(&mut self) -> crate::Result<&'tx ID> {
         if let MapEntriesState::Init(cursor) = &mut self.state {
-            let value: &'tx [u8] = cursor.get_value()?;
+            let value: &'tx [u8] = cursor.value()?;
             let id: &'tx ID = ID::parse(value)?;
             Ok(id)
         } else {
@@ -179,14 +180,14 @@ impl<'tx> MapEntries<'tx> {
             MapEntriesState::Uninit(db) => {
                 let mut cursor = db.cursor()?;
                 let key = MapEntriesKey::new(self.node_id);
-                match cursor.to_gte_key(&key.as_bytes()) {
-                    Err(MdbError::NotFound) => {
+                match cursor.set_range(key.as_bytes()) {
+                    Err(LmdbError::NOT_FOUND) => {
                         self.state = MapEntriesState::Finished;
                         Ok(None)
                     }
                     Err(e) => Err(e.into()),
                     Ok(_) => {
-                        if let Some(key) = MapKey::parse(cursor.get_key()?)
+                        if let Some(key) = MapKey::parse(cursor.key()?)
                             && key.node_id() == &self.node_id
                         {
                             self.state = MapEntriesState::Init(cursor);
@@ -198,9 +199,9 @@ impl<'tx> MapEntries<'tx> {
                     }
                 }
             }
-            MapEntriesState::Init(cursor) => match cursor.to_next_key() {
+            MapEntriesState::Init(cursor) => match cursor.next() {
                 Ok(_) => {
-                    if let Some(key) = MapKey::parse(cursor.get_key()?)
+                    if let Some(key) = MapKey::parse(cursor.key()?)
                         && key.node_id() == &self.node_id
                     {
                         Ok(Some(key))
@@ -209,7 +210,7 @@ impl<'tx> MapEntries<'tx> {
                         Ok(None)
                     }
                 }
-                Err(MdbError::NotFound) => {
+                Err(LmdbError::NOT_FOUND) => {
                     self.state = MapEntriesState::Finished;
                     Ok(None)
                 }
@@ -283,12 +284,6 @@ impl MapEntriesKey {
     }
 }
 
-impl ToMdbValue for MapEntriesKey {
-    fn to_mdb_value(&self) -> MdbValue<'_> {
-        MdbValue::new_from_sized(self)
-    }
-}
-
 pub struct Iter<'tx> {
     state: IterState<'tx>,
 }
@@ -309,15 +304,15 @@ impl<'tx> Iter<'tx> {
         match &mut self.state {
             IterState::Uninit(db) => {
                 let mut cursor = db.cursor()?;
-                match cursor.to_gte_key(&[MapEntriesStore::PREFIX].as_bytes()) {
-                    Err(MdbError::NotFound) => {
+                match cursor.set_range(&[MapEntriesStore::PREFIX]) {
+                    Err(LmdbError::NOT_FOUND) => {
                         self.state = IterState::Finished;
                         Ok(None)
                     }
                     Err(e) => Err(e.into()),
                     Ok(_) => {
-                        if let Some(key) = MapKey::parse(cursor.get_key()?) {
-                            let value: &'tx [u8] = cursor.get_value()?;
+                        if let Some(key) = MapKey::parse(cursor.key()?) {
+                            let value: &'tx [u8] = cursor.value()?;
                             let id: &'tx ID = ID::parse(value)?;
                             self.state = IterState::Init(cursor);
                             Ok(Some((key, id)))
@@ -328,10 +323,10 @@ impl<'tx> Iter<'tx> {
                     }
                 }
             }
-            IterState::Init(cursor) => match cursor.to_next_key() {
+            IterState::Init(cursor) => match cursor.next() {
                 Ok(_) => {
-                    if let Some(key) = MapKey::parse(cursor.get_key()?) {
-                        let value: &'tx [u8] = cursor.get_value()?;
+                    if let Some(key) = MapKey::parse(cursor.key()?) {
+                        let value: &'tx [u8] = cursor.value()?;
                         let id: &'tx ID = ID::parse(value)?;
                         Ok(Some((key, id)))
                     } else {
@@ -339,7 +334,7 @@ impl<'tx> Iter<'tx> {
                         Ok(None)
                     }
                 }
-                Err(MdbError::NotFound) => {
+                Err(LmdbError::NOT_FOUND) => {
                     self.state = IterState::Finished;
                     Ok(None)
                 }

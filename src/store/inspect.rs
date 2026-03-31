@@ -1,18 +1,18 @@
+use crate::lmdb::Database;
 use crate::store::Db;
-use lmdb_rs_m::Database;
 use std::fmt::Debug;
 
-pub struct DbInspector<'tx> {
-    db: &'tx mut Database<'tx>,
+pub struct DbInspector<'a, 'tx> {
+    db: &'a Database<'tx>,
 }
 
-impl<'tx> DbInspector<'tx> {
-    pub fn new(db: &'tx mut Database<'tx>) -> Self {
+impl<'a, 'tx> DbInspector<'a, 'tx> {
+    pub fn new(db: &'a Database<'tx>) -> Self {
         DbInspector { db }
     }
 }
 
-impl<'tx> Debug for DbInspector<'tx> {
+impl<'a, 'tx> Debug for DbInspector<'a, 'tx> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         let sv = self
             .db

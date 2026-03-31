@@ -8,7 +8,7 @@ where
 {
     let client_id = client_id.into();
     let dir = TempDir::new().unwrap();
-    let env = lmdb_rs_m::Environment::builder()
+    let env = crate::lmdb::Env::builder()
         .max_dbs(10)
         .open(dir.path(), 0o600)
         .unwrap();

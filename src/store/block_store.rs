@@ -1,10 +1,10 @@
-use crate::node::{Node, NodeType};
+use crate::content::ContentType;
+use crate::lmdb::{Cursor, Database, Error as LmdbError};
+use crate::node::{Named, Node, NodeType};
+use crate::store::intern_strings::InternStringsStore;
 use crate::store::{Db, KEY_PREFIX_BLOCK};
 use crate::{Block, BlockHeader, BlockMut, Error, ID, Optional};
-use lmdb_rs_m::{Database, MdbError, MdbValue, ToMdbValue};
 use std::fmt::{Debug, Formatter};
-use std::ops::{Deref, DerefMut};
-use std::pin::Pin;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, TryFromBytes};
 
 #[repr(transparent)]
@@ -25,9 +25,9 @@ impl<'tx> BlockStore<'tx> {
 
     pub fn get(&self, id: ID) -> crate::Result<Block<'tx>> {
         let key = BlockKey::new(id);
-        match self.db.get(&key.as_bytes()) {
+        match self.db.get(key.as_bytes()) {
             Ok(value) => Ok(Block::new(id, value)?),
-            Err(MdbError::NotFound) => Err(crate::Error::NotFound),
+            Err(LmdbError::NOT_FOUND) => Err(crate::Error::NotFound),
             Err(e) => Err(e.into()),
         }
     }
@@ -35,28 +35,33 @@ impl<'tx> BlockStore<'tx> {
     /// Inserts a new block into database.
     pub fn insert(&self, block: Block<'_>) -> crate::Result<()> {
         let key = BlockKey::new(*block.id());
-        self.db.set(&key, block.header())?;
+        self.db.put(key.as_bytes(), block.header().as_bytes())?;
         Ok(())
     }
 
     pub fn get_or_insert_node(&self, node: Node, node_type: NodeType) -> crate::Result<BlockMut> {
         let node_id = node.id();
         let key = BlockKey::new(node_id);
-        match self.db.get(&key) {
+        match self.db.get(key.as_bytes()) {
             Ok(value) => {
                 let header: &BlockHeader = BlockHeader::try_ref_from_bytes(value)
                     .map_err(|_| crate::Error::MalformedBlock(node_id))?;
                 Ok(BlockMut::new(node_id, header.clone()))
             }
-            Err(MdbError::NotFound) if node_id.is_root() => {
+            Err(LmdbError::NOT_FOUND) if node_id.is_root() => {
+                if let Node::Root(Named::Name(name)) = node {
+                    let strings = InternStringsStore::new(self.db);
+                    strings.intern(name.as_ref())?;
+                }
                 // root types don't carry over extra data
                 let mut header = BlockHeader::empty();
+                header.set_content_type(ContentType::Node);
                 header.set_node_type(node_type);
                 let block = BlockMut::new(node_id, header);
-                self.db.set(&key, block.header())?;
+                self.db.put(key.as_bytes(), block.header().as_bytes())?;
                 Ok(block)
             }
-            Err(MdbError::NotFound) => Err(crate::Error::NotFound),
+            Err(LmdbError::NOT_FOUND) => Err(crate::Error::NotFound),
             Err(e) => Err(e.into()),
         }
     }
@@ -72,19 +77,20 @@ impl<'tx> BlockStore<'tx> {
 }
 
 pub struct BlockCursor<'tx> {
-    cursor: lmdb_rs_m::Cursor<'tx>,
+    cursor: Cursor<'tx>,
 }
 
 impl<'tx> BlockCursor<'tx> {
     const PREFIX: u8 = KEY_PREFIX_BLOCK;
 
-    pub fn new(cursor: lmdb_rs_m::Cursor<'tx>) -> Self {
+    pub fn new(cursor: Cursor<'tx>) -> Self {
         BlockCursor { cursor }
     }
 
     pub fn insert(&mut self, block: Block<'_>) -> crate::Result<()> {
         let key = BlockKey::new(*block.id());
-        self.cursor.set(&key, &block.header().as_bytes(), 0)?;
+        self.cursor
+            .put(key.as_bytes(), block.header().as_bytes(), 0)?;
         Ok(())
     }
 
@@ -93,20 +99,21 @@ impl<'tx> BlockCursor<'tx> {
     /// a database before.
     pub fn update(&mut self, block: Block<'_>) -> crate::Result<()> {
         let key = BlockKey::new(*block.id());
-        if self.current_id()? != Some(block.id()) {
-            self.cursor.to_key(&key)?;
+        // cursor may be at invalid position
+        if self.current_id().ok().flatten() != Some(block.id()) {
+            self.cursor.set_key(key.as_bytes())?;
         }
-        self.cursor.replace(block.header())?;
+        self.cursor.put_current(block.header().as_bytes())?;
         Ok(())
     }
 
     /// Returns an [ID] of the block at the current position.
     /// Returns `None` if current cursor position is outside the block boundaries.
     pub fn current_id(&mut self) -> crate::Result<Option<&ID>> {
-        let key: &'tx [u8] = match self.cursor.get_key() {
+        let key: &'tx [u8] = match self.cursor.key() {
             Ok(key) => key,
             // we reached the boundary of the database or cursor was not set yet
-            Err(MdbError::NotFound) => return Ok(None),
+            Err(LmdbError::NOT_FOUND) => return Ok(None),
             Err(e) => return Err(e.into()),
         };
         if key[0] == Self::PREFIX {
@@ -123,7 +130,7 @@ impl<'tx> BlockCursor<'tx> {
         match self.current_id()? {
             None => Err(crate::Error::NotFound),
             Some(&id) => {
-                let value: &'tx [u8] = self.cursor.get_value()?;
+                let value: &'tx [u8] = self.cursor.value()?;
                 Ok(Block::new(id, value)?)
             }
         }
@@ -132,9 +139,9 @@ impl<'tx> BlockCursor<'tx> {
     /// Move cursor to the beginning of the block store space.
     pub fn start_from(&mut self, id: ID) -> crate::Result<()> {
         let key = BlockKey::new(id);
-        match self.cursor.to_gte_key(&key.as_bytes()) {
+        match self.cursor.set_range(key.as_bytes()) {
             Ok(_) => Ok(()),
-            Err(MdbError::NotFound) => Err(crate::Error::NotFound),
+            Err(LmdbError::NOT_FOUND) => Err(crate::Error::NotFound),
             Err(e) => Err(e.into()),
         }
     }
@@ -143,9 +150,9 @@ impl<'tx> BlockCursor<'tx> {
     /// Returns true if block has been found.
     pub fn seek(&mut self, id: ID) -> crate::Result<Block<'tx>> {
         let key = BlockKey::new(id);
-        match self.cursor.to_key(&key) {
+        match self.cursor.set_key(key.as_bytes()) {
             Ok(_) => self.current(),
-            Err(MdbError::NotFound) => Err(crate::Error::NotFound),
+            Err(LmdbError::NOT_FOUND) => Err(crate::Error::NotFound),
             Err(e) => Err(e.into()),
         }
     }
@@ -155,7 +162,7 @@ impl<'tx> BlockCursor<'tx> {
     pub fn seek_containing(&mut self, id: ID) -> crate::Result<Block<'tx>> {
         let key = BlockKey::new(id);
         // try to seek to the exact key first
-        match self.cursor.to_gte_key(&key) {
+        match self.cursor.set_range(key.as_bytes()) {
             Ok(()) => {
                 if let Some(block) = self.current().optional()?
                     && block.id() == &id
@@ -164,7 +171,7 @@ impl<'tx> BlockCursor<'tx> {
                     return Ok(block);
                 }
             }
-            Err(lmdb_rs_m::MdbError::NotFound) => { /* no >= key found */ }
+            Err(LmdbError::NOT_FOUND) => { /* no >= key found */ }
             Err(e) => return Err(Error::Lmdb(e)),
         }
 
@@ -186,15 +193,21 @@ impl<'tx> BlockCursor<'tx> {
     /// Moves current cursor position to a next block, returning it.
     /// Returns `None` if current cursor position is outside the block boundaries.
     pub fn next(&mut self) -> crate::Result<Option<Block<'tx>>> {
-        self.cursor.to_next_key()?;
-        self.current().optional()
+        match self.cursor.next() {
+            Ok(_) => self.current().map(Some),
+            Err(LmdbError::NOT_FOUND) => return Ok(None),
+            Err(e) => return Err(e.into()),
+        }
     }
 
     /// Moves current cursor position to a previous block, returning it.
     /// Returns `None` if current cursor position is outside the block boundaries.
     pub fn prev(&mut self) -> crate::Result<Option<Block<'tx>>> {
-        self.cursor.to_prev_key()?;
-        self.current().optional()
+        match self.cursor.prev() {
+            Ok(_) => self.current().map(Some),
+            Err(LmdbError::NOT_FOUND) => return Ok(None),
+            Err(e) => return Err(e.into()),
+        }
     }
 
     /// Moves current cursor position to a block, that's a right neighbor of the current block.
@@ -229,7 +242,7 @@ impl<'tx> BlockCursor<'tx> {
 
     #[inline]
     pub fn update_current(&mut self, header: &BlockHeader) -> crate::Result<()> {
-        self.cursor.replace(header)?;
+        self.cursor.put_current(header.as_bytes())?;
         Ok(())
     }
 
@@ -240,8 +253,11 @@ impl<'tx> BlockCursor<'tx> {
             None => Ok(SplitResult::Unchanged(left)),
             Some(right) => {
                 self.update_current(left.header())?;
-                self.cursor
-                    .set(&right.id().as_bytes(), &right.as_block().as_bytes(), 0)?;
+                self.cursor.put(
+                    right.id().as_bytes(),
+                    right.as_block().header().as_bytes(),
+                    0,
+                )?;
                 Ok(SplitResult::Split(left, right))
             }
         }
@@ -266,13 +282,6 @@ impl BlockKey {
             tag: KEY_PREFIX_BLOCK,
             id,
         }
-    }
-}
-
-impl ToMdbValue for BlockKey {
-    fn to_mdb_value(&self) -> MdbValue<'_> {
-        let ptr = std::ptr::from_ref(self) as *const _;
-        unsafe { MdbValue::new(ptr, size_of::<Self>()) }
     }
 }
 

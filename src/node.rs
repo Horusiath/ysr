@@ -1,9 +1,9 @@
-use crate::block::{BlockHeader, ID};
-use crate::{ClientID, U64};
+use crate::ClientID;
+use crate::block::ID;
 use bitflags::bitflags;
 use std::borrow::Cow;
 use std::fmt::Display;
-use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes, KnownLayout, TryFromBytes};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, TryFromBytes};
 
 pub type NodeID = ID;
 
