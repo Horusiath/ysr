@@ -253,8 +253,9 @@ impl<'tx> BlockCursor<'tx> {
             None => Ok(SplitResult::Unchanged(left)),
             Some(right) => {
                 self.update_current(left.header())?;
+                let key = BlockKey::new(*right.id());
                 self.cursor.put(
-                    right.id().as_bytes(),
+                    key.as_bytes(),
                     right.as_block().header().as_bytes(),
                     0,
                 )?;
