@@ -128,7 +128,7 @@ impl<'tx, 'db> ListRef<&'tx mut Transaction<'db>> {
         }
 
         let node: Node = (*self.block.id()).into();
-        let id = state.next_id();
+        let id = state.next_id(value.clock_len());
         let left = left.as_ref();
         let right = right.as_ref();
         let mut insert =

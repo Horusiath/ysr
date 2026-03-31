@@ -117,10 +117,11 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
     where
         S: AsRef<str>,
     {
+        let value = StringPrelim::new(chunk.as_ref());
         let pos = BlockPosition::seek(self.tx, self.block.start().copied(), index)?;
         let node_id = *self.node_id();
         let (mut db, state) = self.tx.split_mut();
-        let id = state.next_id();
+        let id = state.next_id(value.clock_len());
         let left = pos.left.as_ref();
         let right = pos.right.as_ref();
         let mut insert = InsertBlockData::new(
@@ -133,7 +134,6 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
             Node::Nested(node_id),
             None,
         );
-        let value = StringPrelim::new(chunk.as_ref());
         value.prepare(&mut insert)?;
         let blocks = db.blocks();
         let mut ctx = IntegrationContext::create(&mut insert, Clock::new(0), &blocks)?;

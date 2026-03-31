@@ -49,8 +49,8 @@ impl TransactionState {
         }
     }
 
-    pub fn next_id(&mut self) -> ID {
-        let clock = self.current_state.inc_by(self.client_id, Clock::new(1));
+    pub fn next_id(&mut self, clock_len: Clock) -> ID {
+        let clock = self.current_state.inc_by(self.client_id, clock_len);
         ID::new(self.client_id, clock)
     }
 
@@ -181,7 +181,7 @@ impl TransactionState {
         for (client, &clock) in self.current_state.iter() {
             let before_clock = self.begin_state.get(client);
             if before_clock != clock {
-                cursor.seek_containing(ID::new(*client, clock))?;
+                cursor.seek_containing(ID::new(*client, before_clock))?;
                 Self::merge_with_lefts(&mut cursor, &mut key_changes)?;
             }
         }
@@ -280,7 +280,11 @@ impl<'db> Transaction<'db> {
     }
 
     pub fn state_vector(&self) -> crate::Result<StateVector> {
-        self.db().state_vector().state_vector()
+        if let Some(state) = self.state.as_ref() {
+            Ok(state.current_state.clone())
+        } else {
+            self.db().state_vector().state_vector()
+        }
     }
 
     pub fn incremental_update(&self) -> crate::Result<Vec<u8>> {

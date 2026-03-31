@@ -116,9 +116,9 @@ impl<'tx, 'db> MapRef<&'tx mut Transaction<'db>> {
         let key = key.as_ref();
         let node_id = *self.node_id();
         let (mut db, state) = self.tx.split_mut();
+        let id = state.next_id(value.clock_len());
         let map_entries = db.map_entries();
         let left_id = map_entries.get(&node_id, key)?;
-        let id = state.next_id();
         let mut insert = InsertBlockData::new(
             id,
             Clock::new(1),
