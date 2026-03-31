@@ -29,8 +29,13 @@ impl<'a> ContentStore<'a> {
         }
     }
 
-    pub fn insert(&self, id: &ID, content: &[Content<'_>]) -> crate::Result<()> {
-        let mut id = *id;
+    pub fn insert(&self, id: ID, data: &[u8]) -> crate::Result<()> {
+        let key = BlockContentKey::new(id);
+        self.db.put(key.as_bytes(), data)?;
+        Ok(())
+    }
+
+    pub fn insert_range(&self, mut id: ID, content: &[Content<'_>]) -> crate::Result<()> {
         let mut cursor = self.db.cursor()?;
         for content in content {
             let key = BlockContentKey::new(id);

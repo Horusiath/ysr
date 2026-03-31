@@ -23,7 +23,7 @@ impl IntegrationContext {
         let left = if let Some(&origin) = target.block.origin_left() {
             Some(match blocks.split(origin)? {
                 SplitResult::Unchanged(left) => left.into(),
-                SplitResult::Split(left, _) => left,
+                SplitResult::Split(_, right) => right,
             })
         } else {
             None
@@ -149,6 +149,24 @@ impl IntegrationContext {
             o = item.right().cloned();
         }
         target.block.set_left(left.as_ref());
+
+        // After conflict resolution, the block's left neighbor may have changed.
+        // Update context.left to match the resolved position.
+        match target.block.left() {
+            Some(&left_id) => {
+                let needs_update = if let Some(current_left) = self.left.as_ref() {
+                    current_left.last_id() != left_id
+                } else {
+                    true
+                };
+                if needs_update {
+                    self.left = cursor.seek_containing(left_id).ok().map(BlockMut::from);
+                }
+            }
+            None => {
+                self.left = None;
+            }
+        }
 
         Ok(())
     }
