@@ -1,7 +1,7 @@
-use crate::ID;
 use crate::lmdb::{Cursor, Database, Error as LmdbError};
 use crate::node::NodeID;
 use crate::store::{Db, KEY_PREFIX_MAP};
+use crate::{ID, Optional, U32};
 use smallvec::{ExtendFromSlice, SmallVec};
 use std::fmt::{Debug, Formatter};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
@@ -32,8 +32,20 @@ impl<'tx> MapEntriesStore<'tx> {
             Err(e) => Err(e.into()),
         }
     }
+    pub(crate) fn insert_first(
+        &self,
+        node_id: NodeID,
+        hash: U32,
+        block_id: &ID,
+    ) -> crate::Result<()> {
+        let mut cursor = self.db.cursor()?;
+        let key = HashKeyPrefix::new(node_id, hash);
+        cursor.set_range(key.as_bytes())?;
+        cursor.put_current(block_id.as_bytes())?;
+        Ok(())
+    }
 
-    pub fn keys_for_hash(&self, node_id: &NodeID, hash: &crate::U32) -> HashKeys<'tx> {
+    pub fn keys_for_hash(&self, node_id: NodeID, hash: crate::U32) -> HashKeys<'tx> {
         HashKeys::new(self.db, node_id, hash)
     }
 
@@ -77,8 +89,26 @@ impl<'tx> MapEntriesStore<'tx> {
 }
 
 pub struct HashKeys<'tx> {
-    prefix: [u8; 13],
+    prefix: HashKeyPrefix,
     state: HashKeysState<'tx>,
+}
+
+#[repr(C, packed)]
+#[derive(Copy, Clone, Debug, IntoBytes, FromBytes, Immutable, KnownLayout)]
+struct HashKeyPrefix {
+    tag: u8,
+    node_id: NodeID,
+    hash: crate::U32,
+}
+
+impl HashKeyPrefix {
+    pub fn new(node_id: NodeID, hash: crate::U32) -> Self {
+        HashKeyPrefix {
+            tag: MapEntriesStore::PREFIX,
+            node_id,
+            hash,
+        }
+    }
 }
 
 enum HashKeysState<'tx> {
@@ -88,11 +118,8 @@ enum HashKeysState<'tx> {
 }
 
 impl<'tx> HashKeys<'tx> {
-    pub fn new(db: &'tx Database<'tx>, node_id: &NodeID, hash: &crate::U32) -> Self {
-        let mut key: [u8; 13] = [0; 13];
-        key[0] = MapEntriesStore::PREFIX;
-        key[1..(1 + size_of::<NodeID>())].copy_from_slice(node_id.as_bytes());
-        key[(1 + size_of::<NodeID>())..].copy_from_slice(hash.as_bytes());
+    pub fn new(db: &'tx Database<'tx>, node_id: NodeID, hash: crate::U32) -> Self {
+        let mut key = HashKeyPrefix::new(node_id, hash);
 
         HashKeys {
             prefix: key,
@@ -104,14 +131,14 @@ impl<'tx> HashKeys<'tx> {
         match &mut self.state {
             HashKeysState::Uninit(db) => {
                 let mut cursor = db.cursor()?;
-                match cursor.set_range(self.prefix.as_ref()) {
+                match cursor.set_range(self.prefix.as_bytes()) {
                     Ok(_) => {
                         let key: &'tx [u8] = cursor.key()?;
-                        if !key.starts_with(&self.prefix) {
+                        if !key.starts_with(self.prefix.as_bytes()) {
                             self.finish()
                         } else {
                             let value: &'tx ID = ID::parse(cursor.value()?)?;
-                            let str: &'tx [u8] = &key[self.prefix.len()..];
+                            let str: &'tx [u8] = &key[size_of::<HashKeyPrefix>()..];
                             let str = unsafe { std::str::from_utf8_unchecked(str) };
                             self.state = HashKeysState::Init(cursor);
                             Ok(Some((str, value)))
@@ -124,11 +151,11 @@ impl<'tx> HashKeys<'tx> {
             HashKeysState::Init(cursor) => match cursor.next() {
                 Ok(_) => {
                     let key: &'tx [u8] = cursor.key()?;
-                    if !key.starts_with(&self.prefix) {
+                    if !key.starts_with(self.prefix.as_bytes()) {
                         self.finish()
                     } else {
                         let value: &'tx ID = ID::parse(cursor.value()?)?;
-                        let str: &'tx [u8] = &key[self.prefix.len()..];
+                        let str: &'tx [u8] = &key[size_of::<HashKeyPrefix>()..];
                         let str = unsafe { std::str::from_utf8_unchecked(str) };
                         Ok(Some((str, value)))
                     }

@@ -134,9 +134,9 @@ impl IntegrationContext {
                 }
             } else {
                 if let Some(origin_left) = item.origin_left().and_then(|&id| blocks.get(id).ok()) {
-                    if items_before_origin.contains(&origin_left.id()) {
-                        if !conflicting_items.contains(&origin_left.id()) {
-                            left = Some(origin_left.id().clone());
+                    if items_before_origin.contains(origin_left.id()) {
+                        if !conflicting_items.contains(origin_left.id()) {
+                            left = Some(*item.id());
                             conflicting_items.clear();
                         }
                     } else {

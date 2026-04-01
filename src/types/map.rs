@@ -787,7 +787,7 @@ mod test {
 
         let orders: Unmounted<List> = map.get("orders").unwrap();
         let orders: ListRef<_> = orders.mount_mut(&mut tx).unwrap();
-        let actual: Vec<Order> = lib0::from_value(&orders.to_value().unwrap()).unwrap();
+        let actual: Vec<Order> = lib0::from_value(orders.to_value().unwrap()).unwrap();
         assert_eq!(actual, vec![expected]);
 
         tx.commit(None).unwrap();

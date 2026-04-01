@@ -467,7 +467,7 @@ impl<'a> Block<'a> {
 
     pub fn range(&self) -> BlockRange {
         let id = *self.id();
-        BlockRange::new(id, id.clock + self.len)
+        BlockRange::new(id, id.clock + self.len - 1)
     }
 
     pub(crate) fn info_flags(&self) -> u8 {
@@ -872,6 +872,7 @@ impl InsertBlockData {
 
         // reconnect left/right + update parent map/start if necessary
         if let Some(left) = &mut context.left {
+            self.block.set_left(Some(&left.last_id()));
             self.block.set_right(left.right());
             left.set_right(Some(self.id()));
         } else {
@@ -918,12 +919,19 @@ impl InsertBlockData {
             }
             let right = context.right.as_mut().unwrap();
             right.set_left(Some(self.id()));
-        } else if let Some(entry_key) = self.entry_key() {
+        } else if self.is_map_entry() {
             // set as current parent value if right === null and this is parentSub
             let map_entries = db.map_entries();
-            map_entries.insert(&parent_id, entry_key, self.id())?;
+            if let Some(entry_key) = self.entry_key() {
+                map_entries.insert(&parent_id, entry_key, self.id())?;
+            } else if let Some(&key_hash) = self.block.key_hash() {
+                // Block received via wire with origin_left — key string was not transmitted,
+                // only the hash was inherited from a neighbor. Look up the actual key string
+                // from existing map entries.
+                map_entries.insert_first(parent_id, key_hash, self.id())?;
+            }
 
-            // this is the current attribute value of parent. delete right
+            // this is the current attribute value of parent. delete left
             if let Some(left) = context.left.as_mut() {
                 let parent_deleted = context
                     .parent
@@ -967,6 +975,11 @@ impl InsertBlockData {
             let contents = db.contents();
             contents.insert_range(*self.block.id(), self.content.as_ref())?;
         }
+        // For Node blocks, len represents node_len (number of children, initially 0).
+        // clock_len() for Node always returns 1 hardcoded, so len is free for node_len.
+        if self.block.content_type() == ContentType::Node {
+            self.block.set_clock_len(Clock::new(0));
+        }
         blocks.insert(self.as_block())?;
 
         let parent_deleted = if let Some(parent_block) = context.parent.as_mut() {
@@ -1004,6 +1017,10 @@ impl InsertBlockData {
         }
 
         Ok(())
+    }
+
+    fn is_map_entry(&self) -> bool {
+        self.entry.is_some() || self.block.key_hash().is_some()
     }
 }
 

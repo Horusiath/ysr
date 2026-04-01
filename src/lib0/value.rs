@@ -1,8 +1,39 @@
 use bytes::Bytes;
-use serde::de::{Error, MapAccess, SeqAccess, Visitor};
+use serde::de::value::StringDeserializer;
+use serde::de::{DeserializeSeed, Error, IntoDeserializer, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
+use std::collections::hash_map::Drain;
 use std::fmt::{Debug, Display, Formatter};
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum ValueKind {
+    Undefined,
+    Null,
+    Int,
+    Float,
+    Bool,
+    String,
+    Object,
+    Array,
+    ByteArray,
+}
+
+impl Display for ValueKind {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ValueKind::Undefined => write!(f, "undefined"),
+            ValueKind::Null => write!(f, "null"),
+            ValueKind::Int => write!(f, "int"),
+            ValueKind::Float => write!(f, "float"),
+            ValueKind::Bool => write!(f, "bool"),
+            ValueKind::String => write!(f, "string"),
+            ValueKind::Object => write!(f, "object"),
+            ValueKind::Array => write!(f, "array"),
+            ValueKind::ByteArray => write!(f, "binary"),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
@@ -18,6 +49,20 @@ pub enum Value {
 }
 
 impl Value {
+    pub fn kind(&self) -> ValueKind {
+        match self {
+            Value::Undefined => ValueKind::Undefined,
+            Value::Null => ValueKind::Null,
+            Value::Int(_) => ValueKind::Int,
+            Value::Float(_) => ValueKind::Float,
+            Value::Bool(_) => ValueKind::Bool,
+            Value::String(_) => ValueKind::String,
+            Value::Object(_) => ValueKind::Object,
+            Value::Array(_) => ValueKind::Array,
+            Value::ByteArray(_) => ValueKind::ByteArray,
+        }
+    }
+
     pub fn is_undefined(&self) -> bool {
         matches!(self, Value::Undefined)
     }
@@ -252,5 +297,387 @@ impl Display for Value {
                 write!(f, "{}", base64)
             }
         }
+    }
+}
+
+impl<'de> Deserializer<'de> for Value {
+    type Error = super::Error;
+
+    #[inline]
+    fn deserialize_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        match self {
+            Value::Undefined => visitor.visit_unit(),
+            Value::Null => visitor.visit_unit(),
+            Value::Int(value) => visitor.visit_i64(value), //TODO: number coercion
+            Value::Float(value) => visitor.visit_f64(value), //TODO: number coercion
+            Value::Bool(value) => visitor.visit_bool(value),
+            Value::String(value) => visitor.visit_string(value),
+            Value::Object(mut value) => visitor.visit_map(MapDeserializer::new(value.drain())),
+            Value::Array(value) => visit_array(value, visitor),
+            Value::ByteArray(value) => visitor.visit_byte_buf(value.into()),
+        }
+    }
+
+    fn deserialize_bool<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        match self {
+            Value::Bool(value) => visitor.visit_bool(value),
+            other => Err(super::Error::InvalidType(other.kind())),
+        }
+    }
+
+    #[inline]
+    fn deserialize_i8<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        self.deserialize_i64(visitor)
+    }
+
+    #[inline]
+    fn deserialize_i16<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        self.deserialize_i64(visitor)
+    }
+
+    #[inline]
+    fn deserialize_i32<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        self.deserialize_i64(visitor)
+    }
+
+    fn deserialize_i64<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        match self {
+            Value::Int(value) => visitor.visit_i64(value),
+            Value::Float(value) if (value as i64 as f64) == value => {
+                visitor.visit_i64(value as i64)
+            }
+            other => Err(super::Error::InvalidType(other.kind())),
+        }
+    }
+
+    #[inline]
+    fn deserialize_u8<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        self.deserialize_u64(visitor)
+    }
+
+    #[inline]
+    fn deserialize_u16<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        self.deserialize_u64(visitor)
+    }
+
+    #[inline]
+    fn deserialize_u32<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        self.deserialize_u64(visitor)
+    }
+
+    fn deserialize_u64<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        match self {
+            Value::Int(value) if value.is_positive() => visitor.visit_u64(value as u64),
+            Value::Float(value) if (value as u64 as f64) == value => {
+                visitor.visit_u64(value as u64)
+            }
+            other => Err(super::Error::InvalidType(other.kind())),
+        }
+    }
+
+    #[inline]
+    fn deserialize_f32<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        self.deserialize_f64(visitor)
+    }
+
+    fn deserialize_f64<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        match self {
+            Value::Int(value) if (value as f64 as i64) == value => visitor.visit_f64(value as f64),
+            Value::Float(value) => visitor.visit_f64(value),
+            other => Err(super::Error::InvalidType(other.kind())),
+        }
+    }
+
+    #[inline]
+    fn deserialize_char<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        self.deserialize_str(visitor)
+    }
+
+    #[inline]
+    fn deserialize_str<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        self.deserialize_string(visitor)
+    }
+
+    fn deserialize_string<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        match self {
+            Value::String(value) => visitor.visit_string(value),
+            other => Err(super::Error::InvalidType(other.kind())),
+        }
+    }
+
+    #[inline]
+    fn deserialize_bytes<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        self.deserialize_byte_buf(visitor)
+    }
+
+    fn deserialize_byte_buf<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        match self {
+            Value::ByteArray(value) => visitor.visit_byte_buf(value.into()),
+            other => Err(super::Error::InvalidType(other.kind())),
+        }
+    }
+
+    fn deserialize_option<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        match self {
+            Value::Undefined | Value::Null => visitor.visit_none(),
+            other => visitor.visit_some(other),
+        }
+    }
+
+    fn deserialize_unit<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        match self {
+            Value::Undefined | Value::Null => visitor.visit_none(),
+            other => Err(super::Error::InvalidType(other.kind())),
+        }
+    }
+
+    #[inline]
+    fn deserialize_unit_struct<V>(
+        self,
+        name: &'static str,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        self.deserialize_unit(visitor)
+    }
+
+    #[inline]
+    fn deserialize_newtype_struct<V>(
+        self,
+        name: &'static str,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_newtype_struct(self)
+    }
+
+    fn deserialize_seq<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        match self {
+            Value::Array(array) => visit_array(array, visitor),
+            other => Err(super::Error::InvalidType(other.kind())),
+        }
+    }
+
+    #[inline]
+    fn deserialize_tuple<V>(self, _len: usize, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        self.deserialize_seq(visitor)
+    }
+
+    #[inline]
+    fn deserialize_tuple_struct<V>(
+        self,
+        _name: &'static str,
+        len: usize,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        self.deserialize_tuple(len, visitor)
+    }
+
+    fn deserialize_map<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        match self {
+            Value::Object(mut map) => visitor.visit_map(MapDeserializer::new(map.into_iter())),
+            other => Err(super::Error::InvalidType(other.kind())),
+        }
+    }
+
+    #[inline]
+    fn deserialize_struct<V>(
+        self,
+        name: &'static str,
+        fields: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        self.deserialize_map(visitor)
+    }
+
+    fn deserialize_enum<V>(
+        self,
+        name: &'static str,
+        variants: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        match self {
+            Value::String(str) => visitor.visit_enum(str.into_deserializer()),
+            other => Err(super::Error::InvalidType(other.kind())),
+        }
+    }
+
+    #[inline]
+    fn deserialize_identifier<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        self.deserialize_str(visitor)
+    }
+
+    #[inline]
+    fn deserialize_ignored_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_unit()
+    }
+}
+
+fn visit_array<'de, V>(values: Vec<Value>, visitor: V) -> Result<V::Value, super::Error>
+where
+    V: Visitor<'de>,
+{
+    let mut deserializer = SeqDeserializer::new(values.into_iter());
+    visitor.visit_seq(&mut deserializer)
+}
+
+#[repr(transparent)]
+struct SeqDeserializer<I> {
+    iter: I,
+}
+
+impl<I> SeqDeserializer<I> {
+    fn new(iter: I) -> Self {
+        SeqDeserializer { iter }
+    }
+}
+
+impl<'de, I: Iterator<Item = Value> + ExactSizeIterator> SeqAccess<'de> for SeqDeserializer<I> {
+    type Error = super::Error;
+
+    fn next_element_seed<T>(&mut self, seed: T) -> Result<Option<T::Value>, Self::Error>
+    where
+        T: DeserializeSeed<'de>,
+    {
+        match self.iter.next() {
+            None => Ok(None),
+            Some(value) => seed.deserialize(value).map(Some),
+        }
+    }
+
+    fn size_hint(&self) -> Option<usize> {
+        Some(self.iter.len())
+    }
+}
+
+struct MapDeserializer<I> {
+    iter: I,
+    current: Option<Value>,
+}
+
+impl<I> MapDeserializer<I> {
+    fn new(iter: I) -> Self {
+        MapDeserializer {
+            iter,
+            current: None,
+        }
+    }
+}
+
+impl<'de, I: Iterator<Item = (String, Value)> + ExactSizeIterator> MapAccess<'de>
+    for MapDeserializer<I>
+{
+    type Error = super::Error;
+
+    fn next_key_seed<K>(&mut self, seed: K) -> Result<Option<K::Value>, Self::Error>
+    where
+        K: DeserializeSeed<'de>,
+    {
+        match self.iter.next() {
+            None => Ok(None),
+            Some((key, value)) => {
+                self.current = Some(value);
+                seed.deserialize(StringDeserializer::new(key)).map(Some)
+            }
+        }
+    }
+
+    fn next_value_seed<V>(&mut self, seed: V) -> Result<V::Value, Self::Error>
+    where
+        V: DeserializeSeed<'de>,
+    {
+        match self.current.take() {
+            None => Err(super::Error::Custom("value is missing".into())),
+            Some(value) => seed.deserialize(value),
+        }
+    }
+
+    fn size_hint(&self) -> Option<usize> {
+        Some(self.iter.len())
     }
 }

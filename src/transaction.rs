@@ -309,7 +309,16 @@ impl<'db> Transaction<'db> {
         let blocks = db.blocks();
         let mut block_cursor = blocks.cursor()?;
         // in order to build delete set we need to go through all the blocks anyway
-        block_cursor.start_from(ID::new(1.into(), 0.into()))?;
+        match block_cursor.start_from(ID::new(1.into(), 0.into())) {
+            Ok(_) => {}
+            Err(crate::Error::NotFound) => {
+                // no blocks to encode
+                writer.write_var(0usize)?;
+                IDSet::default().encode_with(&mut writer)?;
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        }
 
         let mut current_client = ClientID::ROOT;
         let mut min_state = Clock::new(0);
@@ -430,16 +439,16 @@ impl<'db> Transaction<'db> {
         }
         if info & 0b1100_0000 == 0 {
             // left/right origins were not provided
-            let parent_id = block.parent();
+            let parent_id = *block.parent();
             if parent_id.is_root() {
                 let parent_name = strings.get(parent_id.clock)?;
                 writer.write_parent_info(true)?;
                 writer.write_string(parent_name)?;
             } else {
                 writer.write_parent_info(false)?;
-                writer.write_left_id(parent_id)?;
+                writer.write_left_id(&parent_id)?;
             }
-            if let Some(key_hash) = block.key_hash() {
+            if let Some(&key_hash) = block.key_hash() {
                 let entry_key = Self::entry_key_for(map_entries, parent_id, key_hash, block.id())?;
                 writer.write_string(entry_key)?;
             }
@@ -507,8 +516,8 @@ impl<'db> Transaction<'db> {
 
     fn entry_key_for<'a>(
         map_entries: &MapEntriesStore<'a>,
-        parent_id: &NodeID,
-        key_hash: &U32,
+        parent_id: NodeID,
+        key_hash: U32,
         block_id: &ID,
     ) -> crate::Result<&'a str> {
         let mut i = map_entries.keys_for_hash(parent_id, key_hash);
