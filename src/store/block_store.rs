@@ -217,7 +217,7 @@ impl<'tx> BlockCursor<'tx> {
     /// Returns `None` if current cursor position is outside the block boundaries.
     pub fn next(&mut self) -> crate::Result<Option<Block<'tx>>> {
         match self.cursor.next() {
-            Ok(_) => self.current().map(Some),
+            Ok(_) => self.current().optional(),
             Err(LmdbError::NOT_FOUND) => return Ok(None),
             Err(e) => return Err(e.into()),
         }
@@ -227,7 +227,7 @@ impl<'tx> BlockCursor<'tx> {
     /// Returns `None` if current cursor position is outside the block boundaries.
     pub fn prev(&mut self) -> crate::Result<Option<Block<'tx>>> {
         match self.cursor.prev() {
-            Ok(_) => self.current().map(Some),
+            Ok(_) => self.current().optional(),
             Err(LmdbError::NOT_FOUND) => return Ok(None),
             Err(e) => return Err(e.into()),
         }

@@ -1,8 +1,8 @@
-use crate::ID;
 use crate::block_reader::BlockRange;
 use crate::content::{Content, ContentType};
 use crate::lmdb::{Cursor, Database, Error as LmdbError};
 use crate::store::{Db, KEY_PREFIX_CONTENT, ReadableBytes};
+use crate::{ID, Optional};
 use std::borrow::Cow;
 use std::fmt::{Debug, Formatter};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
@@ -152,21 +152,26 @@ impl<'a> ReadRange<'a> {
     pub fn next(&mut self) -> crate::Result<Option<Content<'a>>> {
         match &mut self.state {
             ReadRangeState::Finished => Ok(None),
-            ReadRangeState::Init(cursor) => {
-                cursor.next()?;
-                let end = ID::new(self.range.head().client, self.range.end());
-                match parse_id(cursor.key()?)? {
-                    Some(&id) if id <= end => {
-                        let content =
-                            Content::new(self.content_type, Cow::Borrowed(cursor.value()?));
-                        Ok(Some(content))
-                    }
-                    _ => {
-                        self.state = ReadRangeState::Finished;
-                        Ok(None)
+            ReadRangeState::Init(cursor) => match cursor.next().optional()? {
+                Some(_) => {
+                    let end = ID::new(self.range.head().client, self.range.end());
+                    match parse_id(cursor.key()?)? {
+                        Some(&id) if id <= end => {
+                            let content =
+                                Content::new(self.content_type, Cow::Borrowed(cursor.value()?));
+                            Ok(Some(content))
+                        }
+                        _ => {
+                            self.state = ReadRangeState::Finished;
+                            Ok(None)
+                        }
                     }
                 }
-            }
+                None => {
+                    self.state = ReadRangeState::Finished;
+                    Ok(None)
+                }
+            },
             ReadRangeState::Uninit(db) => {
                 let mut cursor = db.cursor()?;
                 let key = BlockContentKey::new(*self.range.head());
