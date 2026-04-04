@@ -51,13 +51,13 @@ impl<R: Read> Deserializer<R> {
         }
     }
 
-    fn deserialize_any_tagged<'de, V>(
-        &'de mut self,
+    fn deserialize_any_tagged<'v, V>(
+        &mut self,
         tag: Tag,
         visitor: V,
     ) -> Result<V::Value, super::Error>
     where
-        V: Visitor<'de>,
+        V: Visitor<'v>,
     {
         match tag {
             Tag::Undefined => visitor.visit_unit(),
@@ -97,7 +97,7 @@ impl<R: Read> Deserializer<R> {
     }
 }
 
-impl<'de, R: Read> serde::Deserializer<'de> for &'de mut Deserializer<R> {
+impl<'a, 'de, R: Read> serde::Deserializer<'de> for &'a mut Deserializer<R> {
     type Error = super::Error;
 
     fn deserialize_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>
@@ -412,10 +412,7 @@ impl<'a, R: Read> Access<'a, R> {
     }
 }
 
-impl<'a, 'de, R: Read> de::SeqAccess<'de> for Access<'a, R>
-where
-    'a: 'de,
-{
+impl<'a, 'de, R: Read> de::SeqAccess<'de> for Access<'a, R> {
     type Error = super::Error;
 
     #[inline]
@@ -425,9 +422,7 @@ where
     {
         if self.len > 0 {
             self.len -= 1;
-            //FIXME: fix borrow checker error
-            let de: &'a mut Deserializer<R> = unsafe { std::mem::transmute(&mut *self.de) };
-            seed.deserialize(de).map(Some)
+            seed.deserialize(&mut *self.de).map(Some)
         } else {
             Ok(None)
         }
@@ -439,10 +434,7 @@ where
     }
 }
 
-impl<'a, 'de, R: Read> de::MapAccess<'de> for Access<'a, R>
-where
-    'a: 'de,
-{
+impl<'a, 'de, R: Read> de::MapAccess<'de> for Access<'a, R> {
     type Error = super::Error;
 
     #[inline]
@@ -452,9 +444,7 @@ where
     {
         if self.len > 0 {
             self.len -= 1;
-            //FIXME: fix borrow checker error
-            let de: &'a mut Deserializer<R> = unsafe { std::mem::transmute(&mut *self.de) };
-            seed.deserialize(MapKey { de }).map(Some)
+            seed.deserialize(MapKey { de: &mut *self.de }).map(Some)
         } else {
             Ok(None)
         }
@@ -465,9 +455,7 @@ where
     where
         V: DeserializeSeed<'de>,
     {
-        //FIXME: fix borrow checker error
-        let de: &'a mut Deserializer<R> = unsafe { std::mem::transmute(&mut *self.de) };
-        seed.deserialize(de)
+        seed.deserialize(&mut *self.de)
     }
 
     #[inline]
@@ -476,10 +464,7 @@ where
     }
 }
 
-impl<'a, 'de, R: Read> de::EnumAccess<'de> for Access<'a, R>
-where
-    'a: 'de,
-{
+impl<'a, 'de, R: Read> de::EnumAccess<'de> for Access<'a, R> {
     type Error = super::Error;
     type Variant = Self;
 
@@ -491,10 +476,7 @@ where
     }
 }
 
-impl<'a, 'de, R: Read> de::VariantAccess<'de> for Access<'a, R>
-where
-    'a: 'de,
-{
+impl<'a, 'de, R: Read> de::VariantAccess<'de> for Access<'a, R> {
     type Error = super::Error;
 
     fn unit_variant(self) -> Result<(), Self::Error> {

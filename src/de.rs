@@ -989,7 +989,7 @@ impl<'de> MapAccess<'de> for MapNodeDeserializer<'de> {
                 let current = self.blocks.get(id)?;
                 if !current.is_deleted() {
                     self.current = Some(current);
-                    let deserializer = key.key().into_deserializer();
+                    let deserializer: serde::de::value::StrDeserializer<'_, Error> = key.key().into_deserializer();
                     let value: K::Value = seed.deserialize(deserializer)?;
                     Ok(Some(value))
                 } else {
