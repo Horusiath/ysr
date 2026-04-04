@@ -125,6 +125,7 @@ impl<'tx, 'db> ListRef<&'tx mut Transaction<'db>> {
         value.prepare(&mut insert)?;
         let mut ctx = IntegrationContext::create(&mut insert, Clock::new(0), &blocks)?;
         insert.integrate(&db, state, &mut ctx)?;
+        value.integrate(&mut insert, &mut self.tx)?;
         self.block = ctx.parent.unwrap();
         Ok(())
     }
