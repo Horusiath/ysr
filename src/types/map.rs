@@ -1,5 +1,6 @@
 use crate::block::{BlockMut, ID, InsertBlockData};
-use crate::content::{Content, ContentType};
+use crate::content::ContentType;
+use crate::de::BlockDeserializer;
 use crate::integrate::IntegrationContext;
 use crate::lmdb::Database;
 use crate::node::{Node, NodeID, NodeType};
@@ -8,7 +9,7 @@ use crate::store::map_entries::{MapEntries, MapKey};
 use crate::store::{Db, MapEntriesStore};
 use crate::types::Capability;
 use crate::{Clock, Error, In, Mounted, Optional, Transaction, Unmounted, lib0};
-use std::borrow::Cow;
+use serde::de::DeserializeOwned;
 use std::collections::{BTreeMap, HashMap};
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
@@ -28,7 +29,7 @@ impl<'tx, 'db> MapRef<&'tx Transaction<'db>> {
     pub fn get<K, V>(&self, key: K) -> crate::Result<V>
     where
         K: AsRef<str>,
-        V: for<'a> TryFrom<Content<'a>, Error = Error>,
+        V: DeserializeOwned,
     {
         let db = self.tx.db();
         let map_entries = db.map_entries();
@@ -40,16 +41,9 @@ impl<'tx, 'db> MapRef<&'tx Transaction<'db>> {
         if block.is_deleted() {
             Err(Error::NotFound)
         } else {
-            let content = match block.try_inline_content() {
-                Some(content) => content, // content small enough to fit inline block header
-                None => {
-                    // we need to reach for the content store
-                    let content_store = db.contents();
-                    let content = content_store.get(*block.id())?;
-                    Content::new(block.content_type(), Cow::Borrowed(content))
-                }
-            };
-            V::try_from(content)
+            let contents = db.contents();
+            let deserializer = BlockDeserializer::new(block, blocks, contents);
+            V::deserialize(deserializer)
         }
     }
 
@@ -94,7 +88,7 @@ impl<'tx, 'db> MapRef<&'tx Transaction<'db>> {
         Iter::new(db, *self.node_id())
     }
 
-    pub fn to_value(&self) -> crate::Result<crate::lib0::Value> {
+    pub fn to_value(&self) -> crate::Result<lib0::Value> {
         let mut map = HashMap::default();
         let mut iter = self.iter();
         while let Some(e) = iter.next()? {
@@ -103,7 +97,7 @@ impl<'tx, 'db> MapRef<&'tx Transaction<'db>> {
             map.insert(key, value);
         }
 
-        Ok(crate::lib0::Value::Object(map))
+        Ok(lib0::Value::Object(map))
     }
 }
 
@@ -245,22 +239,15 @@ impl<'a, 'db> Entry<'a, 'db> {
 
     pub fn value<T>(&self) -> crate::Result<T>
     where
-        T: for<'b> TryFrom<Content<'b>, Error = crate::Error>,
+        T: DeserializeOwned,
     {
         let blocks = self.db.blocks();
         let block = blocks.get(self.block_id)?;
         if !block.is_deleted() {
-            let content = match block.try_inline_content() {
-                Some(content) => content,
-                None => {
-                    let contents = self.db.contents();
-                    let data = contents.get(self.block_id)?;
-                    Content::new(block.content_type(), Cow::Borrowed(data))
-                }
-            };
-            T::try_from(content)
+            let deserializer = BlockDeserializer::new(block, blocks, self.db.contents());
+            T::deserialize(deserializer)
         } else {
-            T::try_from(Content::DELETED)
+            Err(Error::NotFound)
         }
     }
 }

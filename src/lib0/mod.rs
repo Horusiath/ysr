@@ -5,9 +5,9 @@ use std::io::{Read, Write};
 use std::str::Utf8Error;
 
 mod copy;
-mod de;
+pub mod de;
 mod macros;
-mod ser;
+pub mod ser;
 #[cfg(test)]
 mod test;
 mod value;

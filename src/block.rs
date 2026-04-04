@@ -8,7 +8,7 @@ use crate::store::block_store::SplitResult;
 use crate::transaction::TransactionState;
 use crate::{ClientID, Clock, Optional, U32};
 use crate::{Error, Result};
-use bitflags::{Flags, bitflags};
+use bitflags::bitflags;
 use bytes::Bytes;
 use serde::de::{SeqAccess, Visitor};
 use serde::ser::SerializeTuple;
@@ -504,6 +504,11 @@ impl<'a> Block<'a> {
     pub fn try_inline_content(&self) -> Option<Content<'a>> {
         let header: &'a BlockHeader = self.header;
         header.try_inline_content()
+    }
+
+    pub fn try_inline_data(&self) -> Option<&'a [u8]> {
+        let header: &'a BlockHeader = self.header;
+        header.try_inline_data()
     }
 }
 
@@ -1146,9 +1151,8 @@ mod test {
     use crate::block::{ID, InsertBlockData};
     use crate::content::{Content, ContentType};
     use crate::node::{Node, NodeID};
-    use crate::{BlockHeader, BlockMut, ClientID, Clock, lib0};
+    use crate::{BlockHeader, BlockMut, ClientID, Clock};
     use serde::{Deserialize, Serialize};
-    use serde_json::json;
     use smallvec::smallvec;
 
     const CLIENT: ClientID = unsafe { ClientID::new_unchecked(123) };

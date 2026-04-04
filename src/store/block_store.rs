@@ -25,6 +25,11 @@ impl<'tx> BlockStore<'tx> {
         Ok(BlockCursor::new(cursor))
     }
 
+    #[inline]
+    pub fn inner(&self) -> &'tx Database<'tx> {
+        self.db
+    }
+
     pub fn get(&self, id: ID) -> crate::Result<Block<'tx>> {
         let key = BlockKey::new(id);
         match self.db.get(key.as_bytes()) {

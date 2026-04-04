@@ -10,7 +10,7 @@ use std::io::Read;
 
 const DEFAULT_INLINE_STRING_SIZE: usize = 16;
 
-pub(super) struct Deserializer<R> {
+pub struct Deserializer<R> {
     reader: R,
     peeked_tag: Option<u8>,
 }

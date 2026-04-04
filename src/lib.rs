@@ -1,6 +1,7 @@
 mod block;
 mod block_reader;
 mod content;
+mod de;
 mod id_set;
 mod input;
 mod integrate;

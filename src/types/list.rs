@@ -1,5 +1,6 @@
 use crate::block::InsertBlockData;
 use crate::content::{Content, ContentType};
+use crate::de::BlockDeserializer;
 use crate::integrate::IntegrationContext;
 use crate::lib0::Value;
 use crate::lmdb::Database;
@@ -10,6 +11,7 @@ use crate::types::Capability;
 use crate::{
     BlockMut, Clock, DynRef, ID, In, Mounted, Optional, Out, Transaction, Unmounted, lib0,
 };
+use serde::de::DeserializeOwned;
 use std::borrow::Cow;
 use std::ops::{Deref, DerefMut, RangeBounds};
 
@@ -27,7 +29,7 @@ impl Capability for List {
 impl<'tx, 'db> ListRef<&'tx Transaction<'db>> {
     pub fn get<T>(&self, index: usize) -> crate::Result<T>
     where
-        T: for<'a> TryFrom<Content<'a>, Error = crate::Error>,
+        T: DeserializeOwned,
     {
         if let Some(start) = self.block.start() {
             let db = self.tx.db();
@@ -39,17 +41,20 @@ impl<'tx, 'db> ListRef<&'tx Transaction<'db>> {
             while let Some(block) = cursor.seek(current).optional()? {
                 let block_len = block.clock_len().get() as usize;
                 if block_len > remaining {
-                    match block.try_inline_content() {
-                        Some(content) => return T::try_from(content),
-                        None => {
-                            let mut id = *block.id();
-                            id.clock += Clock::new(remaining as u32);
-                            let content = db.contents();
-                            let data = content.get(id)?;
-                            return T::try_from(Content::new(
-                                block.content_type(),
-                                Cow::Borrowed(data),
-                            ));
+                    let contents = blocks.inner().contents();
+                    if block_len == 1 {
+                        let deserializer = BlockDeserializer::new(block, blocks, contents);
+                        let result = T::deserialize(deserializer)?;
+                        return Ok(result);
+                    } else {
+                        // either lib0 Atom or Json
+                        let mut id = *block.id();
+                        id.clock += Clock::new(remaining as u32);
+                        let data = contents.get(id)?;
+                        match block.content_type() {
+                            ContentType::Atom => return Ok(lib0::from_slice(data)?),
+                            ContentType::Json => return Ok(serde_json::from_slice(data)?),
+                            _ => unreachable!(),
                         }
                     }
                 }
