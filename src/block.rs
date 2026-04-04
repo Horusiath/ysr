@@ -451,7 +451,7 @@ impl BlockHeader {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct Block<'a> {
     id: ID,
     header: &'a BlockHeader,

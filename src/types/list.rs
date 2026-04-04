@@ -1,6 +1,6 @@
 use crate::block::InsertBlockData;
 use crate::content::{Content, ContentType};
-use crate::de::BlockDeserializer;
+use crate::de::{BlockDeserializer, Materialize};
 use crate::integrate::IntegrationContext;
 use crate::lib0::Value;
 use crate::lmdb::Database;
@@ -11,7 +11,6 @@ use crate::types::Capability;
 use crate::{
     BlockMut, Clock, DynRef, ID, In, Mounted, Optional, Out, Transaction, Unmounted, lib0,
 };
-use serde::de::DeserializeOwned;
 use std::borrow::Cow;
 use std::ops::{Deref, DerefMut, RangeBounds};
 
@@ -29,7 +28,7 @@ impl Capability for List {
 impl<'tx, 'db> ListRef<&'tx Transaction<'db>> {
     pub fn get<T>(&self, index: usize) -> crate::Result<T>
     where
-        T: DeserializeOwned,
+        T: Materialize,
     {
         if let Some(start) = self.block.start() {
             let db = self.tx.db();
@@ -41,22 +40,7 @@ impl<'tx, 'db> ListRef<&'tx Transaction<'db>> {
             while let Some(block) = cursor.seek(current).optional()? {
                 let block_len = block.clock_len().get() as usize;
                 if block_len > remaining {
-                    let contents = blocks.inner().contents();
-                    if block_len == 1 {
-                        let deserializer = BlockDeserializer::new(block, blocks, contents);
-                        let result = T::deserialize(deserializer)?;
-                        return Ok(result);
-                    } else {
-                        // either lib0 Atom or Json
-                        let mut id = *block.id();
-                        id.clock += Clock::new(remaining as u32);
-                        let data = contents.get(id)?;
-                        match block.content_type() {
-                            ContentType::Atom => return Ok(lib0::from_slice(data)?),
-                            ContentType::Json => return Ok(serde_json::from_slice(data)?),
-                            _ => unreachable!(),
-                        }
-                    }
+                    return T::materialize_fragment(block, &db, remaining);
                 }
 
                 remaining -= block_len;
@@ -77,7 +61,7 @@ impl<'tx, 'db> ListRef<&'tx Transaction<'db>> {
 
     pub fn iter<T>(&self) -> Iter<'_, T>
     where
-        T: for<'a> TryFrom<Content<'a>, Error = crate::Error>,
+        T: Materialize,
     {
         Iter::new(&self.tx, self.block.start().copied())
     }
@@ -204,14 +188,14 @@ enum IterState<'a> {
     Init {
         db: Database<'a>,
         current: BlockMut,
-        offset: Clock,
+        offset: usize,
     },
     Finished,
 }
 
 impl<'a, T> Iter<'a, T>
 where
-    T: for<'b> TryFrom<Content<'b>, Error = crate::Error>,
+    T: Materialize,
 {
     fn new(tx: &'a Transaction<'a>, start: Option<ID>) -> Iter<T> {
         Iter {
@@ -229,52 +213,42 @@ where
                 };
                 let db = tx.db();
                 let blocks = db.blocks();
-                let current: BlockMut = blocks.get(start)?.into();
-                let content = match current.try_inline_content() {
-                    Some(content) => content,
-                    None => {
-                        let contents = db.contents();
-                        let bytes = contents.get(*current.id())?;
-                        Content::new(current.content_type(), Cow::Borrowed(bytes))
+                let mut current = blocks.get(start)?;
+                while current.is_deleted() {
+                    match current.right() {
+                        None => return self.finish(),
+                        Some(&right_id) => {
+                            current = blocks.get(right_id)?;
+                        }
                     }
-                };
-                let value = T::try_from(content)?;
+                }
+                let result = T::materialize_fragment(current, &db, 0)?;
                 self.state = IterState::Init {
                     db,
-                    current,
-                    offset: Clock::new(1),
+                    current: current.into(),
+                    offset: 1,
                 };
-                Ok(Some(value))
+                Ok(Some(result))
             }
             IterState::Init {
                 db,
                 current,
                 offset,
             } => {
-                if *offset >= current.clock_len() {
+                if current.is_deleted() || *offset >= current.clock_len().get() as usize {
                     // jump to next block
                     match current.right() {
                         None => return self.finish(),
                         Some(&right) => {
                             let blocks = db.blocks();
                             *current = blocks.get(right)?.into();
-                            *offset = Clock::new(0);
+                            *offset = 0;
                         }
                     }
                 }
 
-                let content = match current.try_inline_content() {
-                    Some(content) => content,
-                    None => {
-                        let contents = db.contents();
-                        let mut id = *current.id();
-                        id.clock += *offset;
-                        let bytes = contents.get(id)?;
-                        Content::new(current.content_type(), Cow::Borrowed(bytes))
-                    }
-                };
-                *offset += Clock::new(1);
-                let value = T::try_from(content)?;
+                let value = T::materialize_fragment(current.as_block(), db, *offset)?;
+                *offset += 1;
                 Ok(Some(value))
             }
             IterState::Finished => Ok(None),
@@ -289,7 +263,7 @@ where
 
 impl<'a, T> Iterator for Iter<'a, T>
 where
-    T: for<'b> TryFrom<Content<'b>, Error = crate::Error>,
+    T: for<'b> Materialize,
 {
     type Item = crate::Result<T>;
 

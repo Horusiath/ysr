@@ -1,9 +1,9 @@
 use crate::Unmounted;
 use crate::lib0::Value;
 use crate::node::NodeID;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum Out {
     Value(Value),
     Node(NodeID),

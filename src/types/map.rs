@@ -1,6 +1,6 @@
 use crate::block::{BlockMut, ID, InsertBlockData};
 use crate::content::ContentType;
-use crate::de::BlockDeserializer;
+use crate::de::Materialize;
 use crate::integrate::IntegrationContext;
 use crate::lmdb::Database;
 use crate::node::{Node, NodeID, NodeType};
@@ -9,7 +9,6 @@ use crate::store::map_entries::{MapEntries, MapKey};
 use crate::store::{Db, MapEntriesStore};
 use crate::types::Capability;
 use crate::{Clock, Error, In, Mounted, Optional, Transaction, Unmounted, lib0};
-use serde::de::DeserializeOwned;
 use std::collections::{BTreeMap, HashMap};
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
@@ -25,11 +24,11 @@ impl Capability for Map {
     }
 }
 
-impl<'tx, 'db> MapRef<&'tx Transaction<'db>> {
+impl<'tx: 'db, 'db> MapRef<&'tx Transaction<'db>> {
     pub fn get<K, V>(&self, key: K) -> crate::Result<V>
     where
         K: AsRef<str>,
-        V: DeserializeOwned,
+        V: Materialize,
     {
         let db = self.tx.db();
         let map_entries = db.map_entries();
@@ -41,9 +40,7 @@ impl<'tx, 'db> MapRef<&'tx Transaction<'db>> {
         if block.is_deleted() {
             Err(Error::NotFound)
         } else {
-            let contents = db.contents();
-            let deserializer = BlockDeserializer::new(block, blocks, contents);
-            V::deserialize(deserializer)
+            V::materialize(block, &db)
         }
     }
 
@@ -239,16 +236,11 @@ impl<'a, 'db> Entry<'a, 'db> {
 
     pub fn value<T>(&self) -> crate::Result<T>
     where
-        T: DeserializeOwned,
+        T: Materialize,
     {
         let blocks = self.db.blocks();
         let block = blocks.get(self.block_id)?;
-        if !block.is_deleted() {
-            let deserializer = BlockDeserializer::new(block, blocks, self.db.contents());
-            T::deserialize(deserializer)
-        } else {
-            Err(Error::NotFound)
-        }
+        T::materialize(block, self.db)
     }
 }
 

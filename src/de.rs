@@ -1,12 +1,15 @@
 use crate::content::{ContentType, FormatAttribute};
-use crate::node::NodeType;
+use crate::lmdb::Database;
+use crate::node::{Node, NodeType};
+use crate::store::Db;
 use crate::store::block_store::BlockStore;
 use crate::store::content_store::ContentStore;
-use crate::store::map_entries::{MapEntries, MapKey};
-use crate::store::{Db, MapEntriesStore};
-use crate::{Block, Clock, Error, ID, lib0};
-use serde::Deserializer;
-use serde::de::{DeserializeSeed, IntoDeserializer, MapAccess, SeqAccess, Visitor};
+use crate::store::map_entries::MapEntries;
+use crate::{Block, Clock, Error, ID, Out, Unmounted, lib0};
+use serde::de::{
+    DeserializeOwned, DeserializeSeed, IntoDeserializer, MapAccess, SeqAccess, Visitor,
+};
+use serde::{Deserialize, Deserializer};
 use serde_json::de::SliceRead;
 use std::fmt::Display;
 use std::io::Cursor;
@@ -17,6 +20,99 @@ impl serde::de::Error for Error {
         T: Display,
     {
         Error::Custom(msg.to_string().into())
+    }
+}
+
+pub trait Materialize: Sized {
+    fn materialize<'tx, 'db>(block: Block<'tx>, db: &'tx Database<'db>) -> crate::Result<Self>;
+    fn materialize_fragment<'tx, 'db>(
+        block: Block<'tx>,
+        db: &'tx Database<'db>,
+        offset: usize,
+    ) -> crate::Result<Self>;
+}
+
+impl Materialize for Out {
+    fn materialize<'tx, 'db>(block: Block<'tx>, db: &'tx Database<'db>) -> crate::Result<Self> {
+        if block.is_deleted() {
+            Err(Error::NotFound)
+        } else if block.content_type() == ContentType::Node {
+            let node_id = *block.id();
+            Ok(Out::Node(node_id))
+        } else {
+            let deserializer = BlockDeserializer::new(block, db.blocks(), db.contents());
+            Ok(Out::Value(lib0::Value::deserialize(deserializer)?))
+        }
+    }
+
+    fn materialize_fragment<'tx, 'db>(
+        block: Block<'tx>,
+        db: &'tx Database<'db>,
+        offset: usize,
+    ) -> crate::Result<Self> {
+        if block.content_type() == ContentType::Node {
+            let node_id = *block.id();
+            Ok(Out::Node(node_id))
+        } else {
+            let value = lib0::Value::materialize_fragment(block, db, offset)?;
+            Ok(Out::Value(value))
+        }
+    }
+}
+
+impl<T: DeserializeOwned> Materialize for T {
+    /// Materialize entire block, possibly with all subsequent elements.
+    fn materialize<'tx, 'db>(block: Block<'tx>, db: &'tx Database<'db>) -> crate::Result<Self> {
+        if block.is_deleted() {
+            return Err(Error::NotFound);
+        }
+        let deserializer = BlockDeserializer::new(block, db.blocks(), db.contents());
+        Ok(T::deserialize(deserializer)?)
+    }
+
+    fn materialize_fragment<'tx, 'db>(
+        block: Block<'tx>,
+        db: &'tx Database<'db>,
+        offset: usize,
+    ) -> crate::Result<Self> {
+        let data = if offset == 0 {
+            read_block_data(&block, &db.contents())?
+        } else {
+            let mut id = *block.id();
+            id.clock += Clock::new(offset as u32);
+            db.contents().get(id)?
+        };
+        match block.content_type() {
+            ContentType::Json => Ok(serde_json::from_slice(data)?),
+            ContentType::Atom => Ok(lib0::from_slice(data)?),
+            content_type => Err(Error::UnsupportedContent(content_type as u8)),
+        }
+    }
+}
+
+impl<Cap> Materialize for Unmounted<Cap> {
+    fn materialize<'tx, 'db>(block: Block<'tx>, _: &'tx Database<'db>) -> crate::Result<Self> {
+        if block.is_deleted() {
+            Err(Error::NotFound)
+        } else if block.content_type() != ContentType::Node {
+            Err(Error::InvalidMapping("node"))
+        } else {
+            let node_id = *block.id();
+            Ok(Unmounted::new(Node::from(node_id)))
+        }
+    }
+
+    fn materialize_fragment<'tx, 'db>(
+        block: Block<'tx>,
+        db: &'tx Database<'db>,
+        offset: usize,
+    ) -> crate::Result<Self> {
+        if offset == 0 {
+            // only node types are supported, and node blocks are always fragmented
+            Self::materialize(block, db)
+        } else {
+            Err(Error::OutOfRange)
+        }
     }
 }
 

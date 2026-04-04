@@ -56,7 +56,7 @@ impl<'tx, 'db> TextRef<&'tx Transaction<'db>> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Chunk {
     pub insert: Out,
     pub attributes: Option<Box<Attrs>>,
