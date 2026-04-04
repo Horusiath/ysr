@@ -1,7 +1,9 @@
+use crate::ClientID;
 use crate::lmdb::{Cursor, Database, Error as LmdbError};
-use crate::store::{Db, KEY_PREFIX_META, ReadableBytes};
+use crate::store::{KEY_PREFIX_META, ReadableBytes};
 use smallvec::SmallVec;
 use std::fmt::{Debug, Formatter};
+use zerocopy::IntoBytes;
 
 #[repr(transparent)]
 #[derive(Clone, Copy)]
@@ -14,7 +16,20 @@ impl<'tx> MetaStore<'tx> {
         Self { db }
     }
 
-    pub fn get(&mut self, key: &str) -> crate::Result<Option<&'tx [u8]>> {
+    /// Return a current store client ID or generate new one.
+    pub fn client_id(&self) -> crate::Result<ClientID> {
+        let data = self.get("client_id")?;
+        match data {
+            Some(id) => Ok(*ClientID::parse(id)?),
+            None => {
+                let client_id = ClientID::new_random();
+                self.insert("client_id", client_id.as_bytes())?;
+                Ok(client_id)
+            }
+        }
+    }
+
+    pub fn get(&self, key: &str) -> crate::Result<Option<&'tx [u8]>> {
         let key = meta_key(key);
         match self.db.get(key.as_ref()) {
             Ok(value) => Ok(Some(value)),
@@ -23,7 +38,7 @@ impl<'tx> MetaStore<'tx> {
         }
     }
 
-    pub fn insert(&mut self, key: &str, value: &[u8]) -> crate::Result<()> {
+    pub fn insert(&self, key: &str, value: &[u8]) -> crate::Result<()> {
         let key = meta_key(key);
         self.db.put(key.as_ref(), value)?;
         Ok(())

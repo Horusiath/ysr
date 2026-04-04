@@ -159,9 +159,7 @@ impl EnvBuilder {
 
     /// Open the environment at the given path with the specified UNIX permissions.
     pub fn open(self, path: &Path, mode: u32) -> Result<Env, Error> {
-        let path_str = path
-            .to_str()
-            .expect("LMDB path must be valid UTF-8");
+        let path_str = path.to_str().expect("LMDB path must be valid UTF-8");
         let c_path = CString::new(path_str).expect("path must not contain null bytes");
         let rc = unsafe { mdb_env_open(self.env, c_path.as_ptr(), 0, mode as mdb_mode_t) };
         if rc != 0 {
@@ -217,6 +215,17 @@ impl<'env> RwTxn<'env> {
         let rc = unsafe { mdb_txn_commit(self.txn) };
         std::mem::forget(self); // prevent Drop from aborting
         lmdb_result(rc)
+    }
+
+    pub fn as_raw(&self) -> *mut MDB_txn {
+        self.txn
+    }
+
+    pub fn from_raw(txn: *mut MDB_txn) -> Self {
+        Self {
+            txn,
+            _marker: PhantomData,
+        }
     }
 }
 
@@ -299,7 +308,12 @@ impl<'txn> Cursor<'txn> {
         let mut key_val = to_mdb_val(key);
         let mut data_val = empty_mdb_val();
         let rc = unsafe {
-            mdb_cursor_get(self.cursor, &mut key_val, &mut data_val, MDB_SET_RANGE as u32)
+            mdb_cursor_get(
+                self.cursor,
+                &mut key_val,
+                &mut data_val,
+                MDB_SET_RANGE as u32,
+            )
         };
         lmdb_result(rc)
     }
