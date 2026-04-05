@@ -1,17 +1,18 @@
 use crate::block::InsertBlockData;
-use crate::content::{Content, ContentType};
-use crate::de::{BlockDeserializer, Materialize};
+use crate::content::ContentType;
+use crate::de::Materialize;
 use crate::integrate::IntegrationContext;
 use crate::lib0::Value;
 use crate::lmdb::Database;
 use crate::node::{Node, NodeType};
 use crate::prelim::Prelim;
 use crate::store::Db;
+use crate::store::block_store::SplitResult;
 use crate::types::Capability;
 use crate::{
     BlockMut, Clock, DynRef, ID, In, Mounted, Optional, Out, Transaction, Unmounted, lib0,
 };
-use std::borrow::Cow;
+use std::collections::Bound;
 use std::ops::{Deref, DerefMut, RangeBounds};
 
 pub type ListRef<Txn> = Mounted<List, Txn>;
@@ -199,7 +200,85 @@ impl<'tx, 'db> ListRef<&'tx mut Transaction<'db>> {
     where
         R: RangeBounds<usize>,
     {
-        todo!()
+        let mut start = match range.start_bound() {
+            Bound::Included(&index) => index,
+            Bound::Excluded(&index) => index + 1,
+            Bound::Unbounded => 0,
+        };
+        let end = match range.end_bound() {
+            Bound::Included(&index) => index,
+            Bound::Excluded(&index) => index - 1,
+            Bound::Unbounded => self.block.node_len(),
+        };
+
+        if start > end {
+            return Ok(());
+        }
+
+        let mut to_delete = end - start + 1;
+
+        let db = self.tx.db.get();
+        let state = self.tx.state.get_or_init(db);
+        let blocks = db.blocks();
+        let mut cursor = blocks.cursor()?;
+
+        // first let's position cursor at the start of the range
+        let mut current = self.block.start().copied();
+        while let Some(block_id) = current.take() {
+            cursor.seek(block_id)?;
+            let block = cursor.current()?;
+            if !block.is_deleted() && block.is_countable() {
+                let block_len = block.clock_len().get() as usize;
+                if block_len > start {
+                    current = match cursor.split_current(Clock::new(start as u32))? {
+                        SplitResult::Unchanged(left) => Some(*left.id()),
+                        SplitResult::Split(_, right) => Some(*right.id()),
+                    };
+                    start = 0;
+                } else {
+                    start -= block_len;
+                }
+            }
+
+            if start == 0 {
+                break;
+            }
+
+            current = block.right().copied();
+        }
+
+        // then remove as many blocks as needed
+        let map_entries = db.map_entries();
+        while let Some(block_id) = current.take()
+            && to_delete != 0
+        {
+            let block = cursor.seek(block_id)?;
+            if !block.is_deleted() && block.is_countable() {
+                let mut block: BlockMut = block.into();
+                let block_len = block.clock_len().get() as usize;
+                if block_len > to_delete {
+                    block = match cursor.split_current(Clock::new(to_delete as u32))? {
+                        SplitResult::Unchanged(left) => left,
+                        SplitResult::Split(left, _) => left,
+                    };
+                    to_delete = 0;
+                } else {
+                    to_delete -= block_len;
+                }
+                let parent_len = self.block.clock_len().get() - block_len as u32;
+                if state.delete(&mut block, false, &mut cursor, &map_entries)? {
+                    self.block.set_node_len(parent_len);
+                }
+            }
+
+            current = block.right().copied();
+        }
+
+        // update current parent node length
+        cursor.seek(*self.block.id())?;
+        cursor.update_current(self.block.header())?;
+
+        Ok(())
     }
 }
 

@@ -397,6 +397,10 @@ impl BlockHeader {
         }
     }
 
+    pub fn set_node_len(&mut self, len: u32) {
+        self.len = Clock::new(len);
+    }
+
     #[inline]
     pub fn set_clock_len(&mut self, len: Clock) {
         self.len = len;

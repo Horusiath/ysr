@@ -5,7 +5,7 @@ use crate::node::{Named, Node, NodeType};
 use crate::store::KEY_PREFIX_BLOCK;
 use crate::store::content_store::ContentStore;
 use crate::store::intern_strings::InternStringsStore;
-use crate::{Block, BlockHeader, BlockMut, Error, ID, Optional};
+use crate::{Block, BlockHeader, BlockMut, Clock, Error, ID, Optional};
 use std::fmt::{Debug, Formatter};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, TryFromBytes};
 
@@ -177,6 +177,12 @@ impl<'tx> BlockCursor<'tx> {
     /// Moves current cursor position to a block starting with a given [ID].
     /// Returns true if block has been found.
     pub fn seek(&mut self, id: ID) -> crate::Result<Block<'tx>> {
+        if let Some(current_id) = self.current_id()?
+            && current_id == &id
+        {
+            return Ok(self.current()?);
+        }
+
         let key = BlockKey::new(id);
         match self.cursor.set_key(key.as_bytes()) {
             Ok(_) => self.current(),
@@ -272,6 +278,20 @@ impl<'tx> BlockCursor<'tx> {
     pub fn update_current(&mut self, header: &BlockHeader) -> crate::Result<()> {
         self.cursor.put_current(header.as_bytes())?;
         Ok(())
+    }
+
+    pub fn split_current(&mut self, offset: Clock) -> crate::Result<SplitResult> {
+        let mut left: BlockMut = self.current()?.into();
+        match left.split(offset) {
+            None => Ok(SplitResult::Unchanged(left)),
+            Some(right) => {
+                self.update_current(left.header())?;
+                let key = BlockKey::new(*right.id());
+                self.cursor
+                    .put(key.as_bytes(), right.as_block().header().as_bytes(), 0)?;
+                Ok(SplitResult::Split(left, right))
+            }
+        }
     }
 
     pub fn split(&mut self, id: ID) -> crate::Result<SplitResult> {
