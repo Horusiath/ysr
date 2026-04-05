@@ -199,7 +199,7 @@ impl<'a, T> Iter<'a, T>
 where
     T: Materialize,
 {
-    fn new(tx: &'a Transaction<'a>, start: Option<ID>) -> Iter<T> {
+    fn new(tx: &'a Transaction<'a>, start: Option<ID>) -> Iter<'a, T> {
         Iter {
             state: IterState::Uninit { tx, start },
             _marker: std::marker::PhantomData,
@@ -511,7 +511,7 @@ mod test {
             let actual: Vec<_> = a1.iter::<Value>().map(Result::unwrap).collect();
             assert_eq!(
                 actual,
-                vec![Value::Float(1.0), Value::Bool(true), Value::Bool(false)]
+                vec![Value::Int(1), Value::Bool(true), Value::Bool(false)]
             );
 
             t1.commit(None).unwrap();
@@ -528,7 +528,7 @@ mod test {
         let actual: Vec<_> = a2.iter::<Value>().map(Result::unwrap).collect();
         assert_eq!(
             actual,
-            vec![Value::Float(1.0), Value::Bool(true), Value::Bool(false)]
+            vec![Value::Int(1), Value::Bool(true), Value::Bool(false)]
         );
 
         t2.commit(None).unwrap();

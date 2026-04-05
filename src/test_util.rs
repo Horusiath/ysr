@@ -6,13 +6,12 @@ pub fn multi_doc<C>(client_id: C) -> (crate::MultiDoc, TempDir)
 where
     C: Into<ClientID>,
 {
-    let client_id = client_id.into();
     let dir = TempDir::new().unwrap();
     let env = crate::lmdb::Env::builder()
         .max_dbs(10)
         .open(dir.path(), 0o600)
         .unwrap();
-    let multi_doc = MultiDoc::new(env, client_id);
+    let multi_doc = MultiDoc::new(env, Some(client_id.into()));
     (multi_doc, dir)
 }
 

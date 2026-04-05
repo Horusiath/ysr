@@ -292,16 +292,12 @@ impl<'db> Transaction<'db> {
     pub(crate) fn read_write(
         txn: RwTxn<'db>,
         handle: Dbi,
+        client_id: Option<ClientID>,
         origin: Option<Origin>,
-        client_id: ClientID,
     ) -> crate::Result<Self> {
         let db = DbHandle { txn, handle };
-        {
-            let database = db.get();
-            let meta = database.meta();
-            if meta.get("client_id")?.is_none() {
-                meta.insert("client_id", client_id.as_bytes())?;
-            }
+        if let Some(client_id) = client_id {
+            db.get().meta().insert("client_id", client_id.as_bytes())?;
         }
         let state = match origin {
             None => LazyState::new(),
@@ -313,6 +309,11 @@ impl<'db> Transaction<'db> {
             }
         };
         Ok(Self { db, state })
+    }
+
+    pub fn client_id(&self) -> Option<&ClientID> {
+        let state = self.state.get()?;
+        Some(&state.client_id)
     }
 
     pub fn origin(&self) -> Option<&Origin> {

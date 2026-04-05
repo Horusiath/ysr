@@ -4,19 +4,19 @@ use crate::{ClientID, Transaction};
 use rand::random;
 
 pub struct MultiDoc {
-    client_id: ClientID,
     env: Env,
+    client_id: Option<ClientID>,
 }
 
 impl MultiDoc {
-    pub fn new(env: Env, client_id: ClientID) -> Self {
+    pub fn new(env: Env, client_id: Option<ClientID>) -> Self {
         MultiDoc { env, client_id }
     }
 
     pub fn transact_mut(&self, doc_id: &str) -> crate::Result<Transaction<'_>> {
         let handle = self.env.create_db(doc_id, MDB_DB_CREATE)?;
         let tx = self.env.begin_rw_txn()?;
-        Transaction::read_write(tx, handle, None, self.client_id)
+        Transaction::read_write(tx, handle, self.client_id, None)
     }
 
     pub fn transact_mut_with<O: Into<Origin>>(
@@ -27,14 +27,14 @@ impl MultiDoc {
         let origin = origin.into();
         let handle = self.env.create_db(doc_id, MDB_DB_CREATE)?;
         let tx = self.env.begin_rw_txn()?;
-        Transaction::read_write(tx, handle, Some(origin), self.client_id)
+        Transaction::read_write(tx, handle, self.client_id, Some(origin))
     }
 }
 
 impl From<Env> for MultiDoc {
     #[inline]
     fn from(value: Env) -> Self {
-        Self::new(value, random::<u32>().into())
+        Self::new(value, None)
     }
 }
 

@@ -9,7 +9,7 @@ fn main() {
         .map_size(10 * 1024 * 1024)
         .open(dir.path(), 0o777)
         .unwrap();
-    let mdoc = MultiDoc::new(env, 1.into());
+    let mdoc = MultiDoc::new(env, Some(1.into()));
     let mut tx = mdoc.transact_mut("test").unwrap();
     let start = Instant::now();
     tx.apply_update(&mut DecoderV1::from_slice(&data)).unwrap();
