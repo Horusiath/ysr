@@ -85,16 +85,12 @@ impl<'tx, 'db> ListRef<&'tx Transaction<'db>> {
 }
 
 impl<'tx, 'db> ListRef<&'tx mut Transaction<'db>> {
-    pub fn insert<T>(&mut self, index: usize, value: T) -> crate::Result<()>
-    where
-        T: Prelim,
-    {
+    fn seek(&self, index: usize) -> crate::Result<(Option<ID>, Option<ID>)> {
         let mut remaining = Clock::new(index as u32);
         let mut left: Option<ID> = None;
         let mut right: Option<ID> = self.block.start().copied();
 
         let db = self.tx.db.get();
-        let state = self.tx.state.get_or_init(db);
         let blocks = db.blocks();
         while let Some(id) = right
             && remaining > Clock::new(0)
@@ -117,10 +113,23 @@ impl<'tx, 'db> ListRef<&'tx mut Transaction<'db>> {
             return Err(crate::Error::OutOfRange);
         }
 
+        Ok((left, right))
+    }
+
+    pub fn insert<T>(&mut self, index: usize, value: T) -> crate::Result<()>
+    where
+        T: Prelim,
+    {
+        let (left, right) = self.seek(index)?;
+
+        let db = self.tx.db.get();
+        let blocks = db.blocks();
+        let state = self.tx.state.get_or_init(db);
+
         let node: Node = (*self.block.id()).into();
-        let id = state.next_id(value.clock_len());
         let left = left.as_ref();
         let right = right.as_ref();
+        let id = state.next_id(value.clock_len());
         let mut insert =
             InsertBlockData::new(id, Clock::new(1), left, right, left, right, node, None);
         value.prepare(&mut insert)?;
@@ -136,7 +145,34 @@ impl<'tx, 'db> ListRef<&'tx mut Transaction<'db>> {
         T: Prelim,
         I: IntoIterator<Item = T>,
     {
-        todo!()
+        let (mut left, right) = self.seek(index)?;
+
+        let node: Node = (*self.block.id()).into();
+
+        for value in values {
+            let l = left.as_ref();
+            let r = right.as_ref();
+
+            let db = self.tx.db.get();
+            let blocks = db.blocks();
+            let state = self.tx.state.get_or_init(db);
+
+            let mut id = state.next_id(value.clock_len());
+            let mut insert =
+                InsertBlockData::new(id, Clock::new(1), l, r, l, r, node.clone(), None);
+
+            // new left ID for the next iteration
+            id.clock += value.clock_len();
+            left = Some(id);
+
+            value.prepare(&mut insert)?;
+            let mut ctx = IntegrationContext::create(&mut insert, Clock::new(0), &blocks)?;
+            insert.integrate(&db, state, &mut ctx)?;
+            value.integrate(&mut insert, &mut self.tx)?;
+            self.block = ctx.parent.unwrap();
+        }
+
+        Ok(())
     }
 
     pub fn push_back<T>(&mut self, value: T) -> crate::Result<()>
