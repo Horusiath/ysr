@@ -227,11 +227,65 @@ impl TransactionState {
     }
 }
 
-pub struct Transaction<'db> {
+pub struct DbHandle<'db> {
     txn: RwTxn<'db>,
-    client_id: ClientID,
     handle: Dbi,
-    state: Option<Box<TransactionState>>,
+}
+
+impl<'db> DbHandle<'db> {
+    pub fn get(&self) -> Database<'_> {
+        self.txn.bind(&self.handle)
+    }
+
+    pub(crate) fn commit(self) -> crate::Result<()> {
+        self.txn.commit()?;
+        Ok(())
+    }
+}
+
+pub struct LazyState {
+    inner: Option<Box<TransactionState>>,
+}
+
+impl LazyState {
+    fn new() -> Self {
+        LazyState { inner: None }
+    }
+
+    fn eager(state: TransactionState) -> Self {
+        LazyState {
+            inner: Some(Box::new(state)),
+        }
+    }
+
+    pub fn get(&self) -> Option<&TransactionState> {
+        self.inner.as_deref()
+    }
+
+    pub fn get_mut(&mut self) -> Option<&mut TransactionState> {
+        self.inner.as_deref_mut()
+    }
+
+    pub fn get_or_init(&mut self, db: Database<'_>) -> &mut TransactionState {
+        self.inner.get_or_insert_with(|| {
+            let client_id = db.meta().client_id().unwrap();
+            let begin_state = db.state_vector().state_vector().unwrap();
+            Box::new(TransactionState::new(client_id, begin_state, None))
+        })
+    }
+
+    pub fn take(&mut self) -> Option<Box<TransactionState>> {
+        self.inner.take()
+    }
+
+    pub fn origin(&self) -> Option<&Origin> {
+        self.inner.as_ref()?.origin.as_ref()
+    }
+}
+
+pub struct Transaction<'db> {
+    pub db: DbHandle<'db>,
+    pub state: LazyState,
 }
 
 impl<'db> Transaction<'db> {
@@ -241,49 +295,35 @@ impl<'db> Transaction<'db> {
         origin: Option<Origin>,
         client_id: ClientID,
     ) -> crate::Result<Self> {
+        let db = DbHandle { txn, handle };
+        {
+            let database = db.get();
+            let meta = database.meta();
+            if meta.get("client_id")?.is_none() {
+                meta.insert("client_id", client_id.as_bytes())?;
+            }
+        }
         let state = match origin {
-            None => None,
-            origin => {
-                let db = txn.bind(&handle);
-                let begin_state = db.state_vector().state_vector()?;
-                Some(Box::new(TransactionState::new(
-                    client_id,
-                    begin_state,
-                    origin,
-                )))
+            None => LazyState::new(),
+            Some(origin) => {
+                let database = db.get();
+                let client_id = database.meta().client_id()?;
+                let begin_state = database.state_vector().state_vector()?;
+                LazyState::eager(TransactionState::new(client_id, begin_state, Some(origin)))
             }
         };
-        Ok(Self {
-            txn,
-            client_id,
-            handle,
-            state,
-        })
-    }
-
-    pub fn db(&self) -> Database<'_> {
-        self.txn.bind(&self.handle)
+        Ok(Self { db, state })
     }
 
     pub fn origin(&self) -> Option<&Origin> {
-        let state = self.state.as_ref()?;
-        state.origin.as_ref()
-    }
-
-    pub fn split_mut(&mut self) -> (Database<'_>, &mut TransactionState) {
-        let db = self.txn.bind(&self.handle);
-        let state = self.state.get_or_insert_with(|| {
-            let begin_state = db.state_vector().state_vector().unwrap();
-            Box::new(TransactionState::new(self.client_id, begin_state, None))
-        });
-        (db, state)
+        self.state.origin()
     }
 
     pub fn state_vector(&self) -> crate::Result<StateVector> {
-        if let Some(state) = self.state.as_ref() {
+        if let Some(state) = self.state.get() {
             Ok(state.current_state.clone())
         } else {
-            self.db().state_vector().state_vector()
+            self.db.get().state_vector().state_vector()
         }
     }
 
@@ -305,7 +345,7 @@ impl<'db> Transaction<'db> {
         let mut writer = EncoderV1::new(writer);
         // wrote updates
         let current_state = self.state_vector()?;
-        let db = self.db();
+        let db = self.db.get();
         let blocks = db.blocks();
         let mut block_cursor = blocks.cursor()?;
         // in order to build delete set we need to go through all the blocks anyway
@@ -546,7 +586,8 @@ impl<'db> Transaction<'db> {
 
     pub fn apply_update<D: Decoder>(&mut self, decoder: &mut D) -> crate::Result<()> {
         let mut update = Update::decode_with(decoder)?;
-        let (mut db, state) = self.split_mut();
+        let mut db = self.db.get();
+        let state = self.state.get_or_init(db);
         let mut missing_sv = StateVector::default();
         let mut remaining = BTreeMap::new();
         let mut stack = Vec::new();
@@ -624,7 +665,8 @@ impl<'db> Transaction<'db> {
         if delete_set.is_empty() {
             return Ok(unapplied);
         }
-        let (mut db, state) = self.split_mut();
+        let db = self.db.get();
+        let state = self.state.get_or_init(db);
         // We can ignore the case of GC and Delete structs, because we are going to skip them
         let blocks = db.blocks();
         let mut block_cursor = blocks.cursor()?;
@@ -746,11 +788,10 @@ impl<'db> Transaction<'db> {
 
     pub fn commit(mut self, summary: Option<&mut TransactionSummary>) -> crate::Result<()> {
         if let Some(mut state) = self.state.take() {
-            // commit the transaction
-            state.precommit(self.db(), summary)?;
-            self.txn.commit()?;
+            let db = self.db.get();
+            state.precommit(db, summary)?;
         }
-        Ok(())
+        self.db.commit()
     }
 
     pub fn snapshot(&self) -> crate::Result<Snapshot> {

@@ -31,7 +31,7 @@ impl<'tx, 'db> ListRef<&'tx Transaction<'db>> {
         T: Materialize,
     {
         if let Some(start) = self.block.start() {
-            let db = self.tx.db();
+            let db = self.tx.db.get();
             let blocks = db.blocks();
             let mut cursor = blocks.cursor()?;
 
@@ -93,7 +93,8 @@ impl<'tx, 'db> ListRef<&'tx mut Transaction<'db>> {
         let mut left: Option<ID> = None;
         let mut right: Option<ID> = self.block.start().copied();
 
-        let (db, state) = self.tx.split_mut();
+        let db = self.tx.db.get();
+        let state = self.tx.state.get_or_init(db);
         let blocks = db.blocks();
         while let Some(id) = right
             && remaining > Clock::new(0)
@@ -212,7 +213,7 @@ where
                     None => return self.finish(),
                     Some(id) => *id,
                 };
-                let db = tx.db();
+                let db = tx.db.get();
                 let blocks = db.blocks();
                 let mut current = blocks.get(start)?;
                 while current.is_deleted() {

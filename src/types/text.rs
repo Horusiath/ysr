@@ -89,7 +89,7 @@ impl Chunk {
 impl<'tx, 'db> Display for TextRef<&'tx Transaction<'db>> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let mut next = self.block.start().copied();
-        let db = self.tx.db();
+        let db = self.tx.db.get();
         let blocks = db.blocks();
         let mut cursor = blocks.cursor().map_err(|_| std::fmt::Error)?;
         let contents = db.contents();
@@ -127,7 +127,8 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
         let value = StringPrelim::new(chunk);
         let pos = BlockPosition::seek(self.tx, self.block.start().copied(), index)?;
         let node_id = *self.node_id();
-        let (mut db, state) = self.tx.split_mut();
+        let db = self.tx.db.get();
+        let state = self.tx.state.get_or_init(db);
         let id = state.next_id(value.clock_len());
         let left = pos.left.as_ref();
         let right = pos.right.as_ref();
@@ -144,7 +145,7 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
         value.prepare(&mut insert)?;
         let blocks = db.blocks();
         let mut ctx = IntegrationContext::create(&mut insert, Clock::new(0), &blocks)?;
-        insert.integrate(&mut db, state, &mut ctx)?;
+        insert.integrate(&db, state, &mut ctx)?;
         value.integrate(&mut insert, &mut self.tx)?;
         self.block = ctx.parent.unwrap();
         Ok(())
@@ -315,7 +316,7 @@ impl<'a> Prelim for StringPrelim<'a> {
         tx: &mut Transaction,
     ) -> crate::Result<Self::Return> {
         if !self.can_inline() {
-            let db = tx.db();
+            let db = tx.db.get();
             let contents = db.contents();
             contents.insert(*insert.block.id(), self.data.as_bytes())?;
         }
@@ -388,7 +389,7 @@ impl BlockPosition {
             right: start,
         };
         let mut remaining = index;
-        let db = tx.db();
+        let db = tx.db.get();
         let blocks = db.blocks();
         let mut blocks_cursor = blocks.cursor()?;
         let contents = db.contents();

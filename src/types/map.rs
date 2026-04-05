@@ -30,7 +30,7 @@ impl<'tx: 'db, 'db> MapRef<&'tx Transaction<'db>> {
         K: AsRef<str>,
         V: Materialize,
     {
-        let db = self.tx.db();
+        let db = self.tx.db.get();
         let map_entries = db.map_entries();
         let entry_id = *map_entries
             .get(self.block.id(), key.as_ref())?
@@ -45,7 +45,7 @@ impl<'tx: 'db, 'db> MapRef<&'tx Transaction<'db>> {
     }
 
     pub fn len(&self) -> crate::Result<usize> {
-        let db = self.tx.db();
+        let db = self.tx.db.get();
         let map_entries = db.map_entries();
         let blocks = db.blocks();
         let mut blocks_cursor = blocks.cursor()?;
@@ -67,7 +67,7 @@ impl<'tx: 'db, 'db> MapRef<&'tx Transaction<'db>> {
     where
         K: AsRef<str>,
     {
-        let db = self.tx.db();
+        let db = self.tx.db.get();
         let map_entries = db.map_entries();
         let entry_id = match map_entries.get(self.block.id(), key.as_ref())? {
             None => return Ok(false),
@@ -81,7 +81,7 @@ impl<'tx: 'db, 'db> MapRef<&'tx Transaction<'db>> {
     }
 
     pub fn iter(&self) -> Iter<'tx> {
-        let db = self.tx.db();
+        let db = self.tx.db.get();
         Iter::new(db, *self.node_id())
     }
 
@@ -106,7 +106,8 @@ impl<'tx, 'db> MapRef<&'tx mut Transaction<'db>> {
     {
         let key = key.as_ref();
         let node_id = *self.node_id();
-        let (mut db, state) = self.tx.split_mut();
+        let db = self.tx.db.get();
+        let state = self.tx.state.get_or_init(db);
         let id = state.next_id(value.clock_len());
         let map_entries = db.map_entries();
         let left_id = map_entries.get(&node_id, key)?;
@@ -123,7 +124,7 @@ impl<'tx, 'db> MapRef<&'tx mut Transaction<'db>> {
         value.prepare(&mut insert)?;
         let blocks = db.blocks();
         let mut ctx = IntegrationContext::create(&mut insert, Clock::new(0), &blocks)?;
-        insert.integrate(&mut db, state, &mut ctx)?;
+        insert.integrate(&db, state, &mut ctx)?;
         value.integrate(&mut insert, &mut self.tx)?;
         self.block = ctx.parent.unwrap();
         Ok(())
@@ -134,7 +135,8 @@ impl<'tx, 'db> MapRef<&'tx mut Transaction<'db>> {
         K: AsRef<str>,
     {
         let parent_id = *self.node_id();
-        let (db, state) = self.tx.split_mut();
+        let db = self.tx.db.get();
+        let state = self.tx.state.get_or_init(db);
         let map_entries = db.map_entries();
         let block_id = match map_entries.get(&parent_id, key.as_ref())? {
             None => return Ok(false),
@@ -157,7 +159,8 @@ impl<'tx, 'db> MapRef<&'tx mut Transaction<'db>> {
 
     pub fn clear(&mut self) -> crate::Result<()> {
         let parent_id = *self.node_id();
-        let (db, state) = self.tx.split_mut();
+        let db = self.tx.db.get();
+        let state = self.tx.state.get_or_init(db);
         let map_entries = db.map_entries();
         let blocks = db.blocks();
         let mut cursor = blocks.cursor()?;
