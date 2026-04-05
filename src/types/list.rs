@@ -224,7 +224,7 @@ impl<'tx, 'db> ListRef<&'tx mut Transaction<'db>> {
 
         // first let's position cursor at the start of the range
         let mut current = self.block.start().copied();
-        while let Some(block_id) = current.take() {
+        while let Some(block_id) = current {
             cursor.seek(block_id)?;
             let block = cursor.current()?;
             if !block.is_deleted() && block.is_countable() {
@@ -265,7 +265,7 @@ impl<'tx, 'db> ListRef<&'tx mut Transaction<'db>> {
                 } else {
                     to_delete -= block_len;
                 }
-                let parent_len = self.block.clock_len().get() - block_len as u32;
+                let parent_len = self.block.node_len() as u32 - block_len as u32;
                 if state.delete(&mut block, false, &mut cursor, &map_entries)? {
                     self.block.set_node_len(parent_len);
                 }
@@ -903,7 +903,7 @@ mod test {
         array.push_back(2).unwrap();
 
         let actual: Vec<_> = array.iter::<Value>().map(Result::unwrap).collect();
-        assert_eq!(actual, vec![1.into(), 2.into()]);
+        assert_eq!(actual, vec![Value::Int(1), Value::Int(2)]);
 
         let data = tx.diff_update(&StateVector::default()).unwrap();
 
@@ -916,6 +916,6 @@ mod test {
         let array = arr.mount_mut(&mut tx).unwrap();
 
         let actual: Vec<_> = array.iter::<Value>().map(Result::unwrap).collect();
-        assert_eq!(actual, vec![1.into(), 2.into()]);
+        assert_eq!(actual, vec![Value::Int(1), Value::Int(2)]);
     }
 }

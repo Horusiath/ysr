@@ -177,7 +177,7 @@ impl<'tx> BlockCursor<'tx> {
     /// Moves current cursor position to a block starting with a given [ID].
     /// Returns true if block has been found.
     pub fn seek(&mut self, id: ID) -> crate::Result<Block<'tx>> {
-        if let Some(current_id) = self.current_id()?
+        if let Ok(Some(current_id)) = self.current_id()
             && current_id == &id
         {
             return Ok(self.current()?);
