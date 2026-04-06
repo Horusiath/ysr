@@ -457,7 +457,7 @@ mod test {
     use crate::read::DecoderV1;
     use crate::test_util::{multi_doc, sync};
     use crate::{In, List, MapPrelim, Optional, StateVector, Transaction, Unmounted, lib0};
-    use std::collections::{BTreeMap, HashMap};
+    use std::collections::BTreeMap;
 
     #[test]
     fn push_back() {
@@ -864,15 +864,21 @@ mod test {
 
         let mut a = arr.mount_mut(&mut tx).unwrap();
 
-        for i in 0..10 {
+        const COUNT: i32 = 10;
+        for i in 0..COUNT {
             let mut m = BTreeMap::new();
             m.insert("value".to_owned(), In::from(i));
             a.push_back(MapPrelim::from(m)).unwrap();
         }
 
+        //println!("{:#?}", tx.db.get().inspect());
+
+        let mut count = 0;
         for (i, value) in a.iter::<Value>().map(Result::unwrap).enumerate() {
-            assert_eq!(value, lib0!({"value": (i as f64) }))
+            assert_eq!(value, lib0!({"value": (i as f64) }));
+            count += 1;
         }
+        assert_eq!(count, COUNT);
     }
 
     #[test]

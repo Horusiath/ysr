@@ -75,17 +75,17 @@ impl<T: DeserializeOwned> Materialize for T {
         db: &'tx Database<'db>,
         offset: usize,
     ) -> crate::Result<Self> {
-        let data = if offset == 0 {
-            read_block_data(&block, &db.contents())?
+        if block.clock_len() == Clock::new(1) {
+            Self::materialize(block, db)
         } else {
             let mut id = *block.id();
             id.clock += Clock::new(offset as u32);
-            db.contents().get(id)?
-        };
-        match block.content_type() {
-            ContentType::Json => Ok(serde_json::from_slice(data)?),
-            ContentType::Atom => Ok(lib0::from_slice(data)?),
-            content_type => Err(Error::UnsupportedContent(content_type as u8)),
+            let data = db.contents().get(id)?;
+            match block.content_type() {
+                ContentType::Json => Ok(serde_json::from_slice(data)?),
+                ContentType::Atom => Ok(lib0::from_slice(data)?),
+                content_type => Err(Error::UnsupportedContent(content_type as u8)),
+            }
         }
     }
 }
@@ -897,6 +897,8 @@ fn read_block_data<'a, 'b>(
     block: &'a Block<'b>,
     content_store: &'a ContentStore<'b>,
 ) -> crate::Result<&'b [u8]> {
+    debug_assert!(block.content_type() != ContentType::Node);
+
     match block.try_inline_data() {
         Some(data) => Ok(data),
         None => Ok(content_store.get(*block.id())?),
@@ -989,7 +991,8 @@ impl<'de> MapAccess<'de> for MapNodeDeserializer<'de> {
                 let current = self.blocks.get(id)?;
                 if !current.is_deleted() {
                     self.current = Some(current);
-                    let deserializer: serde::de::value::StrDeserializer<'_, Error> = key.key().into_deserializer();
+                    let deserializer: serde::de::value::StrDeserializer<'_, Error> =
+                        key.key().into_deserializer();
                     let value: K::Value = seed.deserialize(deserializer)?;
                     Ok(Some(value))
                 } else {

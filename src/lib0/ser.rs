@@ -1,10 +1,10 @@
 use crate::lib0::{
     ExpectedString, TAG_ARRAY, TAG_BIGINT, TAG_BYTE_ARRAY, TAG_FALSE, TAG_FLOAT32, TAG_FLOAT64,
-    TAG_INTEGER, TAG_NULL, TAG_OBJECT, TAG_STRING, TAG_TRUE, TAG_UNDEFINED, Tag,
+    TAG_INTEGER, TAG_NULL, TAG_OBJECT, TAG_STRING, TAG_TRUE, TAG_UNDEFINED,
 };
 use crate::write::WriteExt;
 use serde::Serialize;
-use serde::de::{Error, Expected, Unexpected};
+use serde::de::{Error, Unexpected};
 use serde::ser::{
     Impossible, SerializeMap, SerializeSeq, SerializeStruct, SerializeStructVariant,
     SerializeTuple, SerializeTupleStruct, SerializeTupleVariant,

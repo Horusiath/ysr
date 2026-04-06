@@ -148,7 +148,7 @@ impl<'tx> Debug for Inspector<'tx> {
         cursor
             .set_range(InternStringsKey::new(0.into()).as_bytes())
             .map_err(|_| std::fmt::Error)?;
-        let key: &[u8] = match cursor.key() {
+        let mut key: &[u8] = match cursor.key() {
             Ok(key) => key,
             Err(LmdbError::NOT_FOUND) => return s.finish(),
             Err(_) => return Err(std::fmt::Error),
@@ -160,6 +160,7 @@ impl<'tx> Debug for Inspector<'tx> {
             s.value(&value);
 
             cursor.next().optional().map_err(|_| std::fmt::Error)?;
+            key = cursor.key().map_err(|_| std::fmt::Error)?;
         }
         s.finish()
     }
