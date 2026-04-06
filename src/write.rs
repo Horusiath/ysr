@@ -71,32 +71,32 @@ impl Encode for Range<Clock> {
 pub trait WriteExt: Write + Sized {
     /// Write an unsigned integer (16bit)
     fn write_u8(&mut self, num: u8) -> std::io::Result<()> {
-        Ok(self.write_all(&[num])?)
+        self.write_all(&[num])
     }
 
     /// Write an unsigned integer (16bit)
     fn write_u16(&mut self, num: u16) -> std::io::Result<()> {
-        Ok(self.write_all(&[num as u8, (num >> 8) as u8])?)
+        self.write_all(&[num as u8, (num >> 8) as u8])
     }
 
     /// Write an unsigned integer (32bit)
     fn write_u32(&mut self, num: u32) -> std::io::Result<()> {
-        Ok(self.write_all(&[
+        self.write_all(&[
             num as u8,
             (num >> 8) as u8,
             (num >> 16) as u8,
             (num >> 24) as u8,
-        ])?)
+        ])
     }
 
     /// Write an unsigned integer (32bit) in big endian order (most significant byte first)
     fn write_u32_be(&mut self, num: u32) -> std::io::Result<()> {
-        Ok(self.write_all(&[
+        self.write_all(&[
             (num >> 24) as u8,
             (num >> 16) as u8,
             (num >> 8) as u8,
             num as u8,
-        ])?)
+        ])
     }
 
     /// Write a variable length integer or unsigned integer.
@@ -138,25 +138,25 @@ pub trait WriteExt: Write + Sized {
     /// Write floating point number in 4 bytes
     #[inline]
     fn write_f32(&mut self, num: f32) -> std::io::Result<()> {
-        Ok(self.write_all(&num.to_be_bytes())?)
+        self.write_all(&num.to_be_bytes())
     }
 
     /// Write floating point number in 8 bytes
     #[inline]
     fn write_f64(&mut self, num: f64) -> std::io::Result<()> {
-        Ok(self.write_all(&num.to_be_bytes())?)
+        self.write_all(&num.to_be_bytes())
     }
 
     /// Write BigInt in 8 bytes in big endian order.
     #[inline]
     fn write_i64(&mut self, num: i64) -> std::io::Result<()> {
-        Ok(self.write_all(&num.to_be_bytes())?)
+        self.write_all(&num.to_be_bytes())
     }
 
     /// Write BigUInt in 8 bytes in big endian order.
     #[inline]
     fn write_u64(&mut self, num: u64) -> std::io::Result<()> {
-        Ok(self.write_all(&num.to_be_bytes())?)
+        self.write_all(&num.to_be_bytes())
     }
 }
 

@@ -197,7 +197,7 @@ impl BlockHeader {
             U32::new(0)
         };
         Self {
-            len: len,
+            len,
             flags,
             node_type: NodeType::Unknown,
             content_type: ContentType::Deleted,
@@ -889,7 +889,7 @@ impl InsertBlockData {
                 let map_entries = db.map_entries();
                 // add current block to the beginning of YMap entries
                 if let Some(mut right) = map_entries.get(&parent_id, key)?.copied() {
-                    if let Some(block) = block_cursor.seek(right).optional()? {
+                    if let Some(_) = block_cursor.seek(right).optional()? {
                         // move until the left-most block
                         while let Some(block) = block_cursor.left()? {
                             right = block.id;

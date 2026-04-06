@@ -99,8 +99,8 @@ impl From<CollectionAllocErr> for Error {
     }
 }
 
-impl Into<std::fmt::Error> for crate::Error {
-    fn into(self) -> std::fmt::Error {
+impl From<crate::Error> for std::fmt::Error {
+    fn from(_val: crate::Error) -> Self {
         std::fmt::Error
     }
 }
@@ -171,7 +171,7 @@ impl ClientID {
     }
 
     pub fn new(id: U32) -> Option<Self> {
-        let id = Self(id.into());
+        let id = Self(id);
         if id.is_valid() { Some(id) } else { None }
     }
 

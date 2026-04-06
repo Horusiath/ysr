@@ -38,8 +38,8 @@ where
     #[inline]
     fn integrate(
         self,
-        insert: &mut InsertBlockData,
-        tx: &mut Transaction,
+        _insert: &mut InsertBlockData,
+        _tx: &mut Transaction,
     ) -> crate::Result<Self::Return> {
         Ok(())
     }

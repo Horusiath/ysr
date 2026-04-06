@@ -286,7 +286,7 @@ impl<'a> Content<'a> {
 /// Map offset given as UTF16 code points to byte offset in UTF8 encoded string.
 pub(crate) fn utf16_to_utf8(str: &str, utf16: usize) -> Option<usize> {
     let mut offset = 0;
-    for ch in str.encode_utf16() {
+    for _ in str.encode_utf16() {
         if offset == utf16 {
             break;
         }
@@ -397,7 +397,7 @@ impl<'a> TryFrom<Content<'a>> for NodeID {
                     .map_err(|_| crate::Error::InvalidMapping("NodeID"))?;
                 Ok(node_id)
             }
-            _ => return Err(crate::Error::InvalidMapping("node")),
+            _ => Err(crate::Error::InvalidMapping("node")),
         }
     }
 }

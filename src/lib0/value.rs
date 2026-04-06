@@ -124,10 +124,10 @@ impl Serialize for Value {
             Value::Int(v) => serializer.serialize_i64(*v),
             Value::Float(v) => serializer.serialize_f64(*v),
             Value::Bool(v) => serializer.serialize_bool(*v),
-            Value::String(v) => serializer.serialize_str(&*v),
+            Value::String(v) => serializer.serialize_str(v),
             Value::Object(v) => v.serialize(serializer),
             Value::Array(v) => v.serialize(serializer),
-            Value::ByteArray(v) => serializer.serialize_bytes(&*v),
+            Value::ByteArray(v) => serializer.serialize_bytes(v),
         }
     }
 }
@@ -275,7 +275,7 @@ impl Display for Value {
                 if let Some((k, v)) = i.next() {
                     write!(f, "\"{}\": {}", k, v)?;
                 }
-                while let Some((k, v)) = i.next() {
+                for (k, v) in i {
                     write!(f, ", \"{}\": {}", k, v)?;
                 }
                 write!(f, "}}")
@@ -286,7 +286,7 @@ impl Display for Value {
                 if let Some(v) = i.next() {
                     write!(f, "{}", v)?;
                 }
-                while let Some(v) = i.next() {
+                for v in i {
                     write!(f, ", {}", v)?;
                 }
                 write!(f, "]")
@@ -490,7 +490,7 @@ impl<'de> Deserializer<'de> for Value {
     #[inline]
     fn deserialize_unit_struct<V>(
         self,
-        name: &'static str,
+        _name: &'static str,
         visitor: V,
     ) -> Result<V::Value, Self::Error>
     where
@@ -502,7 +502,7 @@ impl<'de> Deserializer<'de> for Value {
     #[inline]
     fn deserialize_newtype_struct<V>(
         self,
-        name: &'static str,
+        _name: &'static str,
         visitor: V,
     ) -> Result<V::Value, Self::Error>
     where
@@ -547,7 +547,7 @@ impl<'de> Deserializer<'de> for Value {
         V: Visitor<'de>,
     {
         match self {
-            Value::Object(mut map) => visitor.visit_map(MapDeserializer::new(map.into_iter())),
+            Value::Object(map) => visitor.visit_map(MapDeserializer::new(map.into_iter())),
             other => Err(super::Error::InvalidType(other.kind())),
         }
     }
@@ -555,8 +555,8 @@ impl<'de> Deserializer<'de> for Value {
     #[inline]
     fn deserialize_struct<V>(
         self,
-        name: &'static str,
-        fields: &'static [&'static str],
+        _name: &'static str,
+        _fields: &'static [&'static str],
         visitor: V,
     ) -> Result<V::Value, Self::Error>
     where
@@ -567,8 +567,8 @@ impl<'de> Deserializer<'de> for Value {
 
     fn deserialize_enum<V>(
         self,
-        name: &'static str,
-        variants: &'static [&'static str],
+        _name: &'static str,
+        _variants: &'static [&'static str],
         visitor: V,
     ) -> Result<V::Value, Self::Error>
     where

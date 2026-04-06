@@ -1,7 +1,7 @@
 use crate::lmdb::{Cursor, Database, Error as LmdbError};
 use crate::node::NodeID;
-use crate::store::{Db, KEY_PREFIX_MAP};
-use crate::{ID, Optional, U32};
+use crate::store::KEY_PREFIX_MAP;
+use crate::{ID, U32};
 use smallvec::{ExtendFromSlice, SmallVec};
 use std::fmt::{Debug, Formatter};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
@@ -119,7 +119,7 @@ enum HashKeysState<'tx> {
 
 impl<'tx> HashKeys<'tx> {
     pub fn new(db: &'tx Database<'tx>, node_id: NodeID, hash: crate::U32) -> Self {
-        let mut key = HashKeyPrefix::new(node_id, hash);
+        let key = HashKeyPrefix::new(node_id, hash);
 
         HashKeys {
             prefix: key,

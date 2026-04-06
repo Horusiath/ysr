@@ -9,7 +9,7 @@ use crate::store::Db;
 use crate::store::content_store::ContentStore;
 use crate::types::Capability;
 use crate::{Block, BlockHeader, Clock, In, Mounted, Out, Transaction, lib0};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
@@ -48,8 +48,8 @@ impl<'tx, 'db> TextRef<&'tx Transaction<'db>> {
     /// scoped between two provided snapshots.
     pub fn chunks_between(
         &self,
-        from: Option<&Snapshot>,
-        to: Option<&Snapshot>,
+        _from: Option<&Snapshot>,
+        _to: Option<&Snapshot>,
     ) -> impl Iterator<Item = crate::Result<Chunk>> {
         todo!();
         [].into_iter()
@@ -97,8 +97,8 @@ impl<'tx, 'db> Display for TextRef<&'tx Transaction<'db>> {
             // right id should always point at the beginning of the block, so
             // direct seek should be fine
             let block = cursor.seek(right_id).map_err(|_| std::fmt::Error)?;
-            if block.is_countable() && !block.is_deleted() {
-                if block.content_type() == ContentType::String {
+            if block.is_countable() && !block.is_deleted()
+                && block.content_type() == ContentType::String {
                     let data = match block.try_inline_data() {
                         Some(data) => data,
                         None => contents.get(*block.id()).map_err(|_| std::fmt::Error)?,
@@ -106,7 +106,6 @@ impl<'tx, 'db> Display for TextRef<&'tx Transaction<'db>> {
                     let str = unsafe { std::str::from_utf8_unchecked(data) };
                     str.fmt(f)?;
                 }
-            }
             next = block.right().cloned();
         }
 
@@ -146,7 +145,7 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
         let blocks = db.blocks();
         let mut ctx = IntegrationContext::create(&mut insert, Clock::new(0), &blocks)?;
         insert.integrate(&db, state, &mut ctx)?;
-        value.integrate(&mut insert, &mut self.tx)?;
+        value.integrate(&mut insert, self.tx)?;
         self.block = ctx.parent.unwrap();
         Ok(())
     }
@@ -154,7 +153,7 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
     pub fn insert_with<S1, S2, A, V>(
         &mut self,
         index: usize,
-        chunk: S1,
+        _chunk: S1,
         attrs: A,
     ) -> crate::Result<()>
     where
@@ -163,7 +162,7 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
         V: Into<lib0::Value>,
         A: IntoIterator<Item = (S2, V)>,
     {
-        let mut pos = BlockPosition::seek(self.tx, self.block.start().copied(), index)?;
+        let _pos = BlockPosition::seek(self.tx, self.block.start().copied(), index)?;
         let mut attributes = Attrs::new();
         for (key, value) in attrs {
             attributes.insert(key.into(), value.into());
@@ -172,7 +171,7 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
         todo!()
     }
 
-    pub fn insert_embed<V>(&mut self, index: usize, value: V) -> crate::Result<V::Return>
+    pub fn insert_embed<V>(&mut self, _index: usize, _value: V) -> crate::Result<V::Return>
     where
         V: Prelim,
     {
@@ -181,9 +180,9 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
 
     pub fn insert_embed_with<S, A, V1, V2>(
         &mut self,
-        index: usize,
-        value: V1,
-        attrs: A,
+        _index: usize,
+        _value: V1,
+        _attrs: A,
     ) -> crate::Result<()>
     where
         S: AsRef<str>,
@@ -202,14 +201,14 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
         self.insert(len, chunk)
     }
 
-    pub fn remove_range<R>(&mut self, range: R) -> crate::Result<()>
+    pub fn remove_range<R>(&mut self, _range: R) -> crate::Result<()>
     where
         R: RangeBounds<usize>,
     {
         todo!()
     }
 
-    pub fn format<A, S, V>(&mut self, start: usize, end: usize, attrs: A) -> crate::Result<()>
+    pub fn format<A, S, V>(&mut self, _start: usize, _end: usize, _attrs: A) -> crate::Result<()>
     where
         S: AsRef<str>,
         V: Serialize,
@@ -218,7 +217,7 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
         todo!()
     }
 
-    pub fn apply_delta<I>(&mut self, delta: I) -> crate::Result<()>
+    pub fn apply_delta<I>(&mut self, _delta: I) -> crate::Result<()>
     where
         I: IntoIterator<Item = Delta<In>>,
     {
@@ -273,8 +272,8 @@ where
 
     fn integrate(
         self,
-        insert: &mut InsertBlockData,
-        tx: &mut Transaction,
+        _insert: &mut InsertBlockData,
+        _tx: &mut Transaction,
     ) -> crate::Result<Self::Return> {
         todo!()
     }
@@ -432,7 +431,7 @@ impl BlockPosition {
         Ok(pos)
     }
 
-    fn minimize(&mut self, attrs: &Attrs) -> crate::Result<()> {
+    fn minimize(&mut self, _attrs: &Attrs) -> crate::Result<()> {
         todo!()
         // go right while attrs[right.key] === right.value (or right is deleted)
         //while let Some(i) = self.right.as_deref() {

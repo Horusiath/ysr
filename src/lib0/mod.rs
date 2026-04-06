@@ -65,7 +65,7 @@ impl TryFrom<u8> for Tag {
     }
 }
 
-pub const F64_MAX_SAFE_INTEGER: i64 = (i64::pow(2, 53) - 1);
+pub const F64_MAX_SAFE_INTEGER: i64 = i64::pow(2, 53) - 1 ;
 pub const F64_MIN_SAFE_INTEGER: i64 = -F64_MAX_SAFE_INTEGER;
 
 use crate::lib0::value::ValueKind;

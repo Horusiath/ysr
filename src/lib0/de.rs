@@ -97,7 +97,7 @@ impl<R: Read> Deserializer<R> {
     }
 }
 
-impl<'a, 'de, R: Read> serde::Deserializer<'de> for &'a mut Deserializer<R> {
+impl<'de, R: Read> serde::Deserializer<'de> for &mut Deserializer<R> {
     type Error = super::Error;
 
     fn deserialize_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>
@@ -762,8 +762,8 @@ impl<'a, 'de, R: Read> de::Deserializer<'de> for MapKey<'a, R> {
     #[inline]
     fn deserialize_enum<V>(
         self,
-        name: &'static str,
-        variants: &'static [&'static str],
+        _name: &'static str,
+        _variants: &'static [&'static str],
         visitor: V,
     ) -> Result<V::Value, Self::Error>
     where

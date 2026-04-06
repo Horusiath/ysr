@@ -90,8 +90,8 @@ impl<'tx> BlockStore<'tx> {
                         let data = data.to_vec();
                         let left_bytes = &data[..utf8_offset];
                         let right_bytes = &data[utf8_offset..];
-                        contents.insert(*left.id(), &left_bytes)?;
-                        contents.insert(*right.id(), &right_bytes)?;
+                        contents.insert(*left.id(), left_bytes)?;
+                        contents.insert(*right.id(), right_bytes)?;
                     }
                 }
             }
@@ -180,7 +180,7 @@ impl<'tx> BlockCursor<'tx> {
         if let Ok(Some(current_id)) = self.current_id()
             && current_id == &id
         {
-            return Ok(self.current()?);
+            return self.current();
         }
 
         let key = BlockKey::new(id);
@@ -229,8 +229,8 @@ impl<'tx> BlockCursor<'tx> {
     pub fn next(&mut self) -> crate::Result<Option<Block<'tx>>> {
         match self.cursor.next() {
             Ok(_) => self.current().optional(),
-            Err(LmdbError::NOT_FOUND) => return Ok(None),
-            Err(e) => return Err(e.into()),
+            Err(LmdbError::NOT_FOUND) => Ok(None),
+            Err(e) => Err(e.into()),
         }
     }
 
@@ -239,8 +239,8 @@ impl<'tx> BlockCursor<'tx> {
     pub fn prev(&mut self) -> crate::Result<Option<Block<'tx>>> {
         match self.cursor.prev() {
             Ok(_) => self.current().optional(),
-            Err(LmdbError::NOT_FOUND) => return Ok(None),
-            Err(e) => return Err(e.into()),
+            Err(LmdbError::NOT_FOUND) => Ok(None),
+            Err(e) => Err(e.into()),
         }
     }
 

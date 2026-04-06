@@ -1,9 +1,8 @@
 use crate::read::ReadExt;
 use crate::write::WriteExt;
 use crate::{ClientID, U32, U64};
-use std::convert::Infallible;
 use std::fmt::{Display, Formatter};
-use std::io::{ErrorKind, Read, Write};
+use std::io::{Read, Write};
 
 #[derive(Debug, Clone, Copy)]
 pub struct VarIntOutOfRangeError;
@@ -15,8 +14,7 @@ impl Display for VarIntOutOfRangeError {
 }
 
 fn out_of_range<T>() -> std::io::Result<T> {
-    Err(std::io::Error::new(
-        ErrorKind::Other,
+    Err(std::io::Error::other(
         Box::new(VarIntOutOfRangeError),
     ))
 }
@@ -85,7 +83,7 @@ impl VarInt for u128 {
             let b = ((value & 0b01111111) as u8) | 0b10000000;
             w.write_u8(b)?;
             n += 1;
-            value = value >> 7;
+            value >>= 7;
         }
         w.write_u8((value & 0b01111111) as u8)?;
         Ok(n)
@@ -246,7 +244,7 @@ fn write_var_u32<W: Write>(mut value: u32, w: &mut W) -> std::io::Result<usize> 
         let b = ((value & 0b01111111) as u8) | 0b10000000;
         w.write_u8(b)?;
         n += 1;
-        value = value >> 7;
+        value >>= 7;
     }
     w.write_u8((value & 0b01111111) as u8)?;
     Ok(n)
@@ -258,7 +256,7 @@ fn write_var_u64<W: Write>(mut value: u64, w: &mut W) -> std::io::Result<usize> 
         let b = ((value & 0b01111111) as u8) | 0b10000000;
         w.write_u8(b)?;
         n += 1;
-        value = value >> 7;
+        value >>= 7;
     }
     w.write_u8((value & 0b01111111) as u8)?;
     Ok(n)

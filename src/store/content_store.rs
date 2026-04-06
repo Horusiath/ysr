@@ -1,7 +1,7 @@
 use crate::block_reader::BlockRange;
 use crate::content::{Content, ContentType};
 use crate::lmdb::{Cursor, Database, Error as LmdbError};
-use crate::store::{Db, KEY_PREFIX_CONTENT, ReadableBytes};
+use crate::store::{KEY_PREFIX_CONTENT, ReadableBytes};
 use crate::{ID, Optional};
 use std::borrow::Cow;
 use std::fmt::{Debug, Formatter};
@@ -39,7 +39,7 @@ impl<'a> ContentStore<'a> {
         let mut cursor = self.db.cursor()?;
         for content in content {
             let key = BlockContentKey::new(id);
-            cursor.put(key.as_bytes(), &content.bytes(), 0)?;
+            cursor.put(key.as_bytes(), content.bytes(), 0)?;
             id.clock += 1; // this will only happen for multipart
         }
         Ok(())
@@ -94,7 +94,7 @@ impl<'a> ContentStore<'a> {
     }
 }
 
-fn parse_id<'a>(key: &'a [u8]) -> crate::Result<Option<&'a ID>> {
+fn parse_id(key: &[u8]) -> crate::Result<Option<&ID>> {
     if key[0] != ContentStore::PREFIX {
         return Ok(None);
     }

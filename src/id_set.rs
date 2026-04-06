@@ -213,7 +213,7 @@ impl IDRange {
         if let Some(r) = i.next() {
             let mut prev_start = r.start;
             let mut prev_end = r.end;
-            while let Some(r) = i.next() {
+            for r in i {
                 if r.start < prev_end {
                     return false;
                 }

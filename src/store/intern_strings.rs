@@ -128,11 +128,10 @@ impl InternStringsKey {
     }
 
     pub fn parse(key: &[u8]) -> Option<&Self> {
-        if let Ok(this) = Self::ref_from_bytes(key) {
-            if this.tag == KEY_PREFIX_INTERN_STR {
+        if let Ok(this) = Self::ref_from_bytes(key)
+            && this.tag == KEY_PREFIX_INTERN_STR {
                 return Some(this);
             }
-        }
         None
     }
 }

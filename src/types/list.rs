@@ -66,13 +66,13 @@ impl<'tx, 'db> ListRef<&'tx Transaction<'db>> {
     where
         T: Materialize,
     {
-        Iter::new(&self.tx, self.block.start().copied())
+        Iter::new(self.tx, self.block.start().copied())
     }
 
     pub fn to_value(&self) -> crate::Result<Value> {
         let mut buf = Vec::new();
-        let mut iter = self.iter::<crate::Out>();
-        while let Some(result) = iter.next() {
+        let iter = self.iter::<crate::Out>();
+        for result in iter {
             match result? {
                 Out::Value(value) => buf.push(value),
                 Out::Node(node) => {
@@ -138,7 +138,7 @@ impl<'tx, 'db> ListRef<&'tx mut Transaction<'db>> {
         value.prepare(&mut insert)?;
         let mut ctx = IntegrationContext::create(&mut insert, Clock::new(0), &blocks)?;
         insert.integrate(&db, state, &mut ctx)?;
-        value.integrate(&mut insert, &mut self.tx)?;
+        value.integrate(&mut insert, self.tx)?;
         self.block = ctx.parent.unwrap();
         Ok(())
     }
@@ -171,7 +171,7 @@ impl<'tx, 'db> ListRef<&'tx mut Transaction<'db>> {
             value.prepare(&mut insert)?;
             let mut ctx = IntegrationContext::create(&mut insert, Clock::new(0), &blocks)?;
             insert.integrate(&db, state, &mut ctx)?;
-            value.integrate(&mut insert, &mut self.tx)?;
+            value.integrate(&mut insert, self.tx)?;
             self.block = ctx.parent.unwrap();
         }
 

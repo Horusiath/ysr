@@ -1,7 +1,7 @@
 use crate::lib0::Value;
 use crate::node::NodeType;
 use crate::types::Capability;
-use crate::{ListRef, MapRef, Mounted, TextRef, Transaction, lib0};
+use crate::{ListRef, MapRef, Mounted, TextRef, Transaction};
 
 pub type DynRef<Txn> = Mounted<Dyn, Txn>;
 

@@ -22,7 +22,7 @@ impl IntegrationContext {
     ) -> crate::Result<Self> {
         let left = if let Some(&origin) = target.block.origin_left() {
             Some(match blocks.split(origin)? {
-                SplitResult::Unchanged(left) => left.into(),
+                SplitResult::Unchanged(left) => left,
                 SplitResult::Split(_, right) => right,
             })
         } else {
@@ -30,7 +30,7 @@ impl IntegrationContext {
         };
         let right = if let Some(&origin) = target.block.origin_right() {
             Some(match blocks.split(origin)? {
-                SplitResult::Unchanged(block) => block.into(),
+                SplitResult::Unchanged(block) => block,
                 SplitResult::Split(_, right) => right,
             })
         } else {
@@ -40,10 +40,7 @@ impl IntegrationContext {
         if target.parent().is_none() {
             let parent = match &left {
                 Some(left) => Some(*left.deref().parent()),
-                None => match &right {
-                    None => None,
-                    Some(right) => Some(*right.deref().parent()),
-                },
+                None => right.as_ref().map(|right| *right.parent()),
             };
             if let Some(parent) = parent {
                 target.block.set_parent(parent);
@@ -68,7 +65,7 @@ impl IntegrationContext {
         })
     }
 
-    pub fn detect_conflict(&self, target: &InsertBlockData) -> bool {
+    pub fn detect_conflict(&self, _target: &InsertBlockData) -> bool {
         // original code: ((!target.left && (!target.right || target.right.left !== null)) || (target.left && target.left.right !== target.right))
         match (&self.left, &self.right) {
             (None, None) => true,                          // !target.left && !target.right
@@ -100,7 +97,7 @@ impl IntegrationContext {
                 }
                 break;
             }
-            o.clone()
+            o
         } else {
             parent.start().copied()
         };
@@ -116,15 +113,15 @@ impl IntegrationContext {
             if self.right.as_ref().map(|r| r.id()) == Some(&item) {
                 break;
             }
-            items_before_origin.insert(item.clone());
-            conflicting_items.insert(item.clone());
+            items_before_origin.insert(item);
+            conflicting_items.insert(item);
 
             let item = blocks.get(item)?;
             if target.block.origin_left() == item.origin_left() {
                 // case 1
                 let item_id = item.id();
                 if item_id.client < target.id().client {
-                    left = Some(item_id.clone());
+                    left = Some(*item_id);
                     conflicting_items.clear();
                 } else if target.block.origin_right() == item.origin_right() {
                     // `self` and `item` are conflicting and point to the same integration

@@ -36,7 +36,7 @@ impl std::error::Error for Error {}
 /// Convert a raw LMDB return code into a `Result`.
 #[inline]
 fn lmdb_result(code: i32) -> Result<(), Error> {
-    if code == MDB_SUCCESS as i32 {
+    if code == MDB_SUCCESS {
         Ok(())
     } else {
         Err(Error(code))
@@ -299,7 +299,7 @@ impl<'txn> Cursor<'txn> {
         let mut key_val = to_mdb_val(key);
         let mut data_val = empty_mdb_val();
         let rc =
-            unsafe { mdb_cursor_get(self.cursor, &mut key_val, &mut data_val, MDB_SET as u32) };
+            unsafe { mdb_cursor_get(self.cursor, &mut key_val, &mut data_val, MDB_SET) };
         lmdb_result(rc)
     }
 
@@ -312,7 +312,7 @@ impl<'txn> Cursor<'txn> {
                 self.cursor,
                 &mut key_val,
                 &mut data_val,
-                MDB_SET_RANGE as u32,
+                MDB_SET_RANGE,
             )
         };
         lmdb_result(rc)
@@ -323,7 +323,7 @@ impl<'txn> Cursor<'txn> {
         let mut key_val = empty_mdb_val();
         let mut data_val = empty_mdb_val();
         let rc =
-            unsafe { mdb_cursor_get(self.cursor, &mut key_val, &mut data_val, MDB_NEXT as u32) };
+            unsafe { mdb_cursor_get(self.cursor, &mut key_val, &mut data_val, MDB_NEXT) };
         lmdb_result(rc)
     }
 
@@ -332,7 +332,7 @@ impl<'txn> Cursor<'txn> {
         let mut key_val = empty_mdb_val();
         let mut data_val = empty_mdb_val();
         let rc =
-            unsafe { mdb_cursor_get(self.cursor, &mut key_val, &mut data_val, MDB_PREV as u32) };
+            unsafe { mdb_cursor_get(self.cursor, &mut key_val, &mut data_val, MDB_PREV) };
         lmdb_result(rc)
     }
 
@@ -345,7 +345,7 @@ impl<'txn> Cursor<'txn> {
                 self.cursor,
                 &mut key_val,
                 &mut data_val,
-                MDB_GET_CURRENT as u32,
+                MDB_GET_CURRENT,
             )
         };
         lmdb_result(rc)?;
@@ -361,7 +361,7 @@ impl<'txn> Cursor<'txn> {
                 self.cursor,
                 &mut key_val,
                 &mut data_val,
-                MDB_GET_CURRENT as u32,
+                MDB_GET_CURRENT,
             )
         };
         lmdb_result(rc)?;
@@ -388,14 +388,14 @@ impl<'txn> Cursor<'txn> {
                 self.cursor,
                 &mut key_val,
                 &mut old_data,
-                MDB_GET_CURRENT as u32,
+                MDB_GET_CURRENT,
             )
         };
         lmdb_result(rc)?;
         // Overwrite value in place.
         let mut new_data = to_mdb_val(value);
         let rc =
-            unsafe { mdb_cursor_put(self.cursor, &mut key_val, &mut new_data, MDB_CURRENT as u32) };
+            unsafe { mdb_cursor_put(self.cursor, &mut key_val, &mut new_data, MDB_CURRENT) };
         lmdb_result(rc)
     }
 
@@ -417,4 +417,4 @@ impl Drop for Cursor<'_> {
 // ---------------------------------------------------------------------------
 
 /// Flag for `mdb_dbi_open`: create the database if it doesn't exist.
-pub const MDB_DB_CREATE: u32 = MDB_CREATE as u32;
+pub const MDB_DB_CREATE: u32 = MDB_CREATE;

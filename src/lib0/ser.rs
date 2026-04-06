@@ -70,7 +70,7 @@ impl<'a, W: Write> serde::ser::Serializer for &'a mut Serializer<W> {
     }
 
     fn serialize_i64(self, v: i64) -> Result<Self::Ok, Self::Error> {
-        if v <= super::F64_MAX_SAFE_INTEGER && v >= super::F64_MIN_SAFE_INTEGER {
+        if (super::F64_MIN_SAFE_INTEGER..=super::F64_MAX_SAFE_INTEGER).contains(&v) {
             // TYPE 125: INTEGER
             self.writer.write_u8(TAG_INTEGER)?;
             self.writer.write_var(v)?;
@@ -550,7 +550,7 @@ impl<'a, 'b, W: Write> serde::Serializer for &'b mut MapSerializer<'a, W> {
     }
 
     #[inline]
-    fn serialize_some<T>(self, value: &T) -> Result<Self::Ok, Self::Error>
+    fn serialize_some<T>(self, _value: &T) -> Result<Self::Ok, Self::Error>
     where
         T: ?Sized + Serialize,
     {

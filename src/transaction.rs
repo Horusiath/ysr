@@ -1,28 +1,24 @@
-use crate::block::{Block, BlockMut, ID, InsertBlockData};
-use crate::block_reader::{BlockRange, Carrier, Update};
-use crate::content::{ContentType, FormatAttribute};
+use crate::block::{Block, BlockMut, ID};
+use crate::block_reader::{Carrier, Update};
+use crate::content::ContentType;
 use crate::id_set::IDSet;
-use crate::integrate::IntegrationContext;
 use crate::lmdb::{Database, Dbi, RwTxn};
 use crate::node::{Node, NodeID};
 use crate::prelim::Prelim;
 use crate::read::Decoder;
 use crate::state_vector::Snapshot;
-use crate::store::block_store::{BlockCursor, BlockStore};
+use crate::store::block_store::BlockCursor;
 use crate::store::content_store::ContentStore;
 use crate::store::intern_strings::InternStringsStore;
-use crate::store::map_entries::MapEntries;
 use crate::store::{Db, MapEntriesStore};
 use crate::write::{Encode, Encoder, EncoderV1, WriteExt};
 use crate::{ClientID, Clock, Optional, StateVector, U32};
 use bitflags::bitflags;
 use bytes::{BufMut, Bytes, BytesMut};
-use smallvec::{SmallVec, smallvec};
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
 use std::io::Write;
-use std::ops::Deref;
 use zerocopy::IntoBytes;
 
 pub(crate) struct TransactionState {
@@ -159,8 +155,8 @@ impl TransactionState {
 
         // transaction.afterState = getStateVector(transaction.doc.store)
 
-        if let Some(summary) = summary {
-            if summary.flags.contains(CommitFlags::OBSERVE_NODES) {
+        if let Some(summary) = summary
+            && summary.flags.contains(CommitFlags::OBSERVE_NODES) {
                 // gather info about which nodes have changed
                 todo!();
                 if summary.flags.contains(CommitFlags::OBSERVE_NODES_DEEP) {
@@ -168,7 +164,6 @@ impl TransactionState {
                     todo!();
                 }
             }
-        }
 
         //if (doc.gc) {
         //  tryGcDeleteSet(ds, store, doc.gcFilter)
@@ -209,7 +204,7 @@ impl TransactionState {
         key_changes: &mut BTreeMap<(NodeID, U32, ID), ID>,
     ) -> crate::Result<ID> {
         let mut right: BlockMut = cursor.current()?.into();
-        let end = *right.id();
+        let _end = *right.id();
         let mut left = cursor.prev()?.map(BlockMut::from);
         while let Some(mut curr) = left {
             if curr.merge(right.as_block()) {
@@ -699,7 +694,7 @@ impl<'db> Transaction<'db> {
                         if !block.is_deleted() && block.id().clock < clock_start {
                             // split the first item if necessary
                             let offset = clock_start - block.id().clock;
-                            let mut left: BlockMut = block.clone().into();
+                            let mut left: BlockMut = block.into();
                             if let Some(right) = left.split(offset) {
                                 block_cursor.update_current(left.header())?;
                                 block_cursor.insert(right.as_block())?;
@@ -713,7 +708,7 @@ impl<'db> Transaction<'db> {
                             if !block.is_deleted() {
                                 if block.id().clock + block.clock_len() > clock_end {
                                     let offset = clock_end - block.id().clock;
-                                    let mut left: BlockMut = block.clone().into();
+                                    let mut left: BlockMut = block.into();
                                     if let Some(right) = left.split(offset) {
                                         block_cursor.update_current(left.header())?;
                                         block_cursor.insert(right.as_block())?;
@@ -765,29 +760,26 @@ impl<'db> Transaction<'db> {
     /// Returns the client ID of the missing dependency, or None if all dependencies are satisfied.
     fn missing_dependency(block: &Carrier, local_sv: &StateVector) -> Option<ClientID> {
         if let Carrier::Block(insert) = block {
-            if let Some(origin) = &insert.block.origin_left() {
-                if origin.client != insert.id().client
+            if let Some(origin) = &insert.block.origin_left()
+                && origin.client != insert.id().client
                     && origin.clock >= local_sv.get(&origin.client)
                 {
                     return Some(origin.client);
                 }
-            }
 
-            if let Some(right_origin) = &insert.block.origin_right() {
-                if right_origin.client != insert.id().client
+            if let Some(right_origin) = &insert.block.origin_right()
+                && right_origin.client != insert.id().client
                     && right_origin.clock >= local_sv.get(&right_origin.client)
                 {
                     return Some(right_origin.client);
                 }
-            }
 
-            if let Some(Node::Nested(parent)) = insert.parent() {
-                if parent.client != insert.id().client
+            if let Some(Node::Nested(parent)) = insert.parent()
+                && parent.client != insert.id().client
                     && parent.clock >= local_sv.get(&parent.client)
                 {
                     return Some(parent.client);
                 }
-            }
         }
 
         None

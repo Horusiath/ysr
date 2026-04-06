@@ -2,7 +2,7 @@ use crate::Transaction;
 use crate::block::{BlockMut, ID};
 use crate::node::{Node, NodeID, NodeType};
 use crate::store::Db;
-use std::borrow::{Borrow, BorrowMut, Cow};
+use std::borrow::{Borrow, Cow};
 use std::marker::PhantomData;
 
 pub mod dynamic;

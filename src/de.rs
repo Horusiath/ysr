@@ -67,7 +67,7 @@ impl<T: DeserializeOwned> Materialize for T {
             return Err(Error::NotFound);
         }
         let deserializer = BlockDeserializer::new(block, db.blocks(), db.contents());
-        Ok(T::deserialize(deserializer)?)
+        T::deserialize(deserializer)
     }
 
     fn materialize_fragment<'tx, 'db>(
@@ -158,11 +158,11 @@ impl<'de> Deserializer<'de> for BlockDeserializer<'de> {
             }
             ContentType::Binary => {
                 let bytes = read_block_data(&self.block, &self.content_store)?;
-                visitor.visit_bytes(&bytes)
+                visitor.visit_bytes(bytes)
             }
             ContentType::String => {
                 let bytes = read_block_data(&self.block, &self.content_store)?;
-                let str = unsafe { std::str::from_utf8_unchecked(&bytes) };
+                let str = unsafe { std::str::from_utf8_unchecked(bytes) };
                 visitor.visit_str(str)
             }
             ContentType::Format => {
@@ -490,7 +490,7 @@ impl<'de> Deserializer<'de> for BlockDeserializer<'de> {
 
     fn deserialize_unit_struct<V>(
         self,
-        name: &'static str,
+        _name: &'static str,
         visitor: V,
     ) -> Result<V::Value, Self::Error>
     where
@@ -501,7 +501,7 @@ impl<'de> Deserializer<'de> for BlockDeserializer<'de> {
 
     fn deserialize_newtype_struct<V>(
         self,
-        name: &'static str,
+        _name: &'static str,
         visitor: V,
     ) -> Result<V::Value, Self::Error>
     where
@@ -510,14 +510,14 @@ impl<'de> Deserializer<'de> for BlockDeserializer<'de> {
         visitor.visit_newtype_struct(self)
     }
 
-    fn deserialize_seq<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    fn deserialize_seq<V>(self, _visitor: V) -> Result<V::Value, Self::Error>
     where
         V: Visitor<'de>,
     {
         todo!()
     }
 
-    fn deserialize_tuple<V>(self, len: usize, visitor: V) -> Result<V::Value, Self::Error>
+    fn deserialize_tuple<V>(self, _len: usize, _visitor: V) -> Result<V::Value, Self::Error>
     where
         V: Visitor<'de>,
     {
@@ -526,9 +526,9 @@ impl<'de> Deserializer<'de> for BlockDeserializer<'de> {
 
     fn deserialize_tuple_struct<V>(
         self,
-        name: &'static str,
-        len: usize,
-        visitor: V,
+        _name: &'static str,
+        _len: usize,
+        _visitor: V,
     ) -> Result<V::Value, Self::Error>
     where
         V: Visitor<'de>,
@@ -577,9 +577,9 @@ impl<'de> Deserializer<'de> for BlockDeserializer<'de> {
 
     fn deserialize_enum<V>(
         self,
-        name: &'static str,
-        variants: &'static [&'static str],
-        visitor: V,
+        _name: &'static str,
+        _variants: &'static [&'static str],
+        _visitor: V,
     ) -> Result<V::Value, Self::Error>
     where
         V: Visitor<'de>,
@@ -595,7 +595,7 @@ impl<'de> Deserializer<'de> for BlockDeserializer<'de> {
             let map_entries = self.blocks.inner().map_entries();
             let mut keys = map_entries.keys_for_hash(*self.block.parent(), hash);
             match keys.next()? {
-                Some((key, _id)) => visitor.visit_str(&key),
+                Some((key, _id)) => visitor.visit_str(key),
                 None => Err(Error::InvalidMapping("identifier")),
             }
         } else {
@@ -939,8 +939,8 @@ impl<'de> SeqAccess<'de> for ListNodeDeserializer<'de> {
                 if !block.is_deleted() {
                     let deserializer = BlockDeserializer::new(
                         block,
-                        self.blocks.clone(),
-                        self.content_store.clone(),
+                        self.blocks,
+                        self.content_store,
                     );
                     seed.deserialize(deserializer).map(Some)
                 } else {
@@ -1010,7 +1010,7 @@ impl<'de> MapAccess<'de> for MapNodeDeserializer<'de> {
         match self.current.take() {
             Some(block) => {
                 let deserializer =
-                    BlockDeserializer::new(block, self.blocks.clone(), self.content_store.clone());
+                    BlockDeserializer::new(block, self.blocks, self.content_store);
                 seed.deserialize(deserializer)
             }
             None => unreachable!(),

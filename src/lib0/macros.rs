@@ -70,7 +70,7 @@ impl TryFrom<u64> for Value {
             Err(value)
         } else {
             let value = value as i64;
-            if value <= F64_MAX_SAFE_INTEGER && value >= F64_MIN_SAFE_INTEGER {
+            if (F64_MIN_SAFE_INTEGER..=F64_MAX_SAFE_INTEGER).contains(&value) {
                 let v = value as f64;
                 Ok(Value::Float(v))
             } else {
@@ -147,7 +147,7 @@ impl TryFrom<Value> for bool {
 impl From<String> for Value {
     #[inline]
     fn from(value: String) -> Self {
-        Value::String(value.into())
+        Value::String(value)
     }
 }
 

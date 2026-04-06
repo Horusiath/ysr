@@ -96,7 +96,7 @@ pub trait ReadExt: Read + Sized {
     /// Read a variable length buffer.
     fn read_bytes<W: Write>(&mut self, w: &mut W) -> std::io::Result<u64> {
         let len: u64 = self.read_var()?;
-        Ok(std::io::copy(&mut self.take(len), w)?)
+        std::io::copy(&mut self.take(len), w)
     }
 
     /// Read string of variable length.

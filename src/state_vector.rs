@@ -5,8 +5,7 @@ use crate::write::{Encode, Encoder, WriteExt};
 use crate::{ClientID, ID};
 use std::cmp::Ordering;
 use std::collections::btree_map::Entry;
-use std::collections::{BTreeMap, HashMap};
-use std::hash::BuildHasherDefault;
+use std::collections::BTreeMap;
 use std::iter::FromIterator;
 
 /// State vector is a compact representation of all known blocks inserted and integrated into
@@ -61,7 +60,7 @@ impl StateVector {
         let e = self.0.entry(client).or_default();
         let value = *e;
         if delta > 0 {
-            *e = *e + delta;
+            *e += delta;
         }
         value
     }

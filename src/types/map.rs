@@ -54,11 +54,10 @@ impl<'tx: 'db, 'db> MapRef<&'tx Transaction<'db>> {
         while let Some(_) = iter.next()? {
             // we only need a direct seek, since `seek_containing` would catch at best deleted blocks
             // that we don't care about here
-            if let Some(block) = blocks_cursor.seek(*iter.block_id()?).optional()? {
-                if !block.is_deleted() {
+            if let Some(block) = blocks_cursor.seek(*iter.block_id()?).optional()?
+                && !block.is_deleted() {
                     len += 1;
                 }
-            }
         }
         Ok(len)
     }
@@ -119,13 +118,13 @@ impl<'tx, 'db> MapRef<&'tx mut Transaction<'db>> {
             left_id,
             None,
             Node::Nested(node_id),
-            Some(key.as_ref()),
+            Some(key),
         );
         value.prepare(&mut insert)?;
         let blocks = db.blocks();
         let mut ctx = IntegrationContext::create(&mut insert, Clock::new(0), &blocks)?;
         insert.integrate(&db, state, &mut ctx)?;
-        value.integrate(&mut insert, &mut self.tx)?;
+        value.integrate(&mut insert, self.tx)?;
         self.block = ctx.parent.unwrap();
         Ok(())
     }

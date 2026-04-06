@@ -50,7 +50,7 @@ impl Update {
 
             let client = decoder.read_client()?;
             let mut clock: Clock = decoder.read_var()?;
-            let blocks = clients.entry(client).or_insert_with(|| VecDeque::new());
+            let blocks = clients.entry(client).or_insert_with(VecDeque::new);
             // Attempt to pre-allocate memory for the blocks. If the capacity overflows and
             // allocation fails, return an error.
             blocks.try_reserve(blocks_len)?;
@@ -133,9 +133,9 @@ impl Update {
         Ok(Some(Carrier::Block(block)))
     }
 
-    fn read_content<'a>(
+    fn read_content(
         block: &mut BlockHeader,
-        decoder: &'a mut impl Decoder,
+        decoder: &mut impl Decoder,
     ) -> crate::Result<SmallVec<[Content<'static>; 1]>> {
         //TODO: a lot of the byte copying below could be just implemented via slices rather than Vec writes
         let mut result = SmallVec::new();

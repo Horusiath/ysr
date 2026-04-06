@@ -1,7 +1,6 @@
 use crate::lmdb::{Env, MDB_DB_CREATE};
 use crate::transaction::Origin;
 use crate::{ClientID, Transaction};
-use rand::random;
 
 pub struct MultiDoc {
     env: Env,
