@@ -39,12 +39,14 @@ impl<'tx, 'db> ListRef<&'tx Transaction<'db>> {
             let mut current = *start;
             let mut remaining = index;
             while let Some(block) = cursor.seek(current).optional()? {
-                let block_len = block.clock_len().get() as usize;
-                if block_len > remaining {
-                    return T::materialize_fragment(block, &db, remaining);
+                if !block.is_deleted() && block.is_countable() {
+                    let block_len = block.clock_len().get() as usize;
+                    if block_len > remaining {
+                        return T::materialize_fragment(block, &db, remaining);
+                    }
+                    remaining -= block_len;
                 }
 
-                remaining -= block_len;
                 match block.right() {
                     None => break,
                     Some(right) => current = *right,
