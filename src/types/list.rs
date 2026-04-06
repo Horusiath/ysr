@@ -626,7 +626,11 @@ mod test {
             let actual: Vec<_> = a1.iter::<Value>().map(Result::unwrap).collect();
             assert_eq!(
                 actual,
-                vec![Value::Int(1), Value::Bool(true), Value::Bool(false)]
+                vec![
+                    Value::Number(1.into()),
+                    Value::Bool(true),
+                    Value::Bool(false)
+                ]
             );
 
             t1.commit(None).unwrap();
@@ -642,7 +646,11 @@ mod test {
         let actual: Vec<_> = a2.iter::<Value>().map(Result::unwrap).collect();
         assert_eq!(
             actual,
-            vec![Value::Int(1), Value::Bool(true), Value::Bool(false)]
+            vec![
+                Value::Number(1.into()),
+                Value::Bool(true),
+                Value::Bool(false)
+            ]
         );
 
         t2.commit(None).unwrap();
@@ -908,7 +916,10 @@ mod test {
         array.push_back(2).unwrap();
 
         let actual: Vec<_> = array.iter::<Value>().map(Result::unwrap).collect();
-        assert_eq!(actual, vec![Value::Int(1), Value::Int(2)]);
+        assert_eq!(
+            actual,
+            vec![Value::Number(1.into()), Value::Number(2.into())]
+        );
 
         let data = tx.diff_update(&StateVector::default()).unwrap();
 
@@ -921,6 +932,9 @@ mod test {
         let array = arr.mount_mut(&mut tx).unwrap();
 
         let actual: Vec<_> = array.iter::<Value>().map(Result::unwrap).collect();
-        assert_eq!(actual, vec![Value::Int(1), Value::Int(2)]);
+        assert_eq!(
+            actual,
+            vec![Value::Number(1.into()), Value::Number(2.into())]
+        );
     }
 }

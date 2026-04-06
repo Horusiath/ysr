@@ -444,10 +444,8 @@ impl<'a> TryFrom<Content<'a>> for crate::Out {
                 Ok(Out::Value(Value::String(str)))
             }
             ContentType::Binary => match value.data {
-                Cow::Borrowed(bytes) => {
-                    Ok(Out::Value(Value::ByteArray(Bytes::copy_from_slice(bytes))))
-                }
-                Cow::Owned(bytes) => Ok(Out::Value(Value::ByteArray(bytes.into()))),
+                Cow::Borrowed(bytes) => Ok(Out::Value(Value::Bytes(Bytes::copy_from_slice(bytes)))),
+                Cow::Owned(bytes) => Ok(Out::Value(Value::Bytes(bytes.into()))),
             },
             _ => Err(crate::Error::InvalidMapping("Out")),
         }

@@ -33,26 +33,19 @@ impl<'tx, 'db> TextRef<&'tx Transaction<'db>> {
 
     /// Returns an iterator over uncommitted changes (deltas) made to this text type
     /// within its current transaction scope.
-    pub fn uncommitted(&self) -> impl Iterator<Item = crate::Result<Delta>> {
-        todo!();
-        [].into_iter()
+    pub fn uncommitted(&self) -> Uncommitted<'tx> {
+        Uncommitted::new(self)
     }
 
     /// Returns an iterator over all text and embedded chunks grouped by their applied attributes.
-    pub fn chunks(&self) -> impl Iterator<Item = crate::Result<Chunk>> {
-        todo!();
-        [].into_iter()
+    pub fn chunks(&self) -> Chunks<'tx> {
+        self.chunks_between(None, None)
     }
 
     /// Returns an iterator over all text and embedded chunks grouped by their applied attributes,
     /// scoped between two provided snapshots.
-    pub fn chunks_between(
-        &self,
-        _from: Option<&Snapshot>,
-        _to: Option<&Snapshot>,
-    ) -> impl Iterator<Item = crate::Result<Chunk>> {
-        todo!();
-        [].into_iter()
+    pub fn chunks_between(&self, from: Option<&Snapshot>, to: Option<&Snapshot>) -> Chunks<'tx> {
+        Chunks::new(self, from, to)
     }
 }
 
@@ -97,15 +90,17 @@ impl<'tx, 'db> Display for TextRef<&'tx Transaction<'db>> {
             // right id should always point at the beginning of the block, so
             // direct seek should be fine
             let block = cursor.seek(right_id).map_err(|_| std::fmt::Error)?;
-            if block.is_countable() && !block.is_deleted()
-                && block.content_type() == ContentType::String {
-                    let data = match block.try_inline_data() {
-                        Some(data) => data,
-                        None => contents.get(*block.id()).map_err(|_| std::fmt::Error)?,
-                    };
-                    let str = unsafe { std::str::from_utf8_unchecked(data) };
-                    str.fmt(f)?;
-                }
+            if block.is_countable()
+                && !block.is_deleted()
+                && block.content_type() == ContentType::String
+            {
+                let data = match block.try_inline_data() {
+                    Some(data) => data,
+                    None => contents.get(*block.id()).map_err(|_| std::fmt::Error)?,
+                };
+                let str = unsafe { std::str::from_utf8_unchecked(data) };
+                str.fmt(f)?;
+            }
             next = block.right().cloned();
         }
 
@@ -114,17 +109,7 @@ impl<'tx, 'db> Display for TextRef<&'tx Transaction<'db>> {
 }
 
 impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
-    pub fn insert<S>(&mut self, index: usize, chunk: S) -> crate::Result<()>
-    where
-        S: AsRef<str>,
-    {
-        let chunk = chunk.as_ref();
-        if chunk.is_empty() {
-            return Ok(());
-        }
-
-        let value = StringPrelim::new(chunk);
-        let pos = BlockPosition::seek(self.tx, self.block.start().copied(), index)?;
+    fn insert_at<P: Prelim>(&mut self, pos: BlockPosition, value: P) -> crate::Result<P::Return> {
         let node_id = *self.node_id();
         let db = self.tx.db.get();
         let state = self.tx.state.get_or_init(db);
@@ -145,9 +130,23 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
         let blocks = db.blocks();
         let mut ctx = IntegrationContext::create(&mut insert, Clock::new(0), &blocks)?;
         insert.integrate(&db, state, &mut ctx)?;
-        value.integrate(&mut insert, self.tx)?;
+        let result = value.integrate(&mut insert, self.tx)?;
         self.block = ctx.parent.unwrap();
-        Ok(())
+        Ok(result)
+    }
+
+    pub fn insert<S>(&mut self, index: usize, chunk: S) -> crate::Result<()>
+    where
+        S: AsRef<str>,
+    {
+        let chunk = chunk.as_ref();
+        if chunk.is_empty() {
+            return Ok(());
+        }
+
+        let value = StringPrelim::new(chunk);
+        let pos = BlockPosition::seek(self.tx, self.block.start().copied(), index)?;
+        self.insert_at(pos, value)
     }
 
     pub fn insert_with<S1, S2, A, V>(
@@ -171,11 +170,12 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
         todo!()
     }
 
-    pub fn insert_embed<V>(&mut self, _index: usize, _value: V) -> crate::Result<V::Return>
+    pub fn insert_embed<V>(&mut self, index: usize, value: V) -> crate::Result<V::Return>
     where
         V: Prelim,
     {
-        todo!()
+        let pos = BlockPosition::seek(self.tx, self.block.start().copied(), index)?;
+        self.insert_at(pos, value)
     }
 
     pub fn insert_embed_with<S, A, V1, V2>(
@@ -351,6 +351,46 @@ impl<T> Delta<T> {
             Delta::Deleted(len) => Delta::Deleted(len),
             Delta::Retain(len, attrs) => Delta::Retain(len, attrs),
         }
+    }
+}
+
+pub struct Uncommitted<'tx> {
+    tx: &'tx mut Transaction<'tx>,
+}
+
+impl<'tx> Uncommitted<'tx> {
+    fn new(text: &TextRef<&'tx Transaction<'_>>) -> Self {
+        todo!()
+    }
+}
+
+impl<'tx> Iterator for Uncommitted<'tx> {
+    type Item = crate::Result<Delta<Out>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        todo!()
+    }
+}
+
+pub struct Chunks<'tx> {
+    tx: &'tx mut Transaction<'tx>,
+}
+
+impl<'tx> Chunks<'tx> {
+    fn new(
+        text: &TextRef<&'tx Transaction<'_>>,
+        from: Option<&Snapshot>,
+        to: Option<&Snapshot>,
+    ) -> Self {
+        todo!()
+    }
+}
+
+impl<'tx> Iterator for Chunks<'tx> {
+    type Item = crate::Result<Chunk>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        todo!()
     }
 }
 

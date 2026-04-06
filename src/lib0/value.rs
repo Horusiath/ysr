@@ -9,13 +9,12 @@ use std::fmt::{Debug, Display, Formatter};
 pub enum ValueKind {
     Undefined,
     Null,
-    Int,
-    Float,
+    Number,
     Bool,
     String,
     Object,
     Array,
-    ByteArray,
+    Bytes,
 }
 
 impl Display for ValueKind {
@@ -23,13 +22,12 @@ impl Display for ValueKind {
         match self {
             ValueKind::Undefined => write!(f, "undefined"),
             ValueKind::Null => write!(f, "null"),
-            ValueKind::Int => write!(f, "int"),
-            ValueKind::Float => write!(f, "float"),
+            ValueKind::Number => write!(f, "number"),
             ValueKind::Bool => write!(f, "bool"),
             ValueKind::String => write!(f, "string"),
             ValueKind::Object => write!(f, "object"),
             ValueKind::Array => write!(f, "array"),
-            ValueKind::ByteArray => write!(f, "binary"),
+            ValueKind::Bytes => write!(f, "binary"),
         }
     }
 }
@@ -38,13 +36,12 @@ impl Display for ValueKind {
 pub enum Value {
     Undefined,
     Null,
-    Int(i64),
-    Float(f64),
+    Number(Number),
     Bool(bool),
     String(String),
     Object(HashMap<String, Value>),
     Array(Vec<Value>),
-    ByteArray(Bytes),
+    Bytes(Bytes),
 }
 
 impl Value {
@@ -52,13 +49,12 @@ impl Value {
         match self {
             Value::Undefined => ValueKind::Undefined,
             Value::Null => ValueKind::Null,
-            Value::Int(_) => ValueKind::Int,
-            Value::Float(_) => ValueKind::Float,
+            Value::Number(_) => ValueKind::Number,
             Value::Bool(_) => ValueKind::Bool,
             Value::String(_) => ValueKind::String,
             Value::Object(_) => ValueKind::Object,
             Value::Array(_) => ValueKind::Array,
-            Value::ByteArray(_) => ValueKind::ByteArray,
+            Value::Bytes(_) => ValueKind::Bytes,
         }
     }
 
@@ -121,13 +117,12 @@ impl Serialize for Value {
         match self {
             Value::Undefined => serializer.serialize_unit(),
             Value::Null => serializer.serialize_none(),
-            Value::Int(v) => serializer.serialize_i64(*v),
-            Value::Float(v) => serializer.serialize_f64(*v),
+            Value::Number(v) => v.serialize(serializer),
             Value::Bool(v) => serializer.serialize_bool(*v),
             Value::String(v) => serializer.serialize_str(v),
             Value::Object(v) => v.serialize(serializer),
             Value::Array(v) => v.serialize(serializer),
-            Value::ByteArray(v) => serializer.serialize_bytes(v),
+            Value::Bytes(v) => serializer.serialize_bytes(v),
         }
     }
 }
@@ -158,7 +153,7 @@ impl<'de> Deserialize<'de> for Value {
             where
                 E: Error,
             {
-                Ok(Value::Int(v))
+                Ok(v.into())
             }
 
             #[inline]
@@ -166,7 +161,7 @@ impl<'de> Deserialize<'de> for Value {
             where
                 E: Error,
             {
-                Ok(Value::Float(v as f64))
+                Ok(v.into())
             }
 
             #[inline]
@@ -174,7 +169,7 @@ impl<'de> Deserialize<'de> for Value {
             where
                 E: Error,
             {
-                Ok(Value::Float(v))
+                Ok(v.into())
             }
 
             #[inline]
@@ -265,8 +260,7 @@ impl Display for Value {
         match self {
             Value::Undefined => write!(f, "undefined"),
             Value::Null => write!(f, "null"),
-            Value::Int(v) => Display::fmt(v, f),
-            Value::Float(v) => Display::fmt(v, f),
+            Value::Number(n) => write!(f, "{}", n),
             Value::Bool(v) => Display::fmt(v, f),
             Value::String(v) => write!(f, "\"{}\"", v),
             Value::Object(v) => {
@@ -291,7 +285,7 @@ impl Display for Value {
                 }
                 write!(f, "]")
             }
-            Value::ByteArray(v) => {
+            Value::Bytes(v) => {
                 let base64 = simple_base64::encode(v);
                 write!(f, "{}", base64)
             }
@@ -310,13 +304,18 @@ impl<'de> Deserializer<'de> for Value {
         match self {
             Value::Undefined => visitor.visit_unit(),
             Value::Null => visitor.visit_unit(),
-            Value::Int(value) => visitor.visit_i64(value), //TODO: number coercion
-            Value::Float(value) => visitor.visit_f64(value), //TODO: number coercion
             Value::Bool(value) => visitor.visit_bool(value),
             Value::String(value) => visitor.visit_string(value),
             Value::Object(mut value) => visitor.visit_map(MapDeserializer::new(value.drain())),
             Value::Array(value) => visit_array(value, visitor),
-            Value::ByteArray(value) => visitor.visit_byte_buf(value.into()),
+            Value::Bytes(value) => visitor.visit_byte_buf(value.into()),
+            Value::Number(value) => match value.as_i64() {
+                None => match value.as_f64() {
+                    None => Err(Self::Error::InvalidType(ValueKind::Number)),
+                    Some(v) => visitor.visit_f64(v),
+                },
+                Some(v) => visitor.visit_i64(v),
+            },
         }
     }
 
@@ -359,10 +358,10 @@ impl<'de> Deserializer<'de> for Value {
         V: Visitor<'de>,
     {
         match self {
-            Value::Int(value) => visitor.visit_i64(value),
-            Value::Float(value) if (value as i64 as f64) == value => {
-                visitor.visit_i64(value as i64)
-            }
+            Value::Number(value) => match value.as_i64() {
+                Some(value) => visitor.visit_i64(value),
+                None => Err(super::Error::InvalidType(ValueKind::Number)),
+            },
             other => Err(super::Error::InvalidType(other.kind())),
         }
     }
@@ -396,10 +395,10 @@ impl<'de> Deserializer<'de> for Value {
         V: Visitor<'de>,
     {
         match self {
-            Value::Int(value) if value.is_positive() => visitor.visit_u64(value as u64),
-            Value::Float(value) if (value as u64 as f64) == value => {
-                visitor.visit_u64(value as u64)
-            }
+            Value::Number(value) => match value.as_i64() {
+                Some(value) if value >= 0 => visitor.visit_u64(value as u64),
+                _ => Err(super::Error::InvalidType(ValueKind::Number)),
+            },
             other => Err(super::Error::InvalidType(other.kind())),
         }
     }
@@ -417,8 +416,10 @@ impl<'de> Deserializer<'de> for Value {
         V: Visitor<'de>,
     {
         match self {
-            Value::Int(value) if (value as f64 as i64) == value => visitor.visit_f64(value as f64),
-            Value::Float(value) => visitor.visit_f64(value),
+            Value::Number(value) => match value.as_f64() {
+                Some(value) => visitor.visit_f64(value),
+                None => Err(super::Error::InvalidType(ValueKind::Number)),
+            },
             other => Err(super::Error::InvalidType(other.kind())),
         }
     }
@@ -462,7 +463,7 @@ impl<'de> Deserializer<'de> for Value {
         V: Visitor<'de>,
     {
         match self {
-            Value::ByteArray(value) => visitor.visit_byte_buf(value.into()),
+            Value::Bytes(value) => visitor.visit_byte_buf(value.into()),
             other => Err(super::Error::InvalidType(other.kind())),
         }
     }
@@ -678,5 +679,107 @@ impl<'de, I: Iterator<Item = (String, Value)> + ExactSizeIterator> MapAccess<'de
 
     fn size_hint(&self) -> Option<usize> {
         Some(self.iter.len())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Number {
+    Int(i64),
+    Float(f64),
+}
+
+impl Number {
+    pub const I64_MAX_SAFE_INTEGER: i64 = i64::pow(2, 53) - 1;
+    pub const I64_MIN_SAFE_INTEGER: i64 = -Self::I64_MAX_SAFE_INTEGER;
+    pub const F64_MAX_SAFE_INTEGER: f64 = Self::I64_MAX_SAFE_INTEGER as f64;
+    pub const F64_MIN_SAFE_INTEGER: f64 = -Self::F64_MAX_SAFE_INTEGER;
+
+    pub fn as_i64(self) -> Option<i64> {
+        match self {
+            Number::Int(value) => Some(value),
+            Number::Float(value) => {
+                // check if conversion is lossless
+                let converted = value as i64;
+                if converted as f64 == value {
+                    Some(converted)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    pub fn as_f64(self) -> Option<f64> {
+        match self {
+            Number::Int(value) => {
+                if value >= Self::I64_MIN_SAFE_INTEGER && value <= Self::I64_MAX_SAFE_INTEGER {
+                    Some(value as f64)
+                } else {
+                    None
+                }
+            }
+            Number::Float(value) => Some(value),
+        }
+    }
+}
+
+impl Serialize for Number {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        use serde::ser::Error;
+        match self.as_f64() {
+            Some(v) => serializer.serialize_f64(v),
+            None => match self.as_i64() {
+                Some(v) => serializer.serialize_i64(v),
+                None => Err(S::Error::custom("cannot serialize number")),
+            },
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Number {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct NumberVisitor;
+        impl<'de> Visitor<'de> for NumberVisitor {
+            type Value = Number;
+
+            fn expecting(&self, formatter: &mut Formatter) -> std::fmt::Result {
+                write!(formatter, "number")
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<Number, E> {
+                Ok(Number::Int(value))
+            }
+
+            fn visit_f64<E>(self, v: f64) -> Result<Self::Value, E>
+            where
+                E: Error,
+            {
+                if v <= Number::F64_MAX_SAFE_INTEGER
+                    && v > Number::F64_MIN_SAFE_INTEGER
+                    && v.trunc() == v
+                {
+                    Ok(Number::Int(v as i64))
+                } else {
+                    Ok(Number::Float(v))
+                }
+            }
+        }
+
+        deserializer.deserialize_any(NumberVisitor)
+    }
+}
+
+impl Display for Number {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Number::Int(value) => write!(f, "{}", value),
+            Number::Float(value) => write!(f, "{}", value),
+        }
     }
 }

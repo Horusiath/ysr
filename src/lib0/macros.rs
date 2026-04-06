@@ -1,106 +1,66 @@
-use crate::lib0::{F64_MAX_SAFE_INTEGER, F64_MIN_SAFE_INTEGER, Value};
+use crate::lib0::Value;
+use crate::lib0::value::{Number, ValueKind};
 use bytes::Bytes;
 use std::collections::HashMap;
 use std::convert::TryFrom;
 
-macro_rules! impl_from_num {
-    ($t:ty) => {
-        impl From<$t> for Value {
-            #[inline]
-            fn from(v: $t) -> Self {
-                Self::Float(v as f64)
-            }
-        }
-
-        impl TryFrom<Value> for $t {
-            type Error = Value;
-
-            fn try_from(v: Value) -> Result<Self, Self::Error> {
-                match v {
-                    Value::Float(num) => Ok(num as Self),
-                    Value::Int(num) => Ok(num as Self),
-                    other => Err(other),
-                }
-            }
-        }
-    };
+impl From<f32> for Number {
+    fn from(value: f32) -> Self {
+        Number::from(value as f64)
+    }
 }
-macro_rules! impl_from_bigint {
+
+impl From<f64> for Number {
+    fn from(value: f64) -> Self {
+        if value.trunc() == value
+            && value > Number::F64_MIN_SAFE_INTEGER
+            && value <= Number::F64_MAX_SAFE_INTEGER
+        {
+            Number::Int(value as i64)
+        } else {
+            Number::Float(value)
+        }
+    }
+}
+
+macro_rules! number_from_integer {
     ($t:ty) => {
-        impl From<$t> for Value {
+        impl From<$t> for Number {
             fn from(value: $t) -> Self {
-                let value = value as i64;
-                if value <= F64_MAX_SAFE_INTEGER && value >= F64_MIN_SAFE_INTEGER {
-                    let v = value as f64;
-                    Self::Float(v)
-                } else {
-                    Self::Int(value)
-                }
-            }
-        }
-
-        impl TryFrom<Value> for $t {
-            type Error = Value;
-
-            fn try_from(v: Value) -> Result<Self, Self::Error> {
-                match v {
-                    Value::Float(num) => Ok(num as Self),
-                    Value::Int(num) => Ok(num as Self),
-                    other => Err(other),
-                }
+                Number::Int(value as i64)
             }
         }
     };
 }
 
-impl_from_num!(f32);
-impl_from_num!(f64);
-impl_from_num!(i16);
-impl_from_num!(i32);
-impl_from_num!(u16);
-impl_from_num!(u32);
-impl_from_bigint!(i64);
-impl_from_bigint!(isize);
+number_from_integer!(i16);
+number_from_integer!(i32);
+number_from_integer!(i64);
+number_from_integer!(isize);
+number_from_integer!(u16);
+number_from_integer!(u32);
 
-impl TryFrom<u64> for Value {
-    type Error = u64;
+impl TryFrom<u64> for Number {
+    type Error = crate::lib0::Error;
 
     fn try_from(value: u64) -> Result<Self, Self::Error> {
         if value > i64::MAX as u64 {
-            Err(value)
+            Err(crate::lib0::Error::InvalidType(ValueKind::Number))
         } else {
-            let value = value as i64;
-            if (F64_MIN_SAFE_INTEGER..=F64_MAX_SAFE_INTEGER).contains(&value) {
-                let v = value as f64;
-                Ok(Value::Float(v))
-            } else {
-                Ok(Value::Int(value))
-            }
+            Ok(Number::Int(value as i64))
         }
     }
 }
 
-impl TryFrom<Value> for u64 {
-    type Error = Value;
-
-    fn try_from(v: Value) -> Result<Self, Self::Error> {
-        match v {
-            Value::Float(num) => Ok(num as Self),
-            Value::Int(num) => Ok(num as Self),
-            other => Err(other),
-        }
-    }
-}
-
-impl TryFrom<usize> for Value {
-    type Error = usize;
+impl TryFrom<usize> for Number {
+    type Error = crate::lib0::Error;
 
     #[cfg(target_pointer_width = "32")]
     fn try_from(value: usize) -> Result<Self, Self::Error> {
         // for 32-bit architectures we know that usize will always fit,
         // so there's no need to check for length, but we stick to TryInto
         // trait to keep API compatibility
-        Ok(Value::Float(value as f64))
+        Ok(Number::Int(value as i64))
     }
 
     #[cfg(target_pointer_width = "64")]
@@ -109,20 +69,17 @@ impl TryFrom<usize> for Value {
         if let Ok(v) = (value as u64).try_into() {
             Ok(v)
         } else {
-            Err(value)
+            Err(crate::lib0::Error::InvalidType(ValueKind::Number))
         }
     }
 }
 
-impl TryFrom<Value> for usize {
-    type Error = Value;
-
-    fn try_from(v: Value) -> Result<Self, Self::Error> {
-        match v {
-            Value::Float(num) => Ok(num as Self),
-            Value::Int(num) => Ok(num as Self),
-            other => Err(other),
-        }
+impl<T> From<T> for Value
+where
+    T: Into<Number>,
+{
+    fn from(value: T) -> Self {
+        Value::Number(value.into())
     }
 }
 
@@ -172,7 +129,7 @@ impl From<&str> for Value {
 impl From<Vec<u8>> for Value {
     #[inline]
     fn from(value: Vec<u8>) -> Self {
-        Value::ByteArray(value.into())
+        Value::Bytes(value.into())
     }
 }
 
@@ -181,7 +138,7 @@ impl TryFrom<Value> for Vec<u8> {
 
     fn try_from(v: Value) -> Result<Self, Self::Error> {
         match v {
-            Value::ByteArray(value) => Ok(Vec::from(value.as_ref())),
+            Value::Bytes(value) => Ok(Vec::from(value.as_ref())),
             other => Err(other),
         }
     }
@@ -190,7 +147,7 @@ impl TryFrom<Value> for Vec<u8> {
 impl From<Bytes> for Value {
     #[inline]
     fn from(value: Bytes) -> Self {
-        Value::ByteArray(value)
+        Value::Bytes(value)
     }
 }
 
@@ -199,7 +156,7 @@ impl TryFrom<Value> for Bytes {
 
     fn try_from(v: Value) -> Result<Self, Self::Error> {
         match v {
-            Value::ByteArray(value) => Ok(value),
+            Value::Bytes(value) => Ok(value),
             other => Err(other),
         }
     }
@@ -208,7 +165,7 @@ impl TryFrom<Value> for Bytes {
 impl From<&[u8]> for Value {
     #[inline]
     fn from(value: &[u8]) -> Self {
-        Value::ByteArray(Bytes::copy_from_slice(value))
+        Value::Bytes(Bytes::copy_from_slice(value))
     }
 }
 

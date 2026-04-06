@@ -61,16 +61,16 @@ fn serialize_value() {
     roundtrip(&Value::Null);
     roundtrip(&Value::Bool(true));
     roundtrip(&Value::Bool(false));
-    roundtrip(&Value::Float(14.5));
-    roundtrip(&Value::Int(123));
+    roundtrip(&Value::Number(14.5.into()));
+    roundtrip(&Value::Number(123.into()));
     roundtrip(&Value::String("hello".into()));
-    roundtrip(&Value::ByteArray(Bytes::copy_from_slice(b"deadbeef")));
+    roundtrip(&Value::Bytes(Bytes::copy_from_slice(b"deadbeef")));
     roundtrip(&Value::Array(vec![
-        Value::Int(123),
+        Value::Number(123.into()),
         Value::String("hello".into()),
     ]));
     roundtrip(&Value::Object(HashMap::from([
-        ("A".to_string(), Value::Int(100)),
+        ("A".to_string(), Value::Number(100.into())),
         ("B".to_string(), Value::String("hello".into())),
     ])));
 }

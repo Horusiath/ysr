@@ -70,7 +70,8 @@ impl<'a, W: Write> serde::ser::Serializer for &'a mut Serializer<W> {
     }
 
     fn serialize_i64(self, v: i64) -> Result<Self::Ok, Self::Error> {
-        if (super::F64_MIN_SAFE_INTEGER..=super::F64_MAX_SAFE_INTEGER).contains(&v) {
+        if (super::Number::I64_MIN_SAFE_INTEGER..=super::Number::I64_MAX_SAFE_INTEGER).contains(&v)
+        {
             // TYPE 125: INTEGER
             self.writer.write_u8(TAG_INTEGER)?;
             self.writer.write_var(v)?;
