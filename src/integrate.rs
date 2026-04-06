@@ -73,7 +73,7 @@ impl IntegrationContext {
         match (&self.left, &self.right) {
             (None, None) => true,                          // !target.left && !target.right
             (None, Some(right)) => right.left().is_some(), // !target.left && target.right.left !== null
-            (Some(left), _) => left.right() != target.block.right(), // target.left && target.left.right !== target.right
+            (Some(left), _) => left.right() != self.right.as_ref().map(|r| r.id()), // target.left && target.left.right !== target.right
             _ => false,
         }
     }
@@ -105,7 +105,7 @@ impl IntegrationContext {
             parent.start().copied()
         };
 
-        let mut left = target.block.left().cloned();
+        let mut left = self.left.as_ref().map(|l| l.last_id());
         let mut conflicting_items = HashSet::new();
         let mut items_before_origin = HashSet::new();
 
@@ -113,7 +113,7 @@ impl IntegrationContext {
         // ***{origin}bbbb{this}{c,b}{c,b}{o}***
         // Note that conflicting_items is a subset of items_before_origin
         while let Some(item) = o {
-            if Some(&item) == target.block.right() {
+            if self.right.as_ref().map(|r| r.id()) == Some(&item) {
                 break;
             }
             items_before_origin.insert(item.clone());

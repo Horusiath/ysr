@@ -188,6 +188,12 @@ impl TransactionState {
 
         // try to merge mergeStructs
 
+        // persist updated state vector
+        let mut sv_store = db.state_vector();
+        for (client, &clock) in self.current_state.iter() {
+            sv_store.update(*client, clock)?;
+        }
+
         // create incremental update
 
         //TODO: subdoc events

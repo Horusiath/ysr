@@ -166,7 +166,7 @@ impl<'tx, 'db> ListRef<&'tx mut Transaction<'db>> {
 
             // new left ID for the next iteration
             id.clock += value.clock_len();
-            left = Some(id);
+            left = Some(insert.block.last_id());
 
             value.prepare(&mut insert)?;
             let mut ctx = IntegrationContext::create(&mut insert, Clock::new(0), &blocks)?;
@@ -226,24 +226,22 @@ impl<'tx, 'db> ListRef<&'tx mut Transaction<'db>> {
 
         // first let's position cursor at the start of the range
         let mut current = self.block.start().copied();
-        while let Some(block_id) = current {
+        while let Some(block_id) = current
+            && start != 0
+        {
             cursor.seek(block_id)?;
             let block = cursor.current()?;
             if !block.is_deleted() && block.is_countable() {
                 let block_len = block.clock_len().get() as usize;
                 if block_len > start {
-                    current = match cursor.split_current(Clock::new(start as u32))? {
-                        SplitResult::Unchanged(left) => Some(*left.id()),
-                        SplitResult::Split(_, right) => Some(*right.id()),
+                    match cursor.split_current(Clock::new(start as u32))? {
+                        SplitResult::Unchanged(left) => left,
+                        SplitResult::Split(left, _right) => left,
                     };
                     start = 0;
                 } else {
                     start -= block_len;
                 }
-            }
-
-            if start == 0 {
-                break;
             }
 
             current = block.right().copied();
@@ -354,7 +352,7 @@ where
                 current,
                 offset,
             } => {
-                if current.is_deleted() || *offset >= current.clock_len().get() as usize {
+                while current.is_deleted() || *offset >= current.clock_len().get() as usize {
                     // jump to next block
                     match current.right() {
                         None => return self.finish(),
@@ -641,7 +639,6 @@ mod test {
         t1.commit(None).unwrap();
 
         let a2 = arr.mount_mut(&mut t2).unwrap();
-
         let actual: Vec<_> = a2.iter::<Value>().map(Result::unwrap).collect();
         assert_eq!(
             actual,
