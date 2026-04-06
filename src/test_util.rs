@@ -9,6 +9,7 @@ where
     let dir = TempDir::new().unwrap();
     let env = crate::lmdb::Env::builder()
         .max_dbs(10)
+        .map_size(10 * 1024 * 1024) // 10 MB
         .open(dir.path(), 0o600)
         .unwrap();
     let multi_doc = MultiDoc::new(env, Some(client_id.into()));
