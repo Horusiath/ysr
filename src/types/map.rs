@@ -55,9 +55,10 @@ impl<'tx: 'db, 'db> MapRef<&'tx Transaction<'db>> {
             // we only need a direct seek, since `seek_containing` would catch at best deleted blocks
             // that we don't care about here
             if let Some(block) = blocks_cursor.seek(*iter.block_id()?).optional()?
-                && !block.is_deleted() {
-                    len += 1;
-                }
+                && !block.is_deleted()
+            {
+                len += 1;
+            }
         }
         Ok(len)
     }
@@ -149,7 +150,7 @@ impl<'tx, 'db> MapRef<&'tx mut Transaction<'db>> {
         };
         if !block.is_deleted() {
             let mut block: BlockMut = block.into();
-            state.delete(&mut block, false, &mut block_cursor, &map_entries)?;
+            state.delete(&mut block, false, &mut block_cursor, Some(&map_entries))?;
             Ok(true)
         } else {
             Ok(false)
@@ -168,7 +169,7 @@ impl<'tx, 'db> MapRef<&'tx mut Transaction<'db>> {
             let id = iter.block_id()?;
             if let Some(block) = cursor.seek(*id).optional()? {
                 let mut block: BlockMut = block.into();
-                state.delete(&mut block, false, &mut cursor, &map_entries)?;
+                state.delete(&mut block, false, &mut cursor, Some(&map_entries))?;
             }
         }
         Ok(())

@@ -70,7 +70,7 @@ impl TransactionState {
         &mut self,
         start: ID,
         block_cursor: &mut BlockCursor<'tx>,
-        map_entries: &MapEntriesStore<'tx>,
+        map_entries: Option<&MapEntriesStore<'tx>>,
     ) -> crate::Result<()> {
         let mut current = Some(start);
         while let Some(id) = current {
@@ -105,7 +105,7 @@ impl TransactionState {
         for entry_id in to_delete {
             let mut block: BlockMut = block_cursor.seek(entry_id)?.into();
             let existed_before = entry_id.clock < self.begin_state.get(&block.id().client);
-            let deleted = self.delete(&mut block, true, block_cursor, map_entries)?;
+            let deleted = self.delete(&mut block, true, block_cursor, Some(map_entries))?;
             if deleted && existed_before {
                 // same as above
                 self.merge_blocks.insert(entry_id);
@@ -119,7 +119,7 @@ impl TransactionState {
         block: &mut BlockMut,
         parent_deleted: bool,
         block_cursor: &mut BlockCursor<'tx>,
-        map_entries: &MapEntriesStore<'tx>,
+        map_entries: Option<&MapEntriesStore<'tx>>,
     ) -> crate::Result<bool> {
         if block.is_deleted() {
             return Ok(false);
@@ -137,7 +137,9 @@ impl TransactionState {
                     self.delete_list_members(*start, block_cursor, map_entries)?;
                 }
                 //iterate over map entries of the node and delete them
-                self.delete_map_members(block.id(), block_cursor, map_entries)?;
+                if let Some(map_entries) = map_entries {
+                    self.delete_map_members(block.id(), block_cursor, map_entries)?;
+                }
             }
             _ => { /* not used */ }
         }
@@ -156,14 +158,15 @@ impl TransactionState {
         // transaction.afterState = getStateVector(transaction.doc.store)
 
         if let Some(summary) = summary
-            && summary.flags.contains(CommitFlags::OBSERVE_NODES) {
-                // gather info about which nodes have changed
+            && summary.flags.contains(CommitFlags::OBSERVE_NODES)
+        {
+            // gather info about which nodes have changed
+            todo!();
+            if summary.flags.contains(CommitFlags::OBSERVE_NODES_DEEP) {
+                // bubble up changes to parent nodes and gather them as well
                 todo!();
-                if summary.flags.contains(CommitFlags::OBSERVE_NODES_DEEP) {
-                    // bubble up changes to parent nodes and gather them as well
-                    todo!();
-                }
             }
+        }
 
         //if (doc.gc) {
         //  tryGcDeleteSet(ds, store, doc.gcFilter)
@@ -762,24 +765,24 @@ impl<'db> Transaction<'db> {
         if let Carrier::Block(insert) = block {
             if let Some(origin) = &insert.block.origin_left()
                 && origin.client != insert.id().client
-                    && origin.clock >= local_sv.get(&origin.client)
-                {
-                    return Some(origin.client);
-                }
+                && origin.clock >= local_sv.get(&origin.client)
+            {
+                return Some(origin.client);
+            }
 
             if let Some(right_origin) = &insert.block.origin_right()
                 && right_origin.client != insert.id().client
-                    && right_origin.clock >= local_sv.get(&right_origin.client)
-                {
-                    return Some(right_origin.client);
-                }
+                && right_origin.clock >= local_sv.get(&right_origin.client)
+            {
+                return Some(right_origin.client);
+            }
 
             if let Some(Node::Nested(parent)) = insert.parent()
                 && parent.client != insert.id().client
-                    && parent.clock >= local_sv.get(&parent.client)
-                {
-                    return Some(parent.client);
-                }
+                && parent.clock >= local_sv.get(&parent.client)
+            {
+                return Some(parent.client);
+            }
         }
 
         None

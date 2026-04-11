@@ -266,7 +266,7 @@ impl<'tx, 'db> ListRef<&'tx mut Transaction<'db>> {
                     to_delete -= block_len;
                 }
                 let parent_len = self.block.node_len() as u32 - block_len as u32;
-                if state.delete(&mut block, false, &mut cursor, &map_entries)? {
+                if state.delete(&mut block, false, &mut cursor, Some(&map_entries))? {
                     self.block.set_node_len(parent_len);
                 }
             }

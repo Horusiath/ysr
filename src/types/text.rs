@@ -1,17 +1,20 @@
 use crate::block::{ID, InsertBlockData};
-use crate::content::{Content, ContentType};
+use crate::content::{Content, ContentType, FormatAttribute};
 use crate::integrate::IntegrationContext;
 use crate::lib0::Value;
+use crate::lmdb::Database;
 use crate::node::{Node, NodeType};
 use crate::prelim::Prelim;
 use crate::state_vector::Snapshot;
 use crate::store::Db;
+use crate::store::block_store::{BlockCursor, SplitResult};
 use crate::store::content_store::ContentStore;
+use crate::transaction::TransactionState;
 use crate::types::Capability;
-use crate::{Block, BlockHeader, Clock, In, Mounted, Out, Transaction, lib0};
+use crate::{Block, BlockHeader, BlockMut, Clock, Error, In, Mounted, Out, Transaction, lib0};
 use serde::Serialize;
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, Bound};
 use std::fmt::{Display, Formatter};
 use std::ops::{Deref, RangeBounds};
 
@@ -94,12 +97,10 @@ impl<'tx, 'db> Display for TextRef<&'tx Transaction<'db>> {
                 && !block.is_deleted()
                 && block.content_type() == ContentType::String
             {
-                let data = match block.try_inline_data() {
-                    Some(data) => data,
-                    None => contents.get(*block.id()).map_err(|_| std::fmt::Error)?,
-                };
-                let str = unsafe { std::str::from_utf8_unchecked(data) };
-                str.fmt(f)?;
+                let data = get_content(&block, &contents)?;
+                if let Ok(str) = data.as_str() {
+                    str.fmt(f)?;
+                }
             }
             next = block.right().cloned();
         }
@@ -109,7 +110,11 @@ impl<'tx, 'db> Display for TextRef<&'tx Transaction<'db>> {
 }
 
 impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
-    fn insert_at<P: Prelim>(&mut self, pos: BlockPosition, value: P) -> crate::Result<P::Return> {
+    fn insert_at<P: Prelim>(
+        &mut self,
+        pos: &mut BlockPosition,
+        value: P,
+    ) -> crate::Result<P::Return> {
         let node_id = *self.node_id();
         let db = self.tx.db.get();
         let state = self.tx.state.get_or_init(db);
@@ -131,6 +136,7 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
         let mut ctx = IntegrationContext::create(&mut insert, Clock::new(0), &blocks)?;
         insert.integrate(&db, state, &mut ctx)?;
         let result = value.integrate(&mut insert, self.tx)?;
+        pos.left = Some(insert.block.last_id());
         self.block = ctx.parent.unwrap();
         Ok(result)
     }
@@ -145,52 +151,133 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
         }
 
         let value = StringPrelim::new(chunk);
-        let pos = BlockPosition::seek(self.tx, self.block.start().copied(), index)?;
-        self.insert_at(pos, value)
+        let mut pos = BlockPosition::seek(self.tx, self.block.start().copied(), index)?;
+        self.insert_at(&mut pos, value)
+    }
+
+    fn insert_negated(&mut self, pos: &mut BlockPosition, attrs: &mut Attrs) -> crate::Result<()> {
+        let db = self.tx.db.get();
+        let blocks = db.blocks();
+        let contents = db.contents();
+        let mut cursor = blocks.cursor()?;
+
+        // first cleanup the attributes that were already ended
+        while let Some(right_id) = pos.right {
+            let block = cursor.seek(right_id)?;
+            if !block.is_deleted() {
+                if block.content_type() == ContentType::Format {
+                    let content = get_content(&block, &contents)?;
+                    let fmt = content.as_format()?;
+                    let key = fmt.key();
+                    if let Some(curr_value) = attrs.get(key) {
+                        if curr_value == &fmt.value()? {
+                            attrs.remove(key);
+                            forward(pos, &mut cursor, &contents)?;
+                            continue;
+                        }
+                    }
+                }
+            } else {
+                forward(pos, &mut cursor, &contents)?;
+            }
+        }
+
+        // second add remaining attributes
+        let node_id = *self.node_id();
+        for (key, value) in attrs.iter() {
+            let state = self.tx.state.get_or_init(db);
+            let id = state.next_id(1.into());
+            let left = pos.left.as_ref();
+            let right = pos.right.as_ref();
+            let mut insert = InsertBlockData::new(
+                id,
+                1.into(),
+                left,
+                right,
+                left,
+                right,
+                Node::Nested(node_id),
+                None,
+            );
+            let value = FormatPrelim::new(key, value);
+            value.prepare(&mut insert)?;
+            let mut ctx = IntegrationContext::create(&mut insert, Clock::new(0), &blocks)?;
+            insert.integrate(&db, state, &mut ctx)?;
+            value.integrate(&mut insert, self.tx)?;
+            pos.left = Some(insert.block.last_id());
+            self.block = ctx.parent.unwrap();
+
+            forward(pos, &mut cursor, &contents)?;
+        }
+        Ok(())
+    }
+
+    fn insert_with_internal<P: Prelim>(
+        &mut self,
+        index: usize,
+        value: P,
+        mut attrs: Attrs,
+    ) -> crate::Result<P::Return> {
+        let mut pos = BlockPosition::seek(self.tx, self.block.start().copied(), index)?;
+        pos.unset_missing(&mut attrs);
+        if pos.right.is_some() {
+            let db = self.tx.db.get();
+            let blocks = db.blocks();
+            let contents = db.contents();
+            let mut cursor = blocks.cursor()?;
+            pos.minimize(&attrs, &mut cursor, &contents)?;
+        }
+
+        let result = self.insert_at(&mut pos, value)?;
+
+        self.insert_negated(&mut pos, &mut attrs)?;
+        Ok(result)
     }
 
     pub fn insert_with<S1, S2, A, V>(
         &mut self,
         index: usize,
-        _chunk: S1,
+        chunk: S1,
         attrs: A,
     ) -> crate::Result<()>
     where
         S1: AsRef<str>,
         S2: Into<String>,
-        V: Into<lib0::Value>,
+        V: Into<Value>,
         A: IntoIterator<Item = (S2, V)>,
     {
-        let _pos = BlockPosition::seek(self.tx, self.block.start().copied(), index)?;
-        let mut attributes = Attrs::new();
-        for (key, value) in attrs {
-            attributes.insert(key.into(), value.into());
-        }
-
-        todo!()
+        let attrs: Attrs = attrs
+            .into_iter()
+            .map(|(k, v)| (k.into(), v.into()))
+            .collect();
+        self.insert_with_internal(index, StringPrelim::new(chunk.as_ref()), attrs)
     }
 
     pub fn insert_embed<V>(&mut self, index: usize, value: V) -> crate::Result<V::Return>
     where
         V: Prelim,
     {
-        let pos = BlockPosition::seek(self.tx, self.block.start().copied(), index)?;
-        self.insert_at(pos, value)
+        let mut pos = BlockPosition::seek(self.tx, self.block.start().copied(), index)?;
+        self.insert_at(&mut pos, value)
     }
 
-    pub fn insert_embed_with<S, A, V1, V2>(
+    pub fn insert_embed_with<S, A, P, V2>(
         &mut self,
-        _index: usize,
-        _value: V1,
-        _attrs: A,
-    ) -> crate::Result<()>
+        index: usize,
+        value: P,
+        attrs: A,
+    ) -> crate::Result<P::Return>
     where
-        S: AsRef<str>,
-        V1: Prelim,
-        V2: Serialize,
+        S: Into<String>,
+        P: Prelim,
+        V2: Into<Value>,
         A: IntoIterator<Item = (S, V2)>,
     {
-        todo!()
+        let attrs: Attrs = attrs
+            .into_iter()
+            .map(|(k, v)| (k.into(), v.into()))
+            .collect();
+        self.insert_with_internal(index, value, attrs)
     }
 
     pub fn push<S>(&mut self, chunk: S) -> crate::Result<()>
@@ -201,11 +288,89 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
         self.insert(len, chunk)
     }
 
-    pub fn remove_range<R>(&mut self, _range: R) -> crate::Result<()>
+    fn remove_at(&mut self, pos: &mut BlockPosition, len: usize) -> crate::Result<()> {
+        let mut remaining = len;
+        let start = pos.right;
+        let start_attrs = pos.attrs.clone();
+        let db = self.tx.db.get();
+        let blocks = db.blocks();
+        let mut cursor = blocks.cursor()?;
+        let state = self.tx.state.get_or_init(db);
+        let map_entries = db.map_entries();
+        let contents = db.contents();
+        while let Some(block_id) = pos.right
+            && remaining != 0
+        {
+            let block = cursor.seek(block_id)?;
+            if !block.is_deleted() {
+                match block.content_type() {
+                    ContentType::String | ContentType::Embed | ContentType::Node => {
+                        let mut block: BlockMut = block.into();
+                        let len = block.clock_len().get() as usize;
+                        if remaining < len {
+                            // split block
+                            block = match cursor.split_current((remaining as u32).into())? {
+                                SplitResult::Unchanged(block) => block,
+                                SplitResult::Split(left, _) => left,
+                            };
+                            remaining = 0;
+                        } else {
+                            remaining -= len;
+                        }
+                        if state.delete(&mut block, false, &mut cursor, Some(&map_entries))? {
+                            //TODO: ???
+                        }
+                    }
+                    _ => { /* ignore */ }
+                }
+            }
+
+            forward(pos, &mut cursor, &contents)?;
+        }
+
+        if remaining != 0 {
+            return Err(crate::Error::OutOfRange);
+        }
+
+        if let Some(start) = start.as_ref()
+            && !start_attrs.is_empty()
+            && !pos.attrs.is_empty()
+        {
+            clean_format_gap(
+                state,
+                &db,
+                start,
+                pos.right.as_ref(),
+                &start_attrs,
+                &mut pos.attrs,
+            )?;
+        }
+
+        Ok(())
+    }
+
+    pub fn remove_range<R>(&mut self, range: R) -> crate::Result<()>
     where
         R: RangeBounds<usize>,
     {
-        todo!()
+        let mut start = match range.start_bound() {
+            Bound::Included(&index) => index,
+            Bound::Excluded(&index) => index + 1,
+            Bound::Unbounded => 0,
+        };
+        let end = match range.end_bound() {
+            Bound::Included(&index) => index,
+            Bound::Excluded(&index) => index - 1,
+            Bound::Unbounded => self.block.node_len(),
+        };
+
+        if start > end {
+            return Ok(());
+        }
+        let remove_len = end - start + 1;
+        let mut pos = BlockPosition::seek(self.tx, self.block.start().copied(), start)?;
+        self.remove_at(&mut pos, remove_len)?;
+        Ok(())
     }
 
     pub fn format<A, S, V>(&mut self, _start: usize, _end: usize, _attrs: A) -> crate::Result<()>
@@ -214,6 +379,66 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
         V: Serialize,
         A: IntoIterator<Item = (S, V)>,
     {
+        /*
+
+        minimize_attr_changes(pos, &attrs);
+        let mut negated_attrs = insert_attributes(this, txn, pos, attrs.clone()); //TODO: remove `attrs.clone()`
+        let encoding = txn.doc().get_ref().offset_kind();
+        // iterate until first non-format or null is found
+        // delete all formats with attributes[format.key] != null
+        // also check the attributes after the first non-format as we do not want to insert redundant
+        // negated attributes there
+        while let Some(right) = pos.right {
+            if !(len > 0 || (!negated_attrs.is_empty() && is_valid_target(right))) {
+                break;
+            }
+
+            if !right.is_deleted() {
+                let (mut doc, state) = txn.split_mut();
+                let doc = &mut *doc;
+                match &right.content {
+                    ItemContent::Format(key, value) => {
+                        if let Some(v) = attrs.get(key) {
+                            if v == value.as_ref() {
+                                negated_attrs.remove(key);
+                            } else {
+                                negated_attrs.insert(key.clone(), *value.clone());
+                            }
+                            state.delete_item(doc, right);
+                        }
+                    }
+                    ItemContent::String(s) => {
+                        let content_len = right.content_len(encoding);
+                        if len < content_len {
+                            // split block
+                            let offset = s.block_offset(len, encoding);
+                            let new_right = doc.blocks.split_block(right, offset, OffsetKind::Utf16);
+                            pos.left = Some(right);
+                            pos.right = new_right;
+                            break;
+                        }
+                        len -= content_len;
+                    }
+                    _ => {
+                        let content_len = right.len();
+                        if len < content_len {
+                            let new_right = doc.blocks.split_block(right, len, OffsetKind::Utf16);
+                            pos.left = Some(right);
+                            pos.right = new_right;
+                            break;
+                        }
+                        len -= content_len;
+                    }
+                }
+            }
+
+            if !pos.forward() {
+                break;
+            }
+        }
+
+        insert_negated_attributes(this, txn, pos, negated_attrs);
+             */
         todo!()
     }
 
@@ -235,27 +460,33 @@ impl<'tx, 'db> Deref for TextRef<&'tx mut Transaction<'db>> {
     }
 }
 
-pub struct FormatPrelim<'t, P> {
+pub struct FormatPrelim<'t, T> {
     key: &'t str,
-    value: Option<P>,
+    value: Option<T>,
+    buf: Option<Vec<u8>>,
 }
 
-impl<'t, P> FormatPrelim<'t, P> {
-    pub fn new(key: &'t str, value: P) -> Self {
+impl<'t, T> FormatPrelim<'t, T> {
+    pub fn new(key: &'t str, value: T) -> Self {
         FormatPrelim {
             key,
             value: Some(value),
+            buf: None,
         }
     }
 
     pub fn negated(key: &'t str) -> Self {
-        FormatPrelim { key, value: None }
+        FormatPrelim {
+            key,
+            value: None,
+            buf: None,
+        }
     }
 }
 
-impl<'t, P> Prelim for FormatPrelim<'t, P>
+impl<'t, T> Prelim for FormatPrelim<'t, T>
 where
-    P: Prelim,
+    T: Serialize,
 {
     type Return = ();
 
@@ -272,10 +503,16 @@ where
 
     fn integrate(
         self,
-        _insert: &mut InsertBlockData,
-        _tx: &mut Transaction,
+        insert: &mut InsertBlockData,
+        tx: &mut Transaction,
     ) -> crate::Result<Self::Return> {
-        todo!()
+        let data = FormatAttribute::compose(self.key, &lib0::to_vec(&self.value)?)?;
+        if data.len() > BlockHeader::INLINE_CONTENT_LEN {
+            let db = tx.db.get();
+            let contents = db.contents();
+            contents.insert(*insert.block.id(), &data)?;
+        }
+        Ok(())
     }
 }
 
@@ -420,28 +657,30 @@ struct BlockPosition {
 }
 
 impl BlockPosition {
-    fn seek(tx: &Transaction, start: Option<ID>, index: usize) -> crate::Result<Self> {
+    fn seek(tx: &Transaction<'_>, start: Option<ID>, index: usize) -> crate::Result<Self> {
+        let mut remaining = index;
+
+        let db = tx.db.get();
+        let contents = db.contents();
+        let blocks = db.blocks();
+        let mut block_cursor = blocks.cursor()?;
+
         let mut pos = BlockPosition {
             attrs: Attrs::default(),
             index: 0,
             left: None,
             right: start,
         };
-        let mut remaining = index;
-        let db = tx.db.get();
-        let blocks = db.blocks();
-        let mut blocks_cursor = blocks.cursor()?;
-        let contents = db.contents();
 
         while let Some(right_id) = &pos.right
             && remaining != 0
         {
-            let right = blocks_cursor.seek(*right_id)?;
+            let right = block_cursor.seek(*right_id)?;
             if !right.is_deleted() {
                 if right.content_type() == ContentType::Format {
                     let content = get_content(&right, &contents)?;
                     let fmt = content.as_format()?;
-                    let fmt_value: lib0::Value = fmt.value()?;
+                    let fmt_value: Value = fmt.value()?;
                     if fmt_value.is_null() {
                         pos.attrs.remove(fmt.key());
                     } else {
@@ -471,26 +710,135 @@ impl BlockPosition {
         Ok(pos)
     }
 
-    fn minimize(&mut self, _attrs: &Attrs) -> crate::Result<()> {
-        todo!()
-        // go right while attrs[right.key] === right.value (or right is deleted)
-        //while let Some(i) = self.right.as_deref() {
-        //    if !i.is_deleted() {
-        //        if let ItemContent::Format(k, v) = &i.content {
-        //            if let Some(v2) = attrs.get(k) {
-        //                if (v.as_ref()).eq(v2) {
-        //                    pos.forward();
-        //                    continue;
-        //                }
-        //            }
-        //        }
-        //
-        //        break;
-        //    } else {
-        //        pos.forward();
-        //    }
-        //}
+    fn unset_missing(&mut self, attrs: &mut Attrs) {
+        // if current `attributes` don't confirm the same keys as the formatting wrapping
+        // current insert position, they should be unset
+        for (k, _) in self.attrs.iter() {
+            if !attrs.contains_key(k) {
+                attrs.insert(k.clone(), Value::Null);
+            }
+        }
     }
+
+    fn minimize(
+        &mut self,
+        attrs: &Attrs,
+        cursor: &mut BlockCursor,
+        contents: &ContentStore,
+    ) -> crate::Result<()> {
+        // go right while attrs[right.key] === right.value (or right is deleted)
+        while let Some(right_id) = self.right {
+            let right = cursor.seek(right_id)?;
+            if right.is_deleted() {
+                forward(self, cursor, contents)?;
+            } else {
+                if right.content_type() == ContentType::Format {
+                    let content = get_content(&right, &contents)?;
+                    let fmt = content.as_format()?;
+                    if let Some(attr_value) = attrs.get(fmt.key()) {
+                        if attr_value == &fmt.value()? {
+                            forward(self, cursor, contents)?;
+                            continue;
+                        }
+                    }
+                }
+                break;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn forward(
+    pos: &mut BlockPosition,
+    cursor: &mut BlockCursor,
+    contents: &ContentStore,
+) -> crate::Result<bool> {
+    if let Some(right) = pos.right.take() {
+        let block = cursor.seek(right)?;
+        if !block.is_deleted() {
+            match block.content_type() {
+                ContentType::String | ContentType::Embed => {
+                    pos.index += block.clock_len().get() as usize;
+                }
+                ContentType::Format => {
+                    let data = get_content(&block, &contents)?;
+                    let fmt = data.as_format()?;
+                    let key = fmt.key();
+                    let value: lib0::Value = fmt.value()?;
+                    if value.is_null() {
+                        pos.attrs.remove(key);
+                    } else {
+                        pos.attrs.insert(key.to_owned(), value);
+                    }
+                }
+                _ => { /* ignore */ }
+            }
+        }
+
+        pos.left = Some(block.last_id());
+        pos.right = block.right().copied();
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+fn clean_format_gap(
+    tx_state: &mut TransactionState,
+    db: &Database,
+    start: &ID,
+    end: Option<&ID>,
+    start_attrs: &Attrs,
+    end_attrs: &mut Attrs,
+) -> crate::Result<usize> {
+    let blocks = db.blocks();
+    let mut cursor = blocks.cursor()?;
+    let contents = db.contents();
+    let mut end = end.copied();
+    while let Some(end_id) = end {
+        let block = cursor.seek(end_id)?;
+        match block.content_type() {
+            ContentType::String | ContentType::Embed => break,
+            ContentType::Format if !block.is_deleted() => {
+                let content = get_content(&block, &contents)?;
+                let fmt = content.as_format()?;
+                let key = fmt.key();
+                let value: lib0::Value = fmt.value()?;
+                if value.is_null() {
+                    end_attrs.remove(key);
+                } else {
+                    end_attrs.insert(key.to_owned(), value);
+                }
+            }
+            _ => { /* ignore */ }
+        }
+        end = block.right().copied();
+    }
+
+    let mut cleanups = 0;
+    let mut current = Some(*start);
+    while let Some(current_id) = current
+        && end != current
+    {
+        let block = cursor.seek(current_id)?;
+        if !block.is_deleted() {
+            if block.content_type() == ContentType::Format {
+                let content = get_content(&block, &contents)?;
+                let fmt = content.as_format()?;
+                let key = fmt.key();
+                let value: lib0::Value = fmt.value()?;
+                let e = end_attrs.get(key).unwrap_or(&Value::Null);
+                let s = start_attrs.get(key).unwrap_or(&Value::Null);
+                if e != &value || s == &value {
+                    tx_state.delete(&mut block.into(), false, &mut cursor, None)?;
+                    cleanups += 1;
+                }
+            }
+        }
+        current = block.right().copied();
+    }
+    Ok(cleanups)
 }
 
 fn get_content<'a>(block: &Block<'a>, contents: &'a ContentStore) -> crate::Result<Content<'a>> {

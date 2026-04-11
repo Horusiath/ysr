@@ -947,7 +947,7 @@ impl InsertBlockData {
                     .as_ref()
                     .map(|p| p.is_deleted())
                     .unwrap_or(true);
-                tx_state.delete(left, parent_deleted, &mut block_cursor, &map_entries)?;
+                tx_state.delete(left, parent_deleted, &mut block_cursor, Some(&map_entries))?;
             }
         }
 
@@ -1014,7 +1014,7 @@ impl InsertBlockData {
                 &mut self.block,
                 parent_deleted,
                 &mut block_cursor,
-                &map_entries,
+                Some(&map_entries),
             )?;
         }
 
