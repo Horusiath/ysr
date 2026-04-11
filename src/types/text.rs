@@ -156,57 +156,72 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
     }
 
     fn insert_negated(&mut self, pos: &mut BlockPosition, attrs: &mut Attrs) -> crate::Result<()> {
-        let db = self.tx.db.get();
-        let blocks = db.blocks();
-        let contents = db.contents();
-        let mut cursor = blocks.cursor()?;
-
         // first cleanup the attributes that were already ended
-        while let Some(right_id) = pos.right {
-            let block = cursor.seek(right_id)?;
-            if !block.is_deleted() {
+        {
+            let db = self.tx.db.get();
+            let blocks = db.blocks();
+            let contents = db.contents();
+            let mut cursor = blocks.cursor()?;
+
+            while let Some(right_id) = pos.right {
+                let block = cursor.seek(right_id)?;
+                if block.is_deleted() {
+                    forward(pos, &mut cursor, &contents)?;
+                    continue;
+                }
                 if block.content_type() == ContentType::Format {
                     let content = get_content(&block, &contents)?;
                     let fmt = content.as_format()?;
                     let key = fmt.key();
-                    if let Some(curr_value) = attrs.get(key) {
-                        if curr_value == &fmt.value()? {
-                            attrs.remove(key);
-                            forward(pos, &mut cursor, &contents)?;
-                            continue;
-                        }
+                    if let Some(curr_value) = attrs.get(key)
+                        && curr_value == &fmt.value()?
+                    {
+                        attrs.remove(key);
+                        forward(pos, &mut cursor, &contents)?;
+                        continue;
                     }
                 }
-            } else {
-                forward(pos, &mut cursor, &contents)?;
+                break;
             }
         }
 
         // second add remaining attributes
         let node_id = *self.node_id();
         for (key, value) in attrs.iter() {
-            let state = self.tx.state.get_or_init(db);
-            let id = state.next_id(1.into());
-            let left = pos.left.as_ref();
-            let right = pos.right.as_ref();
-            let mut insert = InsertBlockData::new(
-                id,
-                1.into(),
-                left,
-                right,
-                left,
-                right,
-                Node::Nested(node_id),
-                None,
-            );
-            let value = FormatPrelim::new(key, value);
-            value.prepare(&mut insert)?;
-            let mut ctx = IntegrationContext::create(&mut insert, Clock::new(0), &blocks)?;
-            insert.integrate(&db, state, &mut ctx)?;
-            value.integrate(&mut insert, self.tx)?;
-            pos.left = Some(insert.block.last_id());
-            self.block = ctx.parent.unwrap();
+            let fmt = FormatPrelim::new(key, value);
+            // Integrate the block in an inner scope so the db/blocks/state borrows
+            // are released before we hand `self.tx` to `fmt.integrate` below.
+            let mut insert = {
+                let db = self.tx.db.get();
+                let blocks = db.blocks();
+                let state = self.tx.state.get_or_init(db);
+                let id = state.next_id(1.into());
+                let left = pos.left.as_ref();
+                let right = pos.right.as_ref();
+                let mut insert = InsertBlockData::new(
+                    id,
+                    1.into(),
+                    left,
+                    right,
+                    left,
+                    right,
+                    Node::Nested(node_id),
+                    None,
+                );
+                fmt.prepare(&mut insert)?;
+                let mut ctx = IntegrationContext::create(&mut insert, Clock::new(0), &blocks)?;
+                insert.integrate(&db, state, &mut ctx)?;
+                pos.left = Some(insert.block.last_id());
+                self.block = ctx.parent.unwrap();
+                insert
+            };
+            fmt.integrate(&mut insert, self.tx)?;
 
+            // Re-acquire borrows for the forward step.
+            let db = self.tx.db.get();
+            let blocks = db.blocks();
+            let contents = db.contents();
+            let mut cursor = blocks.cursor()?;
             forward(pos, &mut cursor, &contents)?;
         }
         Ok(())
