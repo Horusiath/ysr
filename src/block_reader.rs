@@ -164,9 +164,11 @@ impl Update {
             ContentType::String => {
                 let mut w = Vec::new();
 
-                let len = decoder.read_len()?;
-                block.set_clock_len(len);
-                std::io::copy(&mut decoder.take(len.into()), &mut w)?;
+                let byte_len = decoder.read_len()?;
+                std::io::copy(&mut decoder.take(byte_len.into()), &mut w)?;
+                let str = unsafe { std::str::from_utf8_unchecked(&w) };
+                let utf16_len = str.encode_utf16().count() as u32;
+                block.set_clock_len(Clock::new(utf16_len));
 
                 result.push(Content::new(ContentType::String, Cow::Owned(w)));
             }
