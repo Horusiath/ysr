@@ -260,7 +260,7 @@ impl<'a> Content<'a> {
     }
 
     pub fn as_format(&self) -> crate::Result<FormatAttribute<'_>> {
-        if self.content_type != ContentType::Json {
+        if self.content_type != ContentType::Format {
             return Err(crate::Error::InvalidMapping("format attribute"));
         }
         match FormatAttribute::new(self.data.as_ref()) {
@@ -283,17 +283,26 @@ impl<'a> Content<'a> {
     }
 }
 
-/// Map offset given as UTF16 code points to byte offset in UTF8 encoded string.
+/// Convert a UTF-16 code-unit offset within `str` into a UTF-8 byte offset.
+/// Returns `None` if the offset is not at a valid UTF-16 boundary (e.g. it would split a
+/// surrogate pair) or if it lies past the end of the string.
 pub(crate) fn utf16_to_utf8(str: &str, utf16: usize) -> Option<usize> {
-    let mut offset = 0;
-    for _ in str.encode_utf16() {
-        if offset == utf16 {
-            break;
+    let mut utf16_count = 0;
+    for (byte_offset, ch) in str.char_indices() {
+        if utf16_count == utf16 {
+            return Some(byte_offset);
         }
-        offset += 1;
+        if utf16_count > utf16 {
+            // We overshot, meaning `utf16` lands in the middle of a surrogate pair.
+            return None;
+        }
+        utf16_count += ch.len_utf16();
     }
-
-    if offset == utf16 { Some(offset) } else { None }
+    if utf16_count == utf16 {
+        Some(str.len())
+    } else {
+        None
+    }
 }
 
 impl<'a> Display for Content<'a> {
