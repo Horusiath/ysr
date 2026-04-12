@@ -21,8 +21,7 @@ impl<'tx> BlockStore<'tx> {
     }
 
     pub fn cursor(&self) -> crate::Result<BlockCursor<'tx>> {
-        let cursor = self.db.cursor()?;
-        Ok(BlockCursor::new(cursor))
+        BlockCursor::new(self.db)
     }
 
     #[inline]
@@ -76,25 +75,12 @@ impl<'tx> BlockStore<'tx> {
     pub fn split(&self, id: ID) -> crate::Result<SplitResult> {
         let mut cursor = self.cursor()?;
         let result = cursor.split(id)?;
-        if let SplitResult::Split(ref left, ref right) = result {
-            // If the block had non-inline string content, we need to split the content store entry too.
-            if left.content_type() == ContentType::String
-                && !left.flags().contains(BlockFlags::INLINE_CONTENT)
-            {
-                let contents = ContentStore::new(self.db);
-                if let Ok(data) = contents.get(*left.id()) {
-                    let source = unsafe { std::str::from_utf8_unchecked(data) };
-                    let utf16_offset = left.clock_len().get() as usize;
-                    if let Some(utf8_offset) = utf16_to_utf8(source, utf16_offset) {
-                        // Copy data before writing, since LMDB may invalidate the pointer
-                        let data = data.to_vec();
-                        let left_bytes = &data[..utf8_offset];
-                        let right_bytes = &data[utf8_offset..];
-                        contents.insert(*left.id(), left_bytes)?;
-                        contents.insert(*right.id(), right_bytes)?;
-                    }
-                }
-            }
+        if let SplitResult::Split(left, _) = &result
+            && !left.flags().contains(BlockFlags::INLINE_CONTENT)
+            && left.content_type() == ContentType::String
+        {
+            let content_store = ContentStore::new(self.db);
+            content_store.split_string(*left.id(), left.clock_len())?;
         }
         Ok(result)
     }
@@ -106,13 +92,15 @@ impl<'tx> BlockStore<'tx> {
 
 pub struct BlockCursor<'tx> {
     cursor: Cursor<'tx>,
+    db: &'tx Database<'tx>,
 }
 
 impl<'tx> BlockCursor<'tx> {
     const PREFIX: u8 = KEY_PREFIX_BLOCK;
 
-    pub fn new(cursor: Cursor<'tx>) -> Self {
-        BlockCursor { cursor }
+    pub fn new(db: &'tx Database<'tx>) -> crate::Result<Self> {
+        let cursor = db.cursor()?;
+        Ok(BlockCursor { cursor, db })
     }
 
     pub fn insert(&mut self, block: Block<'_>) -> crate::Result<()> {
@@ -280,6 +268,10 @@ impl<'tx> BlockCursor<'tx> {
         Ok(())
     }
 
+    pub fn content_store(&self) -> ContentStore<'tx> {
+        ContentStore::new(self.db)
+    }
+
     pub fn split_current(&mut self, offset: Clock) -> crate::Result<SplitResult> {
         let mut left: BlockMut = self.current()?.into();
         match left.split(offset) {
@@ -289,6 +281,14 @@ impl<'tx> BlockCursor<'tx> {
                 let key = BlockKey::new(*right.id());
                 self.cursor
                     .put(key.as_bytes(), right.as_block().header().as_bytes(), 0)?;
+
+                if !left.flags().contains(BlockFlags::INLINE_CONTENT)
+                    && left.content_type() == ContentType::String
+                {
+                    let contents = ContentStore::new(self.db);
+                    contents.split_string(*left.id(), offset)?;
+                }
+
                 Ok(SplitResult::Split(left, right))
             }
         }
@@ -338,8 +338,7 @@ pub struct Inspector<'tx> {
 impl<'tx> Debug for Inspector<'tx> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let mut s = f.debug_list();
-        let cursor = self.db.cursor().map_err(|_| std::fmt::Error)?;
-        let mut c = BlockCursor { cursor };
+        let mut c = BlockCursor::new(self.db).map_err(|_| std::fmt::Error)?;
         // we need to set cursor position at the beginning of the space
         let _ = c.seek(ID::new(0.into(), 0.into()));
 

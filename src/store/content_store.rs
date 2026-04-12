@@ -1,8 +1,8 @@
 use crate::block_reader::BlockRange;
-use crate::content::{Content, ContentType};
+use crate::content::{Content, ContentType, utf16_to_utf8};
 use crate::lmdb::{Cursor, Database, Error as LmdbError};
 use crate::store::{KEY_PREFIX_CONTENT, ReadableBytes};
-use crate::{ID, Optional};
+use crate::{Clock, ID, Optional};
 use std::borrow::Cow;
 use std::fmt::{Debug, Formatter};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
@@ -87,6 +87,21 @@ impl<'a> ContentStore<'a> {
 
     pub fn read_range(&self, content_type: ContentType, range: BlockRange) -> ReadRange<'_> {
         ReadRange::new(self.db, content_type, range)
+    }
+
+    pub fn split_string(&self, id: ID, offset: Clock) -> crate::Result<()> {
+        let data = self.get(id)?;
+        let source = unsafe { std::str::from_utf8_unchecked(data) };
+        let utf16_offset = offset.get() as usize;
+        if let Some(utf8_offset) = utf16_to_utf8(source, utf16_offset) {
+            // Copy data before writing, since LMDB may invalidate the pointer
+            let data = data.to_vec();
+            let left_bytes = &data[..utf8_offset];
+            let right_bytes = &data[utf8_offset..];
+            self.insert(id, left_bytes)?;
+            self.insert(id.add(offset), right_bytes)?;
+        }
+        Ok(())
     }
 
     pub fn inspect(&self) -> Inspect<'a> {

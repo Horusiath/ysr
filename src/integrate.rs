@@ -21,9 +21,18 @@ impl IntegrationContext {
         blocks: &BlockStore<'_>,
     ) -> crate::Result<Self> {
         let left = if let Some(&origin) = target.block.origin_left() {
-            Some(match blocks.split(origin)? {
-                SplitResult::Unchanged(left) => left,
-                SplitResult::Split(_, right) => right,
+            let split_id = origin.add(1.into());
+            Some(match blocks.split(split_id) {
+                Ok(SplitResult::Split(left, _)) => left,
+                // - `Unchanged`: `origin + 1` is already at a block boundary, so `origin`
+                //   is the last clock of the previous block.
+                // - `NotFound`: nothing contains `origin + 1`, meaning `origin` is the last
+                //   clock of the last block in the list.
+                // In both cases the left neighbor is the block ending at `origin`.
+                Ok(SplitResult::Unchanged(_)) | Err(crate::Error::NotFound) => {
+                    blocks.cursor()?.seek_containing(origin)?.into()
+                }
+                Err(e) => return Err(e),
             })
         } else {
             None

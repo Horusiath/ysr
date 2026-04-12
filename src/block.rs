@@ -4,7 +4,6 @@ use crate::integrate::IntegrationContext;
 use crate::lmdb::Database;
 use crate::node::{Node, NodeID, NodeType};
 use crate::store::Db;
-use crate::store::block_store::SplitResult;
 use crate::transaction::TransactionState;
 use crate::{ClientID, Clock, Optional, U32};
 use crate::{Error, Result};
@@ -41,6 +40,14 @@ pub struct ID {
 
 impl ID {
     pub const SIZE: usize = size_of::<ID>();
+
+    pub fn add(self, delta: Clock) -> Self {
+        ID::new(self.client, self.clock + delta)
+    }
+
+    pub fn sub(self, delta: Clock) -> Self {
+        ID::new(self.client, self.clock - delta)
+    }
 
     #[inline]
     pub const fn new(client: ClientID, clock: Clock) -> Self {
@@ -838,12 +845,9 @@ impl InsertBlockData {
             // is such case offset kind in use always means Yjs-compatible offset (utf-16)
 
             self.block.id.clock += context.offset;
-            let split_id = ID::new(self.block.id.client, self.block.id.clock - 1);
-            let result = block_cursor.split(split_id)?;
-            let left = match result {
-                SplitResult::Unchanged(left) => left.last_id(),
-                SplitResult::Split(left, _right) => left.last_id(), //TODO: *self = right; ?
-            };
+            let split_id = ID::new(self.block.id.client, self.block.id.clock);
+            block_cursor.split(split_id).optional()?;
+            let left = split_id.sub(Clock::new(1));
             self.block.set_left(Some(&left));
             self.block.set_origin_left(left);
         }

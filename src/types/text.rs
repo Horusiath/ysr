@@ -261,11 +261,15 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
         V: Into<Value>,
         A: IntoIterator<Item = (S2, V)>,
     {
+        let chunk = chunk.as_ref();
+        if chunk.is_empty() {
+            return Ok(());
+        }
         let attrs: Attrs = attrs
             .into_iter()
             .map(|(k, v)| (k.into(), v.into()))
             .collect();
-        self.insert_with_internal(index, StringPrelim::new(chunk.as_ref()), attrs)
+        self.insert_with_internal(index, StringPrelim::new(chunk), attrs)
     }
 
     pub fn insert_embed<V>(&mut self, index: usize, value: V) -> crate::Result<V::Return>
@@ -313,6 +317,7 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
         let state = self.tx.state.get_or_init(db);
         let map_entries = db.map_entries();
         let contents = db.contents();
+        let mut deleted_count: u32 = 0;
         while let Some(block_id) = pos.right
             && remaining != 0
         {
@@ -322,18 +327,22 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
                     ContentType::String | ContentType::Embed | ContentType::Node => {
                         let mut block: BlockMut = block.into();
                         let len = block.clock_len().get() as usize;
-                        if remaining < len {
-                            // split block
-                            block = match cursor.split_current((remaining as u32).into())? {
+                        let to_delete = if remaining < len {
+                            // split block (and the matching content store entry)
+                            let split_result = cursor.split_current((remaining as u32).into())?;
+                            block = match split_result {
                                 SplitResult::Unchanged(block) => block,
                                 SplitResult::Split(left, _) => left,
                             };
+                            let n = remaining;
                             remaining = 0;
+                            n
                         } else {
                             remaining -= len;
-                        }
+                            len
+                        };
                         if state.delete(&mut block, false, &mut cursor, Some(&map_entries))? {
-                            //TODO: ???
+                            deleted_count += to_delete as u32;
                         }
                     }
                     _ => { /* ignore */ }
@@ -359,6 +368,12 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
                 &start_attrs,
                 &mut pos.attrs,
             )?;
+        }
+
+        if deleted_count > 0 {
+            let parent_len = self.block.node_len() as u32 - deleted_count;
+            self.block.set_node_len(parent_len);
+            cursor.update(self.block.as_block())?;
         }
 
         Ok(())
@@ -704,12 +719,29 @@ impl BlockPosition {
                 } else {
                     let len = right.clock_len().get() as usize;
                     if remaining < len {
-                        // split right item
-                        let mut split_id = *right_id;
-                        split_id.clock += Clock::new(remaining as u32);
-                        pos.left = Some(split_id);
-                        split_id.clock += Clock::new(1);
-                        pos.right = Some(split_id);
+                        // Actually split the block in the store so that downstream
+                        // consumers (insert_at, remove_at, ...) can address `pos.right`
+                        // as a real block boundary. After the split, `pos.left` is the
+                        // last id of the left portion and `pos.right` is the first id
+                        // of the right portion.
+                        let split_id = ID::new(
+                            right_id.client,
+                            right_id.clock + Clock::new(remaining as u32),
+                        );
+                        // Drop the borrow on `block_cursor` before opening another cursor
+                        // through `blocks.split`.
+                        let _ = right;
+                        match blocks.split(split_id)? {
+                            SplitResult::Split(left_block, right_block) => {
+                                pos.left = Some(left_block.last_id());
+                                pos.right = Some(*right_block.id());
+                            }
+                            SplitResult::Unchanged(_) => {
+                                // Should not happen: we verified `remaining < len`, so
+                                // the split point is strictly inside the block.
+                                unreachable!("split point is strictly inside the block");
+                            }
+                        }
                         pos.index += remaining;
                         break;
                     } else {
@@ -1001,7 +1033,7 @@ mod test {
 
         txt1.insert(0, "hello ").unwrap();
 
-        let (d2, _) = multi_doc(1);
+        let (d2, _) = multi_doc(2);
         let mut t2 = d2.transact_mut("test").unwrap();
         let mut txt2 = txt.mount_mut(&mut t2).unwrap();
 
@@ -1044,7 +1076,7 @@ mod test {
         txt1.insert(0, "I expect that").unwrap();
         assert_eq!(txt1.to_string(), "I expect that");
 
-        let (d2, _) = multi_doc(1);
+        let (d2, _) = multi_doc(2);
         let mut t2 = d2.transact_mut("test").unwrap();
 
         drop(txt1);
@@ -1183,7 +1215,7 @@ mod test {
 
         txt.insert(0, "bbb").unwrap();
         txt.insert(0, "aaa").unwrap();
-        txt.remove_range(3..=3).unwrap();
+        txt.remove_range(3..6).unwrap();
 
         assert_eq!(txt.to_string(), "aaa");
 
@@ -1638,11 +1670,11 @@ mod test {
         sync([&mut t1, &mut t2]);
 
         let mut txt1 = txt.mount_mut(&mut t1).unwrap();
-        txt1.remove_range(0.."😭".len()).unwrap();
+        txt1.remove_range(0.."😭".encode_utf16().count()).unwrap();
         assert_eq!(txt1.to_string(), "😊");
 
         sync([&mut t1, &mut t2]);
-        let mut txt2 = txt.mount_mut(&mut t2).unwrap();
+        let txt2 = txt.mount(&t2).unwrap();
         assert_eq!(txt2.to_string(), "😊");
 
         t1.commit(None).unwrap();
@@ -1665,7 +1697,7 @@ mod test {
         sync([&mut t1, &mut t2]);
 
         let mut txt1 = txt.mount_mut(&mut t1).unwrap();
-        txt1.remove_range(0.."⏰".len()).unwrap();
+        txt1.remove_range(0.."⏰".encode_utf16().count()).unwrap();
         assert_eq!(txt1.to_string(), "⏳");
 
         sync([&mut t1, &mut t2]);
@@ -1685,10 +1717,8 @@ mod test {
         let mut txt = txt.mount_mut(&mut txn).unwrap();
 
         txt.insert(0, "😊😭").unwrap();
-        // uncomment the following line will pass the test
-        // txt.format(&mut txn, 0, "😊".len() as u32, HashMap::new());
-        let start = "😊".len();
-        let end = start + "😭".len();
+        let start = "😊".encode_utf16().count();
+        let end = start + "😭".encode_utf16().count();
         txt.remove_range(start..end).unwrap();
 
         assert_eq!(txt.to_string(), "😊");
@@ -1705,10 +1735,8 @@ mod test {
         let mut txt = txt.mount_mut(&mut txn).unwrap();
 
         txt.insert(0, "⏰⏳").unwrap();
-        // uncomment the following line will pass the test
-        // txt.format(&mut txn, 0, "⏰".len() as u32, HashMap::new());
-        let start = "⏰".len();
-        let end = start + "⏳".len();
+        let start = "⏰".encode_utf16().count();
+        let end = start + "⏳".encode_utf16().count();
         txt.remove_range(start..end).unwrap();
 
         assert_eq!(txt.to_string(), "⏰");
