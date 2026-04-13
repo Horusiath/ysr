@@ -149,7 +149,7 @@ impl TransactionState {
     fn precommit(
         &mut self,
         db: Database<'_>,
-        summary: Option<&mut TransactionSummary>,
+        mut summary: Option<&mut TransactionSummary>,
     ) -> crate::Result<()> {
         // squash delete set
         self.delete_set.squash();
@@ -157,7 +157,7 @@ impl TransactionState {
 
         // transaction.afterState = getStateVector(transaction.doc.store)
 
-        if let Some(summary) = summary
+        if let Some(summary) = summary.as_deref_mut()
             && summary.flags.contains(CommitFlags::OBSERVE_NODES)
         {
             // gather info about which nodes have changed
@@ -198,6 +198,9 @@ impl TransactionState {
         }
 
         // create incremental update
+        if let Some(summary) = summary {
+            summary.update = self.prepare_incremental_update(&mut cursor)?;
+        }
 
         //TODO: subdoc events
 
@@ -233,6 +236,10 @@ impl TransactionState {
         }
 
         Ok(*right.id())
+    }
+
+    fn prepare_incremental_update(&self, cursor: &mut BlockCursor<'_>) -> crate::Result<Bytes> {
+        todo!()
     }
 }
 
@@ -338,7 +345,9 @@ impl<'db> Transaction<'db> {
     }
 
     pub fn incremental_update(&self) -> crate::Result<Vec<u8>> {
-        todo!()
+        let mut buf = Vec::new();
+        self.incremental_update_with(&mut buf)?;
+        Ok(buf)
     }
 
     pub fn diff_update(&self, since: &StateVector) -> crate::Result<Bytes> {
@@ -460,6 +469,95 @@ impl<'db> Transaction<'db> {
 
         // write delete set
         ds.encode_with(&mut writer)?;
+
+        Ok(())
+    }
+
+    pub fn incremental_update_with<W: Write>(&self, writer: &mut W) -> crate::Result<()> {
+        /*
+           The write path works as follows:
+           - {varint} number of clients affected
+             for each client:
+               - {varint} number of blocks to encode sharing the same client ID
+               - {varint} client ID
+               - {varint} clock describing start of the consecutive block range
+               for each block starting from the clock - encode block itself:
+                  - {u8} block info flags (content type, parent kind, neighbor presence)
+                  - (optional) {ID} block origin left
+                  - (optional) {ID} block origin right
+                  - (optional) {ID|string} block parent
+                  - (optional) {string} block entry key (if block is a map entry)
+                  - block content
+           - delete set: {varint} number of clients in delete set
+               for each client in delete set:
+               - {varint} client ID
+               - {varint} number of ranges to encode
+               for each range in ranges:
+                   - {varint} first clock of the delete range
+                   - {varint} length (number of consecutive deleted elements)
+        */
+        let state = match self.state.get() {
+            None => return Ok(()), // no changes made
+            Some(state) => state,
+        };
+        let begin_state = &state.begin_state;
+        let mut writer = EncoderV1::new(writer);
+        // wrote updates
+        let current_state = self.state_vector()?;
+        let db = self.db.get();
+        let blocks = db.blocks();
+        let contents = db.contents();
+        let intern_strings = db.intern_strings();
+        let map_entries = db.map_entries();
+        let mut cursor = blocks.cursor()?;
+
+        writer.write_var(current_state.len())?;
+        let mut block_buf = Vec::new();
+        for (&client_id, &end_clock) in current_state.iter() {
+            block_buf.clear();
+            let start_clock = begin_state.get(&client_id);
+
+            // for incremental update we can buffer them all
+            let mut block = cursor
+                .seek_containing(ID::new(client_id, start_clock))
+                .optional()?;
+            while let Some(current) = block
+                && current.id().client == client_id
+                && current.last_id().clock <= end_clock
+            {
+                block_buf.push(current);
+                block = cursor.next()?;
+            }
+
+            // then we can write the blocks for the same client
+            writer.write_var(block_buf.len())?;
+            writer.write_var(client_id)?;
+
+            let block = &block_buf[0];
+            // write first block - it may start at offset inside the block
+            Self::write_block(
+                &block,
+                start_clock - block.id().clock,
+                &contents,
+                &map_entries,
+                &intern_strings,
+                &mut writer,
+            )?;
+            // write rest of the blocks
+            for block in block_buf[1..].iter() {
+                Self::write_block(
+                    block,
+                    Clock::new(0),
+                    &contents,
+                    &map_entries,
+                    &intern_strings,
+                    &mut writer,
+                )?
+            }
+        }
+
+        // write down transaction's own delete set
+        state.delete_set.encode_with(&mut writer)?;
 
         Ok(())
     }

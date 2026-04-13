@@ -12,21 +12,34 @@ pub struct MetaStore<'tx> {
 }
 
 impl<'tx> MetaStore<'tx> {
+    const KEY_CLIENT_ID: &'static str = "$client_id";
+    const KEY_PENDING: &'static str = "$pending";
+
     pub fn new(db: &'tx Database<'tx>) -> Self {
         Self { db }
     }
 
     /// Return a current store client ID or generate new one.
     pub fn client_id(&self) -> crate::Result<ClientID> {
-        let data = self.get("client_id")?;
+        let data = self.get(Self::KEY_CLIENT_ID)?;
         match data {
             Some(id) => Ok(*ClientID::parse(id)?),
             None => {
                 let client_id = ClientID::new_random();
-                self.insert("client_id", client_id.as_bytes())?;
+                self.insert(Self::KEY_CLIENT_ID, client_id.as_bytes())?;
                 Ok(client_id)
             }
         }
+    }
+
+    /// Get pending update if any exists.
+    pub fn pending(&self) -> crate::Result<Option<&'tx [u8]>> {
+        self.get(Self::KEY_PENDING)
+    }
+
+    /// Insert a new pending update, possibly replacing existing one.
+    pub fn insert_pending(&self, update: &[u8]) -> crate::Result<()> {
+        self.insert(Self::KEY_PENDING, update)
     }
 
     pub fn get(&self, key: &str) -> crate::Result<Option<&'tx [u8]>> {
