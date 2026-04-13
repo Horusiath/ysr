@@ -12,8 +12,8 @@ pub struct MetaStore<'tx> {
 }
 
 impl<'tx> MetaStore<'tx> {
-    const KEY_CLIENT_ID: &'static str = "$client_id";
-    const KEY_PENDING: &'static str = "$pending";
+    pub const KEY_CLIENT_ID: &'static str = "$client_id";
+    pub const KEY_PENDING: &'static str = "$pending";
 
     pub fn new(db: &'tx Database<'tx>) -> Self {
         Self { db }

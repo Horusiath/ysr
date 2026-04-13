@@ -174,7 +174,7 @@ mod test {
         let put_value = {
             |mdoc: &MultiDoc,
              summary: &mut TransactionSummary,
-             updates: &mut Vec<Bytes>,
+             updates: &mut Vec<Vec<u8>>,
              key: &str,
              value: f64| {
                 let mut tx = mdoc.transact_mut("test").unwrap();
@@ -182,7 +182,7 @@ mod test {
                 map.insert(key, value).unwrap();
                 tx.commit(Some(summary)).unwrap();
 
-                let update = summary.update().clone();
+                let update = summary.update.clone();
                 updates.push(update);
                 summary.clear();
             }
