@@ -185,6 +185,11 @@ impl TransactionState {
         }
 
         // try to merge mergeStructs
+        for id in self.merge_blocks.iter() {
+            if let Some(_) = cursor.seek_containing(*id).optional()? {
+                Self::merge_with_lefts(&mut cursor, &mut key_changes)?;
+            }
+        }
 
         // persist updated state vector
         let mut sv_store = db.state_vector();
