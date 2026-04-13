@@ -74,15 +74,7 @@ impl<'tx> BlockStore<'tx> {
 
     pub fn split(&self, id: ID) -> crate::Result<SplitResult> {
         let mut cursor = self.cursor()?;
-        let result = cursor.split(id)?;
-        if let SplitResult::Split(left, _) = &result
-            && !left.flags().contains(BlockFlags::INLINE_CONTENT)
-            && left.content_type() == ContentType::String
-        {
-            let content_store = ContentStore::new(self.db);
-            content_store.split_string(*left.id(), left.clock_len())?;
-        }
-        Ok(result)
+        cursor.split(id)
     }
 
     pub fn inspect(&self) -> Inspector<'_> {
@@ -304,6 +296,14 @@ impl<'tx> BlockCursor<'tx> {
                 let key = BlockKey::new(*right.id());
                 self.cursor
                     .put(key.as_bytes(), right.as_block().header().as_bytes(), 0)?;
+
+                if !left.flags().contains(BlockFlags::INLINE_CONTENT)
+                    && left.content_type() == ContentType::String
+                {
+                    let contents = ContentStore::new(self.db);
+                    contents.split_string(*left.id(), offset)?;
+                }
+
                 Ok(SplitResult::Split(left, right))
             }
         }

@@ -7,7 +7,7 @@ use crate::node::{Node, NodeID};
 use crate::prelim::Prelim;
 use crate::read::Decoder;
 use crate::state_vector::Snapshot;
-use crate::store::block_store::BlockCursor;
+use crate::store::block_store::{BlockCursor, SplitResult};
 use crate::store::content_store::ContentStore;
 use crate::store::intern_strings::InternStringsStore;
 use crate::store::{Db, MapEntriesStore};
@@ -697,26 +697,17 @@ impl<'db> Transaction<'db> {
                         if !block.is_deleted() && block.id().clock < clock_start {
                             // split the first item if necessary
                             let offset = clock_start - block.id().clock;
-                            let mut left: BlockMut = block.into();
-                            if let Some(right) = left.split(offset) {
-                                block_cursor.update_current(left.header())?;
-                                block_cursor.insert(right.as_block())?;
-
-                                // block is the same as right, but we need specifically its reference residing in the db
-                                block = block_cursor.current()?;
-                            }
+                            // block is the same as right, but we need specifically its reference residing in the db
+                            block_cursor.split_current(offset)?;
+                            block = block_cursor.current()?;
                         }
 
                         while block.id().client == client && block.id().clock < clock_end {
                             if !block.is_deleted() {
                                 if block.id().clock + block.clock_len() > clock_end {
                                     let offset = clock_end - block.id().clock;
-                                    let mut left: BlockMut = block.into();
-                                    if let Some(right) = left.split(offset) {
-                                        block_cursor.update_current(left.header())?;
-                                        block_cursor.insert(right.as_block())?;
-                                        block = block_cursor.prev()?.unwrap();
-                                    }
+                                    block_cursor.split_current(offset)?;
+                                    block = block_cursor.prev()?.unwrap();
                                 }
                                 let mut block: BlockMut = block.into();
                                 block.set_deleted();

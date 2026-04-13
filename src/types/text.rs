@@ -11,7 +11,7 @@ use crate::store::block_store::{BlockCursor, SplitResult};
 use crate::store::content_store::ContentStore;
 use crate::transaction::TransactionState;
 use crate::types::Capability;
-use crate::{Block, BlockHeader, BlockMut, Clock, Error, In, Mounted, Out, Transaction, lib0};
+use crate::{Block, BlockHeader, BlockMut, Clock, In, Mounted, Out, Transaction, lib0};
 use serde::Serialize;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, Bound};
@@ -687,34 +687,31 @@ struct BlockPosition {
 }
 
 impl BlockPosition {
-    fn seek(tx: &Transaction<'_>, start: Option<ID>, index: usize) -> crate::Result<Self> {
-        let mut remaining = index;
-
-        let db = tx.db.get();
-        let contents = db.contents();
-        let blocks = db.blocks();
-        let mut block_cursor = blocks.cursor()?;
-
-        let mut pos = BlockPosition {
-            attrs: Attrs::default(),
+    fn new(right: Option<ID>) -> Self {
+        BlockPosition {
+            attrs: Attrs::new(),
             index: 0,
             left: None,
-            right: start,
-        };
+            right,
+        }
+    }
 
-        while let Some(right_id) = &pos.right
+    fn forward_by(&mut self, offset: usize, cursor: &mut BlockCursor) -> crate::Result<()> {
+        let mut remaining = offset;
+        while let Some(right_id) = &self.right
             && remaining != 0
         {
-            let right = block_cursor.seek(*right_id)?;
+            let right = cursor.seek(*right_id)?;
             if !right.is_deleted() {
                 if right.content_type() == ContentType::Format {
-                    let content = get_content(&right, &contents)?;
+                    let content_store = cursor.content_store();
+                    let content = get_content(&right, &content_store)?;
                     let fmt = content.as_format()?;
                     let fmt_value: Value = fmt.value()?;
                     if fmt_value.is_null() {
-                        pos.attrs.remove(fmt.key());
+                        self.attrs.remove(fmt.key());
                     } else {
-                        pos.attrs.insert(fmt.key().to_owned(), fmt_value);
+                        self.attrs.insert(fmt.key().to_owned(), fmt_value);
                     }
                 } else {
                     let len = right.clock_len().get() as usize;
@@ -731,10 +728,10 @@ impl BlockPosition {
                         // Drop the borrow on `block_cursor` before opening another cursor
                         // through `blocks.split`.
                         let _ = right;
-                        match blocks.split(split_id)? {
+                        match cursor.split(split_id)? {
                             SplitResult::Split(left_block, right_block) => {
-                                pos.left = Some(left_block.last_id());
-                                pos.right = Some(*right_block.id());
+                                self.left = Some(left_block.last_id());
+                                self.right = Some(*right_block.id());
                             }
                             SplitResult::Unchanged(_) => {
                                 // Should not happen: we verified `remaining < len`, so
@@ -742,18 +739,29 @@ impl BlockPosition {
                                 unreachable!("split point is strictly inside the block");
                             }
                         }
-                        pos.index += remaining;
+                        self.index += remaining;
                         break;
                     } else {
                         remaining -= len;
-                        pos.index += len;
+                        self.index += len;
                     }
                 }
             }
             // move to the right
-            pos.left = Some(right.last_id());
-            pos.right = right.right().copied();
+            self.left = Some(right.last_id());
+            self.right = right.right().copied();
         }
+        Ok(())
+    }
+
+    fn seek(tx: &Transaction<'_>, start: Option<ID>, index: usize) -> crate::Result<Self> {
+        let db = tx.db.get();
+        let blocks = db.blocks();
+        let mut block_cursor = blocks.cursor()?;
+
+        let mut pos = Self::new(start);
+        pos.forward_by(index, &mut block_cursor)?;
+
         Ok(pos)
     }
 
