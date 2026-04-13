@@ -9,6 +9,7 @@ use crate::node::{Node, NodeID, NodeType};
 use crate::read::{Decode, Decoder, ReadExt};
 use crate::store::Db;
 use crate::transaction::TransactionState;
+use crate::write::Encoder;
 use crate::{ClientID, Clock, U32};
 use bytes::{BufMut, BytesMut};
 use smallvec::SmallVec;
@@ -386,6 +387,21 @@ impl Carrier {
                 block.integrate(db, state, &mut context)?;
             }
             Carrier::Skip(_) => { /* ignore skip blocks */ }
+        }
+        Ok(())
+    }
+
+    pub fn encode<E: Encoder>(&self, w: &mut E) -> crate::Result<()> {
+        match self {
+            Carrier::GC(range) => {
+                w.write_info(0)?; // BLOCK_GC_REF_NUMBER
+                w.write_len(range.len())?;
+            }
+            Carrier::Skip(range) => {
+                w.write_info(10)?; // BLOCK_SKIP_REF_NUMBER
+                w.write_len(range.len())?;
+            }
+            Carrier::Block(data) => data.encode(w)?,
         }
         Ok(())
     }

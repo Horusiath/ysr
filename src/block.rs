@@ -2,9 +2,10 @@ use crate::block_reader::BlockRange;
 use crate::content::{Content, ContentType, utf16_to_utf8};
 use crate::integrate::IntegrationContext;
 use crate::lmdb::Database;
-use crate::node::{Node, NodeID, NodeType};
+use crate::node::{Named, Node, NodeID, NodeType};
 use crate::store::Db;
 use crate::transaction::TransactionState;
+use crate::write::{Encoder, WriteExt};
 use crate::{ClientID, Clock, Optional, U32};
 use crate::{Error, Result};
 use bitflags::bitflags;
@@ -1034,6 +1035,97 @@ impl InsertBlockData {
 
     fn is_map_entry(&self) -> bool {
         self.entry.is_some() || self.block.key_hash().is_some()
+    }
+
+    pub(crate) fn encode<E: Encoder>(&self, writer: &mut E) -> crate::Result<()> {
+        let block = self.block.as_block();
+        let origin_left = block.origin_left();
+        let origin_right = block.origin_right();
+        let info = block.info_flags();
+        writer.write_info(info)?;
+        if let Some(origin_left) = &origin_left {
+            writer.write_left_id(origin_left)?;
+        }
+        if let Some(origin_right) = &origin_right {
+            writer.write_right_id(origin_right)?;
+        }
+        if info & 0b1100_0000 == 0 {
+            // left/right origins were not provided
+            match &self.parent {
+                Some(Node::Root(Named::Name(name))) => {
+                    writer.write_parent_info(true)?;
+                    writer.write_string(name)?;
+                }
+                Some(Node::Nested(parent_id)) => {
+                    writer.write_parent_info(false)?;
+                    writer.write_left_id(&parent_id)?;
+                }
+                _ => return Err(crate::Error::BlockNotFound(block.parent)),
+            }
+
+            if let Some(entry_key) = self.entry_key() {
+                writer.write_string(entry_key)?;
+            }
+        }
+
+        let content_type = block.content_type();
+        let data = block.try_inline_data();
+        match content_type {
+            ContentType::Deleted => {
+                writer.write_len(block.clock_len().into())?;
+            }
+            ContentType::Binary => {
+                let content = match data {
+                    Some(data) => data,
+                    None => &*self.content[0].data,
+                };
+                writer.write_bytes(content)?;
+            }
+            ContentType::String => {
+                let content = match data {
+                    Some(data) => data,
+                    None => &*self.content[0].data,
+                };
+                let content = unsafe { std::str::from_utf8_unchecked(content) };
+                writer.write_string(content)?;
+            }
+            ContentType::Embed => {
+                let content = match data {
+                    Some(data) => data,
+                    None => &*self.content[0].data,
+                };
+                let json: serde_json::Value = serde_json::from_slice(content)?;
+                writer.write_json(&json)?;
+            }
+            ContentType::Format => {
+                let content = match data {
+                    Some(data) => data,
+                    None => &*self.content[0].data,
+                };
+                writer.write_all(content)?; // format is stored in the same shape
+            }
+            ContentType::Node => {
+                writer.write_type_ref(*block.node_type().unwrap() as u8)?;
+            }
+            ContentType::Atom | ContentType::Json => match data {
+                Some(data) => {
+                    writer.write_len(1.into())?;
+                    writer.write_all(data)?;
+                }
+                None => {
+                    let mut i = self.content.iter();
+                    writer.write_len(block.clock_len().into())?;
+                    while let Some(content) = i.next() {
+                        writer.write_all(content.bytes())?;
+                    }
+                }
+            },
+            ContentType::Doc => {
+                todo!()
+            }
+        }
+
+        Ok(())
     }
 }
 

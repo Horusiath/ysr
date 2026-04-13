@@ -262,9 +262,10 @@ impl TransactionState {
 
             // then we can write the blocks for the same client
             writer.write_var(block_buf.len())?;
-            writer.write_var(client_id)?;
+            writer.write_client(client_id)?;
 
             let block = &block_buf[0];
+            writer.write_var(start_clock)?;
             // write first block - it may start at offset inside the block
             Transaction::write_block(
                 &block,
@@ -766,9 +767,35 @@ impl<'db> Transaction<'db> {
         }
         let pending_delete_set = self.apply_delete(&update.delete_set)?;
         if !remaining.is_empty() || !pending_delete_set.is_empty() {
-            todo!("insert pending data")
+            self.insert_pending(&remaining, &pending_delete_set)?;
         }
         Ok(())
+    }
+
+    fn insert_pending(
+        &self,
+        blocks: &BTreeMap<ClientID, VecDeque<Carrier>>,
+        delete_set: &IDSet,
+    ) -> crate::Result<()> {
+        let mut buf = Vec::new();
+        let mut writer = EncoderV1::new(&mut buf);
+
+        writer.write_var(blocks.len())?;
+        for (&client_id, carriers) in blocks.iter() {
+            writer.write_var(carriers.len())?;
+            writer.write_client(client_id)?;
+            writer.write_var(carriers[0].id().clock)?;
+
+            for carrier in carriers {
+                carrier.encode(&mut writer)?;
+            }
+        }
+
+        delete_set.encode_with(&mut writer)?;
+
+        let db = self.db.get();
+        let meta = db.meta();
+        meta.insert_pending(&buf)
     }
 
     fn apply_delete(&mut self, delete_set: &IDSet) -> crate::Result<IDSet> {

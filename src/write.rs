@@ -36,7 +36,7 @@ pub trait Encoder: Write {
     fn write_type_ref(&mut self, info: u8) -> crate::Result<()>;
 
     /// Write length parameter.
-    fn write_len(&mut self, len: U64) -> crate::Result<usize>;
+    fn write_len(&mut self, len: Clock) -> crate::Result<usize>;
 
     /// Write a string key.
     fn write_key(&mut self, string: &str) -> crate::Result<usize>;
@@ -246,7 +246,7 @@ impl<W: Write> Encoder for EncoderV1<W> {
     }
 
     #[inline]
-    fn write_len(&mut self, len: U64) -> crate::Result<usize> {
+    fn write_len(&mut self, len: Clock) -> crate::Result<usize> {
         Ok(self.write_var(len)?)
     }
 
