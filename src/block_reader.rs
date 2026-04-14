@@ -204,8 +204,25 @@ impl Update {
 
     /// Merge two updates into one, deduplicating overlapping carriers.
     pub fn merge_updates(mut a: Self, mut b: Self) -> Self {
-        let mut blocks_a = std::mem::take(&mut a.blocks).into_iter().peekable();
-        let mut blocks_b = std::mem::take(&mut b.blocks).into_iter().peekable();
+        let blocks =
+            Self::merge_blocks(std::mem::take(&mut a.blocks), std::mem::take(&mut b.blocks));
+
+        // merge delete sets
+        a.delete_set.merge(b.delete_set);
+        a.delete_set.squash();
+
+        Update {
+            blocks,
+            delete_set: a.delete_set,
+        }
+    }
+
+    fn merge_blocks(
+        a: BTreeMap<ClientID, VecDeque<Carrier>>,
+        b: BTreeMap<ClientID, VecDeque<Carrier>>,
+    ) -> BTreeMap<ClientID, VecDeque<Carrier>> {
+        let mut blocks_a = a.into_iter().peekable();
+        let mut blocks_b = b.into_iter().peekable();
         let mut blocks = BTreeMap::new();
 
         loop {
@@ -241,14 +258,7 @@ impl Update {
             }
         }
 
-        // merge delete sets
-        a.delete_set.merge(b.delete_set);
-        a.delete_set.squash();
-
-        Update {
-            blocks,
-            delete_set: a.delete_set,
-        }
+        blocks
     }
 
     /// Merge two sorted carrier sequences for the same client into one.

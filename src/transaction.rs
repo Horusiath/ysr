@@ -4,7 +4,7 @@ use crate::content::ContentType;
 use crate::id_set::IDSet;
 use crate::lmdb::{Database, Dbi, RwTxn};
 use crate::node::{Node, NodeID};
-use crate::read::Decoder;
+use crate::read::{Decode, Decoder};
 use crate::state_vector::Snapshot;
 use crate::store::block_store::BlockCursor;
 use crate::store::content_store::ContentStore;
@@ -705,7 +705,10 @@ impl<'db> Transaction<'db> {
                 BTreeMap::default()
             };
             let pending_delete_set = self.apply_delete(&update.delete_set)?;
-            current = self.handle_pending(remaining, pending_delete_set)?;
+            current = self.handle_pending(Update {
+                blocks: remaining,
+                delete_set: pending_delete_set,
+            })?;
         }
         Ok(())
     }
@@ -777,16 +780,12 @@ impl<'db> Transaction<'db> {
         Ok(remaining)
     }
 
-    fn handle_pending(
-        &mut self,
-        blocks: BTreeMap<ClientID, VecDeque<Carrier>>,
-        delete_set: IDSet,
-    ) -> crate::Result<Option<Update>> {
+    fn handle_pending(&mut self, update: Update) -> crate::Result<Option<Update>> {
         let db = self.db.get();
         let meta = db.meta();
         let pending = meta.pending()?;
 
-        if pending.is_none() && blocks.is_empty() && delete_set.is_empty() {
+        if pending.is_none() && update.blocks.is_empty() && update.delete_set.is_empty() {
             return Ok(None);
         }
 
@@ -805,26 +804,44 @@ impl<'db> Transaction<'db> {
                 pending
             }
         };
-        for (client, blocks) in blocks.iter() {
-            if let Some(first) = blocks.front() {
-                pending.missing_sv.set_min(*client, first.id().clock);
+        if !update.blocks.is_empty() {
+            for (client, blocks) in update.blocks.iter() {
+                if let Some(first) = blocks.front() {
+                    pending.missing_sv.set_min(*client, first.id().clock);
+                }
             }
         }
 
-        todo!()
+        let mut pending_update = if pending.update.is_empty() {
+            Update::default()
+        } else {
+            Update::decode(pending.update)?
+        };
+        if !pending.delete_set.is_empty() {
+            pending_update.delete_set = IDSet::decode(&pending.delete_set)?;
+        }
+
+        let missing_sv = pending.missing_sv;
+        let pending = Update::merge_updates(pending_update, update);
+        if retry {
+            meta.clear_pending()?;
+            Ok(Some(pending))
+        } else {
+            Self::insert_pending(&meta, pending, missing_sv)?;
+            Ok(None)
+        }
     }
 
     fn insert_pending(
-        &self,
-        blocks: &BTreeMap<ClientID, VecDeque<Carrier>>,
-        delete_set: &IDSet,
+        meta: &MetaStore,
+        update: Update,
+        missing_sv: StateVector,
     ) -> crate::Result<()> {
-        let mut update = Vec::new();
-        let mut missing_sv = StateVector::default();
-        let mut writer = EncoderV1::new(&mut update);
+        let mut buf = Vec::new();
+        let mut writer = EncoderV1::new(&mut buf);
 
-        writer.write_var(blocks.len())?;
-        for (&client_id, carriers) in blocks.iter() {
+        writer.write_var(update.blocks.len())?;
+        for (&client_id, carriers) in update.blocks.iter() {
             writer.write_var(carriers.len())?;
             writer.write_client(client_id)?;
             writer.write_var(carriers[0].id().clock)?;
@@ -836,11 +853,8 @@ impl<'db> Transaction<'db> {
 
         let mut ds = Vec::new();
         let mut writer = EncoderV1::new(&mut ds);
-        delete_set.encode_with(&mut writer)?;
-
-        let db = self.db.get();
-        let meta = db.meta();
-        meta.insert_pending(&update, &ds, &missing_sv)?;
+        update.delete_set.encode_with(&mut writer)?;
+        meta.insert_pending(&PendingUpdate::new(&buf, &ds, missing_sv))?;
         Ok(())
     }
 
