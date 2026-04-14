@@ -202,28 +202,173 @@ impl Update {
         Ok(result)
     }
 
-    pub fn merge_updates(mut updates: Vec<Self>) -> Self {
+    /// Merge two updates into one, deduplicating overlapping carriers.
+    pub fn merge_updates(mut a: Self, mut b: Self) -> Self {
+        let mut blocks_a = std::mem::take(&mut a.blocks).into_iter().peekable();
+        let mut blocks_b = std::mem::take(&mut b.blocks).into_iter().peekable();
         let mut blocks = BTreeMap::new();
 
-        // k-way merge of blocks
-        let mut client_iters = updates
-            .iter_mut()
-            .map(|u| {
-                let blocks = std::mem::take(&mut u.blocks);
-                blocks.into_iter()
-            })
-            .collect::<Vec<_>>();
-
-        todo!("k-way merge of client_iters into blocks");
+        loop {
+            match (blocks_a.peek(), blocks_b.peek()) {
+                (Some((ca, _)), Some((cb, _))) => {
+                    let ca = *ca;
+                    let cb = *cb;
+                    if ca < cb {
+                        let (client, carriers) = blocks_a.next().unwrap();
+                        blocks.insert(client, carriers);
+                    } else if ca > cb {
+                        let (client, carriers) = blocks_b.next().unwrap();
+                        blocks.insert(client, carriers);
+                    } else {
+                        // same client in both updates — merge carrier lists
+                        let (client, carriers_a) = blocks_a.next().unwrap();
+                        let (_, carriers_b) = blocks_b.next().unwrap();
+                        let merged = Self::merge_carriers(carriers_a, carriers_b);
+                        if !merged.is_empty() {
+                            blocks.insert(client, merged);
+                        }
+                    }
+                }
+                (Some(_), None) => {
+                    let (client, carriers) = blocks_a.next().unwrap();
+                    blocks.insert(client, carriers);
+                }
+                (None, Some(_)) => {
+                    let (client, carriers) = blocks_b.next().unwrap();
+                    blocks.insert(client, carriers);
+                }
+                (None, None) => break,
+            }
+        }
 
         // merge delete sets
-        let mut delete_set = IDSet::default();
-        for u in updates {
-            delete_set.merge(u.delete_set);
-        }
-        delete_set.squash();
+        a.delete_set.merge(b.delete_set);
+        a.delete_set.squash();
 
-        Update { blocks, delete_set }
+        Update {
+            blocks,
+            delete_set: a.delete_set,
+        }
+    }
+
+    /// Merge two sorted carrier sequences for the same client into one.
+    /// Handles overlapping carriers by keeping the higher-priority variant
+    /// and splitting/deduplicating as needed.
+    fn merge_carriers(mut a: VecDeque<Carrier>, mut b: VecDeque<Carrier>) -> VecDeque<Carrier> {
+        let mut result = VecDeque::with_capacity(a.len() + b.len());
+
+        loop {
+            let carrier = match (a.front(), b.front()) {
+                (Some(ca), Some(cb)) => {
+                    if ca.id().clock <= cb.id().clock {
+                        a.pop_front().unwrap()
+                    } else {
+                        b.pop_front().unwrap()
+                    }
+                }
+                (Some(_), None) => a.pop_front().unwrap(),
+                (None, Some(_)) => b.pop_front().unwrap(),
+                (None, None) => break,
+            };
+            Self::push_carrier(&mut result, carrier);
+        }
+
+        result
+    }
+
+    /// Push a carrier into a sorted, non-overlapping result sequence.
+    /// Handles overlaps with existing entries by splitting/deduplicating
+    /// based on carrier priority, and tries to merge adjacent carriers.
+    fn push_carrier(result: &mut VecDeque<Carrier>, mut carrier: Carrier) {
+        let mut suffix: Option<Carrier> = None;
+
+        loop {
+            let Some(last) = result.back() else {
+                result.push_back(carrier);
+                break;
+            };
+
+            let last_end = last.end();
+            let curr_start = carrier.id().clock;
+
+            if curr_start > last_end {
+                // No overlap: try to merge with the back or just push
+                if result.back().unwrap().can_merge(&carrier) {
+                    result.back_mut().unwrap().merge(carrier);
+                } else {
+                    result.push_back(carrier);
+                }
+                break;
+            }
+
+            // Overlap: curr_start <= last_end
+            let curr_end = carrier.end();
+            let last_prio = Carrier::priority(last);
+            let curr_prio = Carrier::priority(&carrier);
+
+            if last_prio >= curr_prio {
+                // Existing entry wins in the overlap region
+                if curr_end <= last_end {
+                    // Carrier fully contained — discard it
+                    break;
+                }
+                // Carrier extends beyond last — split off the non-overlapping tail
+                let offset = last_end + 1 - curr_start;
+                if let Some(right) = carrier.split(offset) {
+                    carrier = right;
+                    if result.back().unwrap().can_merge(&carrier) {
+                        result.back_mut().unwrap().merge(carrier);
+                    } else {
+                        result.push_back(carrier);
+                    }
+                }
+                break;
+            }
+
+            // Carrier wins (higher priority) — pop old entry
+            let mut old_last = result.pop_back().unwrap();
+            let old_start = old_last.id().clock;
+            let old_end = old_last.end();
+
+            if curr_start > old_start {
+                // Old entry has a non-overlapping prefix to preserve
+                let prefix_len = curr_start - old_start;
+                let remainder = old_last.split(prefix_len);
+                // old_last is now the prefix
+                result.push_back(old_last);
+
+                // Check if old entry also has a suffix beyond carrier
+                if old_end > curr_end {
+                    if let Some(mut rem) = remainder {
+                        let skip = curr_end + 1 - rem.id().clock;
+                        suffix = rem.split(skip).or(suffix);
+                    }
+                }
+                // Prefix is adjacent to carrier — try merge or push
+                if result.back().unwrap().can_merge(&carrier) {
+                    result.back_mut().unwrap().merge(carrier);
+                } else {
+                    result.push_back(carrier);
+                }
+                break;
+            }
+
+            // No prefix: carrier starts at or before old entry.
+            // Save suffix if old entry extends beyond carrier.
+            if old_end > curr_end && suffix.is_none() {
+                let skip = curr_end + 1 - old_start;
+                suffix = old_last.split(skip);
+            }
+            // Continue loop — carrier might overlap with the new back of result
+        }
+
+        if let Some(suffix) = suffix {
+            if result.back().is_some_and(|last| last.can_merge(&suffix)) {
+                result.back_mut().unwrap().merge(suffix);
+            } else {
+                result.push_back(suffix);
+            }
+        }
     }
 }
 
@@ -413,6 +558,66 @@ impl Carrier {
             Carrier::Skip(_) => { /* ignore skip blocks */ }
         }
         Ok(())
+    }
+
+    /// Returns the priority of this carrier for merge deduplication.
+    /// GC (2) > Block (1) > Skip (0).
+    fn priority(&self) -> u8 {
+        match self {
+            Carrier::GC(_) => 2, // highest priority - block existed and was already deleted
+            Carrier::Block(_) => 1,
+            Carrier::Skip(_) => 0, // lowest priority - only when block was not found yet
+        }
+    }
+
+    /// Split this carrier at `offset` (measured in clock units from the start).
+    /// Self becomes the left part. Returns the right part, or `None` if split
+    /// is not possible (e.g. offset is 0 or beyond the end).
+    pub fn split(&mut self, offset: Clock) -> Option<Self> {
+        match self {
+            Carrier::GC(range) | Carrier::Skip(range) => {
+                let head = *range.head();
+                let end = range.end();
+                let split_clock = head.clock + offset;
+                if offset.get() == 0 || split_clock > end {
+                    return None;
+                }
+                let right = BlockRange::new(ID::new(head.client, split_clock), end);
+                *range = BlockRange::new(head, split_clock - 1);
+                match self {
+                    Carrier::GC(_) => Some(Carrier::GC(right)),
+                    Carrier::Skip(_) => Some(Carrier::Skip(right)),
+                    _ => unreachable!(),
+                }
+            }
+            Carrier::Block(data) => data.split(offset).map(Carrier::Block),
+        }
+    }
+
+    /// Check whether this carrier can be merged with the `other` carrier
+    /// that follows it (i.e. `other` is the right neighbor).
+    pub fn can_merge(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Carrier::GC(a), Carrier::GC(b)) | (Carrier::Skip(a), Carrier::Skip(b)) => {
+                a.head().client == b.head().client && a.end() + 1 == b.head().clock
+            }
+            (Carrier::Block(a), Carrier::Block(b)) => a.block.can_merge(&b.as_block()),
+            _ => false,
+        }
+    }
+
+    /// Merge `other` into this carrier. The caller must ensure
+    /// `self.can_merge(&other)` returned `true` beforehand.
+    pub fn merge(&mut self, other: Self) {
+        match (self, other) {
+            (Carrier::GC(a), Carrier::GC(b)) | (Carrier::Skip(a), Carrier::Skip(b)) => {
+                *a = BlockRange::new(*a.head(), b.end());
+            }
+            (Carrier::Block(a), Carrier::Block(b)) => {
+                a.merge(b);
+            }
+            _ => {}
+        }
     }
 
     pub fn encode<E: Encoder>(&self, w: &mut E) -> crate::Result<()> {

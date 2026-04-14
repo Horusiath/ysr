@@ -803,6 +803,54 @@ impl InsertBlockData {
         self.entry = Some(Bytes::copy_from_slice(key.as_ref()));
     }
 
+    /// Split this block data at `offset` (measured in clock units from the start).
+    /// Self becomes the left part `[id.clock, id.clock+offset-1]`.
+    /// Returns the right part `[id.clock+offset, end]`, or `None` if split is not possible.
+    pub fn split(&mut self, offset: Clock) -> Option<Self> {
+        let right_block = self.block.split(offset)?;
+        let right_content = match self.block.content_type() {
+            ContentType::String => {
+                // Single content item with full UTF-8 string data.
+                // Clock offset corresponds to UTF-16 code units.
+                if let Some(content) = self.content.pop() {
+                    let utf16_offset = offset.get() as usize;
+                    let byte_offset = {
+                        let s = unsafe { std::str::from_utf8_unchecked(content.bytes()) };
+                        utf16_to_utf8(s, utf16_offset)
+                    };
+                    if let Some(byte_offset) = byte_offset {
+                        let right_data = content.bytes()[byte_offset..].to_vec();
+                        let left_data = content.bytes()[..byte_offset].to_vec();
+                        self.content
+                            .push(Content::new(ContentType::String, Cow::Owned(left_data)));
+                        smallvec![Content::new(ContentType::String, Cow::Owned(right_data))]
+                    } else {
+                        self.content.push(content);
+                        smallvec![]
+                    }
+                } else {
+                    smallvec![]
+                }
+            }
+            ContentType::Atom | ContentType::Json => {
+                // Multipart: one content item per element.
+                let off = offset.get() as usize;
+                if off < self.content.len() {
+                    self.content.drain(off..).collect()
+                } else {
+                    smallvec![]
+                }
+            }
+            _ => smallvec![],
+        };
+        Some(InsertBlockData {
+            block: right_block,
+            content: right_content,
+            parent: self.parent.clone(),
+            entry: self.entry.clone(),
+        })
+    }
+
     pub fn merge(&mut self, other: Self) -> bool {
         if self.block.merge(other.block.as_block()) {
             if !self.content.is_empty() {
