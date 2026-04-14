@@ -201,6 +201,30 @@ impl Update {
         }
         Ok(result)
     }
+
+    pub fn merge_updates(mut updates: Vec<Self>) -> Self {
+        let mut blocks = BTreeMap::new();
+
+        // k-way merge of blocks
+        let mut client_iters = updates
+            .iter_mut()
+            .map(|u| {
+                let blocks = std::mem::take(&mut u.blocks);
+                blocks.into_iter()
+            })
+            .collect::<Vec<_>>();
+
+        todo!("k-way merge of client_iters into blocks");
+
+        // merge delete sets
+        let mut delete_set = IDSet::default();
+        for u in updates {
+            delete_set.merge(u.delete_set);
+        }
+        delete_set.squash();
+
+        Update { blocks, delete_set }
+    }
 }
 
 pub(crate) struct BlockReader<'a, D> {

@@ -697,79 +697,121 @@ impl<'db> Transaction<'db> {
     }
 
     pub fn apply_update<D: Decoder>(&mut self, decoder: &mut D) -> crate::Result<()> {
-        let mut update = Update::decode_with(decoder)?;
+        let mut current = Some(Update::decode_with(decoder)?);
+        while let Some(update) = current.take() {
+            let remaining = if !update.blocks.is_empty() {
+                self.apply_update_internal(update.blocks)?
+            } else {
+                BTreeMap::default()
+            };
+            let pending_delete_set = self.apply_delete(&update.delete_set)?;
+            current = self.handle_pending(remaining, pending_delete_set)?;
+        }
+        Ok(())
+    }
+
+    fn apply_update_internal(
+        &mut self,
+        mut blocks: BTreeMap<ClientID, VecDeque<Carrier>>,
+    ) -> crate::Result<BTreeMap<ClientID, VecDeque<Carrier>>> {
         let mut db = self.db.get();
         let state = self.state.get_or_init(db);
         let mut missing_sv = StateVector::default();
         let mut remaining = BTreeMap::new();
         let mut stack = Vec::new();
 
-        if !update.blocks.is_empty() {
-            let mut current_client = update.blocks.last_entry().unwrap();
-            let mut stack_head = current_client.get_mut().pop_front();
+        let mut current_client = blocks.last_entry().unwrap();
+        let mut stack_head = current_client.get_mut().pop_front();
 
-            while let Some(carrier) = stack_head {
-                if !carrier.is_skip() {
-                    let id = *carrier.id();
-                    if state.current_state.contains(&id) {
-                        // offset informs if current block partially overlaps with already integrated blocks
-                        let offset = state.current_state.get(&id.client) - id.clock;
-                        if let Some(dep) = Self::missing_dependency(&carrier, &state.current_state)
-                        {
-                            // current block is missing a dependency
-                            stack.push(carrier);
-                            match update.blocks.entry(dep) {
-                                Entry::Occupied(e) if !e.get().is_empty() => {
-                                    // integrate blocks from the missing dependency client before continuing with the current client
-                                    current_client = e;
-                                    stack_head = current_client.get_mut().pop_front();
-                                    continue;
-                                }
-                                _ => {
-                                    // This update message causally depends on another update message that doesn't exist yet
-                                    missing_sv.set_min(dep, state.current_state.get(&dep));
-                                    Self::unapplicable(
-                                        &mut stack,
-                                        &mut update.blocks,
-                                        &mut remaining,
-                                    );
-                                    current_client = update.blocks.last_entry().unwrap();
-                                }
-                            }
-                        } else if offset == 0 || offset < carrier.len() {
-                            carrier.integrate(offset, state, &mut db)?;
-                        }
-                    } else {
-                        // update from the same client is missing
-                        missing_sv.set_min(id.client, id.clock - 1);
+        while let Some(carrier) = stack_head {
+            if !carrier.is_skip() {
+                let id = *carrier.id();
+                if state.current_state.contains(&id) {
+                    // offset informs if current block partially overlaps with already integrated blocks
+                    let offset = state.current_state.get(&id.client) - id.clock;
+                    if let Some(dep) = Self::missing_dependency(&carrier, &state.current_state) {
+                        // current block is missing a dependency
                         stack.push(carrier);
-                        Self::unapplicable(&mut stack, &mut update.blocks, &mut remaining);
-                        current_client = update.blocks.last_entry().unwrap();
+                        match blocks.entry(dep) {
+                            Entry::Occupied(e) if !e.get().is_empty() => {
+                                // integrate blocks from the missing dependency client before continuing with the current client
+                                current_client = e;
+                                stack_head = current_client.get_mut().pop_front();
+                                continue;
+                            }
+                            _ => {
+                                // This update message causally depends on another update message that doesn't exist yet
+                                missing_sv.set_min(dep, state.current_state.get(&dep));
+                                Self::unapplicable(&mut stack, &mut blocks, &mut remaining);
+                                current_client = blocks.last_entry().unwrap();
+                            }
+                        }
+                    } else if offset == 0 || offset < carrier.len() {
+                        carrier.integrate(offset, state, &mut db)?;
                     }
-                }
-
-                // move to the next stack head
-                if !stack.is_empty() {
-                    stack_head = stack.pop();
                 } else {
-                    if current_client.get().is_empty() {
-                        current_client.remove();
-                        current_client = match update.blocks.last_entry() {
-                            Some(e) => e,
-                            None => break,
-                        };
-                        stack_head = current_client.get_mut().pop_front();
-                    } else {
-                        stack_head = current_client.get_mut().pop_front();
-                    }
+                    // update from the same client is missing
+                    missing_sv.set_min(id.client, id.clock - 1);
+                    stack.push(carrier);
+                    Self::unapplicable(&mut stack, &mut blocks, &mut remaining);
+                    current_client = blocks.last_entry().unwrap();
+                }
+            }
+
+            // move to the next stack head
+            if !stack.is_empty() {
+                stack_head = stack.pop();
+            } else {
+                if current_client.get().is_empty() {
+                    current_client.remove();
+                    current_client = match blocks.last_entry() {
+                        Some(e) => e,
+                        None => break,
+                    };
+                    stack_head = current_client.get_mut().pop_front();
+                } else {
+                    stack_head = current_client.get_mut().pop_front();
                 }
             }
         }
-        let pending_delete_set = self.apply_delete(&update.delete_set)?;
-        if !remaining.is_empty() || !pending_delete_set.is_empty() {
-            self.insert_pending(&remaining, &pending_delete_set)?;
+        Ok(remaining)
+    }
+
+    fn handle_pending(
+        &mut self,
+        blocks: BTreeMap<ClientID, VecDeque<Carrier>>,
+        delete_set: IDSet,
+    ) -> crate::Result<Option<Update>> {
+        let db = self.db.get();
+        let meta = db.meta();
+        let pending = meta.pending()?;
+
+        if pending.is_none() && blocks.is_empty() && delete_set.is_empty() {
+            return Ok(None);
         }
-        Ok(())
+
+        let state = self.state.get_or_init(db);
+
+        let mut retry = false;
+        let mut pending = match pending {
+            None => PendingUpdate::default(),
+            Some(pending) => {
+                for (client, clock) in pending.missing_sv.iter() {
+                    if clock < &state.current_state.get(client) {
+                        retry = true;
+                        break;
+                    }
+                }
+                pending
+            }
+        };
+        for (client, blocks) in blocks.iter() {
+            if let Some(first) = blocks.front() {
+                pending.missing_sv.set_min(*client, first.id().clock);
+            }
+        }
+
+        todo!()
     }
 
     fn insert_pending(
@@ -777,8 +819,9 @@ impl<'db> Transaction<'db> {
         blocks: &BTreeMap<ClientID, VecDeque<Carrier>>,
         delete_set: &IDSet,
     ) -> crate::Result<()> {
-        let mut buf = Vec::new();
-        let mut writer = EncoderV1::new(&mut buf);
+        let mut update = Vec::new();
+        let mut missing_sv = StateVector::default();
+        let mut writer = EncoderV1::new(&mut update);
 
         writer.write_var(blocks.len())?;
         for (&client_id, carriers) in blocks.iter() {
@@ -791,11 +834,14 @@ impl<'db> Transaction<'db> {
             }
         }
 
+        let mut ds = Vec::new();
+        let mut writer = EncoderV1::new(&mut ds);
         delete_set.encode_with(&mut writer)?;
 
         let db = self.db.get();
         let meta = db.meta();
-        meta.insert_pending(&buf)
+        meta.insert_pending(&update, &ds, &missing_sv)?;
+        Ok(())
     }
 
     fn apply_delete(&mut self, delete_set: &IDSet) -> crate::Result<IDSet> {
@@ -1005,5 +1051,26 @@ impl Display for Origin {
                 Ok(())
             }
         }
+    }
+}
+
+#[derive(Default)]
+pub struct PendingUpdate<'tx> {
+    pub update: &'tx [u8],
+    pub delete_set: &'tx [u8],
+    pub missing_sv: StateVector,
+}
+
+impl<'tx> PendingUpdate<'tx> {
+    pub fn new(update: &'tx [u8], delete_set: &'tx [u8], missing_sv: StateVector) -> Self {
+        PendingUpdate {
+            update,
+            delete_set,
+            missing_sv,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.update.is_empty() && self.delete_set.is_empty() && self.missing_sv.is_empty()
     }
 }

@@ -1,6 +1,9 @@
-use crate::ClientID;
 use crate::lmdb::{Cursor, Database, Error as LmdbError};
+use crate::read::Decode;
 use crate::store::{KEY_PREFIX_META, ReadableBytes};
+use crate::transaction::PendingUpdate;
+use crate::write::Encode;
+use crate::{ClientID, StateVector};
 use smallvec::SmallVec;
 use std::fmt::{Debug, Formatter};
 use zerocopy::IntoBytes;
@@ -13,7 +16,12 @@ pub struct MetaStore<'tx> {
 
 impl<'tx> MetaStore<'tx> {
     pub const KEY_CLIENT_ID: &'static str = "$client_id";
+    /// Metadata key for pending update.
     pub const KEY_PENDING: &'static str = "$pending";
+    /// Metadata key for pending delete set.
+    pub const KEY_PENDING_DS: &'static str = "$pending_ds";
+    /// Metadata key for missing state vector data.
+    pub const KEY_MISSING_SV: &'static str = "$missing_sv";
 
     pub fn new(db: &'tx Database<'tx>) -> Self {
         Self { db }
@@ -33,13 +41,32 @@ impl<'tx> MetaStore<'tx> {
     }
 
     /// Get pending update if any exists.
-    pub fn pending(&self) -> crate::Result<Option<&'tx [u8]>> {
-        self.get(Self::KEY_PENDING)
+    pub fn pending(&self) -> crate::Result<Option<PendingUpdate<'tx>>> {
+        if let Some(missing_sv) = self.get(Self::KEY_MISSING_SV)? {
+            let missing_sv = StateVector::decode(missing_sv)?;
+            let update = self.get(Self::KEY_PENDING)?.ok_or(crate::Error::NotFound)?;
+            let ds = self
+                .get(Self::KEY_PENDING_DS)?
+                .ok_or(crate::Error::NotFound)?;
+            Ok(Some(PendingUpdate::new(update, ds, missing_sv)))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Insert a new pending update, possibly replacing existing one.
-    pub fn insert_pending(&self, update: &[u8]) -> crate::Result<()> {
-        self.insert(Self::KEY_PENDING, update)
+    pub fn insert_pending(&self, pending: &PendingUpdate<'_>) -> crate::Result<()> {
+        self.insert(Self::KEY_MISSING_SV, &pending.missing_sv.encode()?)?;
+        self.insert(Self::KEY_PENDING, pending.update)?;
+        self.insert(Self::KEY_PENDING_DS, pending.delete_set)?;
+        Ok(())
+    }
+
+    pub fn clear_pending(&self) -> crate::Result<()> {
+        self.remove(&Self::KEY_MISSING_SV)?;
+        self.remove(Self::KEY_PENDING)?;
+        self.remove(Self::KEY_PENDING_DS)?;
+        Ok(())
     }
 
     pub fn get(&self, key: &str) -> crate::Result<Option<&'tx [u8]>> {
@@ -54,6 +81,12 @@ impl<'tx> MetaStore<'tx> {
     pub fn insert(&self, key: &str, value: &[u8]) -> crate::Result<()> {
         let key = meta_key(key);
         self.db.put(key.as_ref(), value)?;
+        Ok(())
+    }
+
+    pub fn remove(&self, key: &str) -> crate::Result<()> {
+        let key = meta_key(key);
+        self.db.del(key.as_ref())?;
         Ok(())
     }
 

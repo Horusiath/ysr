@@ -8,7 +8,7 @@ use lmdb_master_sys::*;
 use std::ffi::{CStr, CString};
 use std::marker::PhantomData;
 use std::path::Path;
-
+use std::ptr::null_mut;
 // ---------------------------------------------------------------------------
 // Error
 // ---------------------------------------------------------------------------
@@ -268,6 +268,12 @@ impl<'txn> Database<'txn> {
         lmdb_result(rc)
     }
 
+    pub fn del(&self, key: &[u8]) -> Result<(), Error> {
+        let mut key_val = to_mdb_val(key);
+        let rc = unsafe { mdb_del(self.txn, self.dbi, &mut key_val, null_mut()) };
+        lmdb_result(rc)
+    }
+
     /// Open a new cursor on this database.
     pub fn cursor(&self) -> Result<Cursor<'txn>, Error> {
         let mut cursor: *mut MDB_cursor = std::ptr::null_mut();
@@ -298,8 +304,7 @@ impl<'txn> Cursor<'txn> {
     pub fn set_key(&mut self, key: &[u8]) -> Result<(), Error> {
         let mut key_val = to_mdb_val(key);
         let mut data_val = empty_mdb_val();
-        let rc =
-            unsafe { mdb_cursor_get(self.cursor, &mut key_val, &mut data_val, MDB_SET) };
+        let rc = unsafe { mdb_cursor_get(self.cursor, &mut key_val, &mut data_val, MDB_SET) };
         lmdb_result(rc)
     }
 
@@ -307,14 +312,7 @@ impl<'txn> Cursor<'txn> {
     pub fn set_range(&mut self, key: &[u8]) -> Result<(), Error> {
         let mut key_val = to_mdb_val(key);
         let mut data_val = empty_mdb_val();
-        let rc = unsafe {
-            mdb_cursor_get(
-                self.cursor,
-                &mut key_val,
-                &mut data_val,
-                MDB_SET_RANGE,
-            )
-        };
+        let rc = unsafe { mdb_cursor_get(self.cursor, &mut key_val, &mut data_val, MDB_SET_RANGE) };
         lmdb_result(rc)
     }
 
@@ -322,8 +320,7 @@ impl<'txn> Cursor<'txn> {
     pub fn next(&mut self) -> Result<(), Error> {
         let mut key_val = empty_mdb_val();
         let mut data_val = empty_mdb_val();
-        let rc =
-            unsafe { mdb_cursor_get(self.cursor, &mut key_val, &mut data_val, MDB_NEXT) };
+        let rc = unsafe { mdb_cursor_get(self.cursor, &mut key_val, &mut data_val, MDB_NEXT) };
         lmdb_result(rc)
     }
 
@@ -331,8 +328,7 @@ impl<'txn> Cursor<'txn> {
     pub fn prev(&mut self) -> Result<(), Error> {
         let mut key_val = empty_mdb_val();
         let mut data_val = empty_mdb_val();
-        let rc =
-            unsafe { mdb_cursor_get(self.cursor, &mut key_val, &mut data_val, MDB_PREV) };
+        let rc = unsafe { mdb_cursor_get(self.cursor, &mut key_val, &mut data_val, MDB_PREV) };
         lmdb_result(rc)
     }
 
@@ -340,14 +336,8 @@ impl<'txn> Cursor<'txn> {
     pub fn key(&self) -> Result<&'txn [u8], Error> {
         let mut key_val = empty_mdb_val();
         let mut data_val = empty_mdb_val();
-        let rc = unsafe {
-            mdb_cursor_get(
-                self.cursor,
-                &mut key_val,
-                &mut data_val,
-                MDB_GET_CURRENT,
-            )
-        };
+        let rc =
+            unsafe { mdb_cursor_get(self.cursor, &mut key_val, &mut data_val, MDB_GET_CURRENT) };
         lmdb_result(rc)?;
         Ok(unsafe { from_mdb_val(&key_val) })
     }
@@ -356,14 +346,8 @@ impl<'txn> Cursor<'txn> {
     pub fn value(&self) -> Result<&'txn [u8], Error> {
         let mut key_val = empty_mdb_val();
         let mut data_val = empty_mdb_val();
-        let rc = unsafe {
-            mdb_cursor_get(
-                self.cursor,
-                &mut key_val,
-                &mut data_val,
-                MDB_GET_CURRENT,
-            )
-        };
+        let rc =
+            unsafe { mdb_cursor_get(self.cursor, &mut key_val, &mut data_val, MDB_GET_CURRENT) };
         lmdb_result(rc)?;
         Ok(unsafe { from_mdb_val(&data_val) })
     }
@@ -383,19 +367,12 @@ impl<'txn> Cursor<'txn> {
         // Read current key (required by MDB_CURRENT).
         let mut key_val = empty_mdb_val();
         let mut old_data = empty_mdb_val();
-        let rc = unsafe {
-            mdb_cursor_get(
-                self.cursor,
-                &mut key_val,
-                &mut old_data,
-                MDB_GET_CURRENT,
-            )
-        };
+        let rc =
+            unsafe { mdb_cursor_get(self.cursor, &mut key_val, &mut old_data, MDB_GET_CURRENT) };
         lmdb_result(rc)?;
         // Overwrite value in place.
         let mut new_data = to_mdb_val(value);
-        let rc =
-            unsafe { mdb_cursor_put(self.cursor, &mut key_val, &mut new_data, MDB_CURRENT) };
+        let rc = unsafe { mdb_cursor_put(self.cursor, &mut key_val, &mut new_data, MDB_CURRENT) };
         lmdb_result(rc)
     }
 
