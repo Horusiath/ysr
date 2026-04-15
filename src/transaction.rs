@@ -723,10 +723,13 @@ impl<'db> Transaction<'db> {
         let mut remaining = BTreeMap::new();
         let mut stack = Vec::new();
 
-        let mut current_client = blocks.last_entry().unwrap();
-        let mut stack_head = current_client.get_mut().pop_front();
+        let mut current_client = blocks.last_entry();
+        let mut stack_head = match &mut current_client {
+            None => return Ok(remaining),
+            Some(e) => e.get_mut().pop_front(),
+        };
 
-        while let Some(carrier) = stack_head {
+        while let Some(carrier) = stack_head.take() {
             if !carrier.is_skip() {
                 let id = *carrier.id();
                 if state.current_state.contains(&id) {
@@ -736,17 +739,17 @@ impl<'db> Transaction<'db> {
                         // current block is missing a dependency
                         stack.push(carrier);
                         match blocks.entry(dep) {
-                            Entry::Occupied(e) if !e.get().is_empty() => {
+                            Entry::Occupied(mut e) if !e.get().is_empty() => {
                                 // integrate blocks from the missing dependency client before continuing with the current client
-                                current_client = e;
-                                stack_head = current_client.get_mut().pop_front();
+                                stack_head = e.get_mut().pop_front();
+                                current_client = Some(e);
                                 continue;
                             }
                             _ => {
                                 // This update message causally depends on another update message that doesn't exist yet
                                 missing_sv.set_min(dep, state.current_state.get(&dep));
                                 Self::unapplicable(&mut stack, &mut blocks, &mut remaining);
-                                current_client = blocks.last_entry().unwrap();
+                                current_client = blocks.last_entry();
                             }
                         }
                     } else if offset == 0 || offset < carrier.len() {
@@ -757,23 +760,25 @@ impl<'db> Transaction<'db> {
                     missing_sv.set_min(id.client, id.clock - 1);
                     stack.push(carrier);
                     Self::unapplicable(&mut stack, &mut blocks, &mut remaining);
-                    current_client = blocks.last_entry().unwrap();
+                    current_client = blocks.last_entry();
                 }
             }
 
             // move to the next stack head
             if !stack.is_empty() {
                 stack_head = stack.pop();
-            } else {
-                if current_client.get().is_empty() {
-                    current_client.remove();
-                    current_client = match blocks.last_entry() {
+            } else if let Some(mut current) = current_client.take() {
+                current_client = if current.get().is_empty() {
+                    current.remove();
+                    let mut e = match blocks.last_entry() {
                         Some(e) => e,
                         None => break,
                     };
-                    stack_head = current_client.get_mut().pop_front();
+                    stack_head = e.get_mut().pop_front();
+                    Some(e)
                 } else {
-                    stack_head = current_client.get_mut().pop_front();
+                    stack_head = current.get_mut().pop_front();
+                    Some(current)
                 }
             }
         }

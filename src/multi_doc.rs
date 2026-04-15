@@ -204,23 +204,23 @@ mod test {
             let u2 = updates.pop().unwrap();
             let u1 = updates.pop().unwrap();
 
-            let mut txn = d2.transact_mut("test").unwrap();
-            txn.apply_update(&mut DecoderV1::from_slice(&u1)).unwrap();
-            let m2 = map.mount(&t1).unwrap();
+            let mut t2 = d2.transact_mut("test").unwrap();
+            t2.apply_update(&mut DecoderV1::from_slice(&u1)).unwrap();
+            let m2 = map.mount(&t2).unwrap();
             assert_eq!(m2.to_value().unwrap(), lib0!({"a": 1.0})); // applied
-            txn.commit(None).unwrap();
+            t2.commit(None).unwrap();
 
-            let mut txn = d2.transact_mut("test").unwrap();
-            txn.apply_update(&mut DecoderV1::from_slice(&u3)).unwrap();
-            let m2 = map.mount(&t1).unwrap();
+            let mut t2 = d2.transact_mut("test").unwrap();
+            t2.apply_update(&mut DecoderV1::from_slice(&u3)).unwrap();
+            let m2 = map.mount(&t2).unwrap();
             assert_eq!(m2.to_value().unwrap(), lib0!({"a": 1.0})); // pending update waiting for u2
-            txn.commit(None).unwrap();
+            t2.commit(None).unwrap();
 
-            let mut txn = d2.transact_mut("test").unwrap();
-            txn.apply_update(&mut DecoderV1::from_slice(&u2)).unwrap();
-            let m2 = map.mount(&t1).unwrap();
+            let mut t2 = d2.transact_mut("test").unwrap();
+            t2.apply_update(&mut DecoderV1::from_slice(&u2)).unwrap();
+            let m2 = map.mount(&t2).unwrap();
             assert_eq!(m2.to_value().unwrap(), lib0!({"a": 1.1, "b": 2.0})); // applied all updates
-            txn.commit(None).unwrap();
+            t2.commit(None).unwrap();
         }
     }
 }
