@@ -812,7 +812,9 @@ impl<'db> Transaction<'db> {
         if !update.blocks.is_empty() {
             for (client, blocks) in update.blocks.iter() {
                 if let Some(first) = blocks.front() {
-                    pending.missing_sv.set_min(*client, first.id().clock);
+                    pending
+                        .missing_sv
+                        .set_min(*client, first.id().clock - Clock::new(1));
                 }
             }
         }
@@ -855,6 +857,7 @@ impl<'db> Transaction<'db> {
                 carrier.encode(&mut writer)?;
             }
         }
+        buf.write_var(0)?; // assume empty delete set (we'll provide it separately)
 
         let mut ds = Vec::new();
         let mut writer = EncoderV1::new(&mut ds);
