@@ -726,8 +726,29 @@ impl<'db> Transaction<'db> {
         self.db.commit()
     }
 
-    pub fn snapshot(&self) -> crate::Result<Snapshot> {
-        todo!()
+    /// Returns a snapshot representing a committed state.
+    pub fn snapshot_committed(&self) -> crate::Result<Snapshot> {
+        let db = self.db.get();
+        let sv = db.state_vector().state_vector()?;
+        let blocks = db.blocks();
+        let mut cursor = blocks.cursor()?;
+        let ds = cursor.delete_set()?;
+
+        Ok(Snapshot::new(sv, ds))
+    }
+
+    /// Returns a snapshot representing both committed state of the document
+    /// and changes made by the current transactions.
+    pub fn snapshot_uncommitted(&self) -> crate::Result<Snapshot> {
+        let sv = self.state_vector()?;
+        let db = self.db.get();
+        let blocks = db.blocks();
+        let mut cursor = blocks.cursor()?;
+        let mut ds = cursor.delete_set()?;
+        if let Some(state) = self.state.get() {
+            ds.merge(state.delete_set.clone());
+        }
+        Ok(Snapshot::new(sv, ds))
     }
 
     pub fn read_context(&self) -> crate::Result<TxScope<'_>> {

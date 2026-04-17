@@ -1,11 +1,12 @@
 use crate::block::BlockFlags;
 use crate::content::{ContentType, utf16_to_utf8};
+use crate::id_set::IDSet;
 use crate::lmdb::{Cursor, Database, Error as LmdbError};
 use crate::node::{Named, Node, NodeType};
 use crate::store::KEY_PREFIX_BLOCK;
 use crate::store::content_store::ContentStore;
 use crate::store::intern_strings::InternStringsStore;
-use crate::{Block, BlockHeader, BlockMut, Clock, Error, ID, Optional};
+use crate::{Block, BlockHeader, BlockMut, ClientID, Clock, Error, ID, Optional, lmdb};
 use std::fmt::{Debug, Formatter};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, TryFromBytes};
 
@@ -316,6 +317,26 @@ impl<'tx> BlockCursor<'tx> {
                 Ok(SplitResult::Split(left, right))
             }
         }
+    }
+
+    pub fn delete_set(&mut self) -> crate::Result<IDSet> {
+        let start = BlockKey::new(ID::new(unsafe { ClientID::new_unchecked(1) }, 0.into()));
+
+        let mut ds = IDSet::default();
+        match self.cursor.set_range(start.as_bytes()) {
+            Ok(_) => {}
+            Err(lmdb::Error::NOT_FOUND) => return Ok(ds),
+            Err(e) => return Err(e.into()),
+        };
+
+        if let Some(block) = self.current().optional()? {
+            ds.insert(*block.id(), block.clock_len());
+        }
+        while let Some(block) = self.next()? {
+            ds.insert(*block.id(), block.clock_len());
+        }
+        ds.squash();
+        Ok(ds)
     }
 }
 

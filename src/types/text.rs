@@ -1904,10 +1904,10 @@ mod test {
         let mut text = txt.mount_mut(&mut txn).unwrap();
 
         text.insert(0, "hello").unwrap();
-        let prev = txn.snapshot().unwrap();
+        let prev = txn.snapshot_committed().unwrap();
         let mut text = txt.mount_mut(&mut txn).unwrap();
         text.insert(5, " world").unwrap();
-        let next = txn.snapshot().unwrap();
+        let next = txn.snapshot_committed().unwrap();
         let text = txt.mount(&txn).unwrap();
         let diff: Vec<_> = text
             .chunks_between(Some(&next), Some(&prev))
@@ -2053,12 +2053,12 @@ mod test {
 
         let mut txt = root.mount_mut(&mut txn).unwrap();
         txt.apply_delta([Delta::insert("abcd")]).unwrap();
-        let snapshot1 = txn.snapshot().unwrap(); // 'abcd'
+        let snapshot1 = txn.snapshot_committed().unwrap(); // 'abcd'
 
         let mut txt = root.mount_mut(&mut txn).unwrap();
         txt.apply_delta([Delta::retain(1), Delta::insert("x"), Delta::delete(1)])
             .unwrap();
-        let snapshot2 = txn.snapshot().unwrap(); // 'axcd'
+        let snapshot2 = txn.snapshot_committed().unwrap(); // 'axcd'
 
         let mut txt = root.mount_mut(&mut txn).unwrap();
         txt.apply_delta([
@@ -2102,7 +2102,7 @@ mod test {
         let mut txt = root.mount_mut(&mut txn).unwrap();
 
         txt.apply_delta([Delta::insert("abcd")]).unwrap();
-        let snapshot1 = txn.snapshot().unwrap();
+        let snapshot1 = txn.snapshot_committed().unwrap();
         let mut txt = root.mount_mut(&mut txn).unwrap();
         txt.apply_delta([Delta::retain(4), Delta::insert("e")])
             .unwrap();
