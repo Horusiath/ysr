@@ -4,7 +4,7 @@ use crate::integrate::IntegrationContext;
 use crate::lmdb::Database;
 use crate::node::{Named, Node, NodeID, NodeType};
 use crate::store::Db;
-use crate::transaction::TransactionState;
+use crate::transaction::{TransactionState, WriteTxScope};
 use crate::write::{Encoder, WriteExt};
 use crate::{ClientID, Clock, Optional, U32};
 use crate::{Error, Result};
@@ -881,28 +881,25 @@ impl InsertBlockData {
         &mut self.block
     }
 
-    pub(crate) fn integrate(
+    pub(crate) fn integrate<'tx>(
         &mut self,
-        db: &Database,
-        tx_state: &mut TransactionState,
+        tx: &mut WriteTxScope<'tx>,
         context: &mut IntegrationContext,
     ) -> crate::Result<()> {
-        let blocks = db.blocks();
-        let mut block_cursor = blocks.cursor()?;
         if context.offset > 0 {
             // offset could be > 0 only in context of Update::integrate,
             // is such case offset kind in use always means Yjs-compatible offset (utf-16)
 
             self.block.id.clock += context.offset;
             let split_id = ID::new(self.block.id.client, self.block.id.clock);
-            block_cursor.split(split_id).optional()?;
+            tx.cursor.split(split_id).optional()?;
             let left = split_id.sub(Clock::new(1));
             self.block.set_left(Some(&left));
             self.block.set_origin_left(left);
         }
 
         if context.detect_conflict(self) {
-            context.resolve_conflict(self, db)?;
+            context.resolve_conflict(self, &mut tx.cursor)?;
         }
 
         if self.entry_key().is_none() {
@@ -939,12 +936,12 @@ impl InsertBlockData {
             left.set_right(Some(self.id()));
         } else {
             let right = if let Some(key) = self.entry_key() {
-                let map_entries = db.map_entries();
+                let map_entries = tx.cursor.db().map_entries();
                 // add current block to the beginning of YMap entries
                 if let Some(mut right) = map_entries.get(&parent_id, key)?.copied() {
-                    if let Some(_) = block_cursor.seek(right).optional()? {
+                    if let Some(_) = tx.cursor.seek(right).optional()? {
                         // move until the left-most block
-                        while let Some(block) = block_cursor.left()? {
+                        while let Some(block) = tx.cursor.left()? {
                             right = block.id;
                         }
                     }
@@ -954,7 +951,7 @@ impl InsertBlockData {
                 }
             } else {
                 if context.parent.is_none() {
-                    context.parent = block_cursor.seek(parent_id).optional()?.map(BlockMut::from);
+                    context.parent = tx.cursor.seek(parent_id).optional()?.map(BlockMut::from);
                 }
                 if let Some(parent) = &mut context.parent {
                     // current block is new head of the list
@@ -976,14 +973,14 @@ impl InsertBlockData {
                 .map(|r| !r.contains(right))
                 .unwrap_or(true)
             {
-                let right = block_cursor.seek(*right).optional()?.map(BlockMut::from);
+                let right = tx.cursor.seek(*right).optional()?.map(BlockMut::from);
                 context.right = right;
             }
             let right = context.right.as_mut().unwrap();
             right.set_left(Some(self.id()));
         } else if self.is_map_entry() {
             // set as current parent value if right === null and this is parentSub
-            let map_entries = db.map_entries();
+            let map_entries = tx.cursor.db().map_entries();
             if let Some(entry_key) = self.entry_key() {
                 map_entries.insert(&parent_id, entry_key, self.id())?;
             } else if let Some(&key_hash) = self.block.key_hash() {
@@ -1000,13 +997,13 @@ impl InsertBlockData {
                     .as_ref()
                     .map(|p| p.is_deleted())
                     .unwrap_or(true);
-                tx_state.delete(left, parent_deleted, &mut block_cursor, Some(&map_entries))?;
+                tx.delete(left, parent_deleted)?;
             }
         }
 
         match self.block.content_type() {
             ContentType::Deleted => {
-                tx_state
+                tx.state
                     .delete_set
                     .insert(self.block.id, self.block.clock_len());
                 self.block.set_deleted();
@@ -1034,7 +1031,7 @@ impl InsertBlockData {
             false
         };
         if !content_inlined {
-            let contents = db.contents();
+            let contents = tx.cursor.db().contents();
             contents.insert_range(*self.block.id(), self.content.as_ref())?;
         }
         // For Node blocks, len represents node_len (number of children, initially 0).
@@ -1042,7 +1039,7 @@ impl InsertBlockData {
         if self.block.content_type() == ContentType::Node {
             self.block.set_clock_len(Clock::new(0));
         }
-        blocks.insert(self.as_block())?;
+        tx.cursor.insert(self.as_block())?;
 
         let parent_deleted = if let Some(parent_block) = context.parent.as_mut() {
             if self.entry_key().is_none() && self.block.is_countable() && !self.block.is_deleted() {
@@ -1052,8 +1049,9 @@ impl InsertBlockData {
 
             let parent = parent_block.as_block();
             let is_deleted = parent.id.is_nested() && parent.is_deleted();
-            tx_state.add_changed_type(parent.id, is_deleted, self.block.key_hash());
-            block_cursor.update(parent)?;
+            tx.state
+                .add_changed_type(parent.id, is_deleted, self.block.key_hash());
+            tx.cursor.update(parent)?;
             is_deleted
         } else {
             true // parent GCed?
@@ -1062,20 +1060,14 @@ impl InsertBlockData {
         if parent_deleted || (self.block.key_hash().is_some() && self.block.right().is_some()) {
             // if either parent is deleted or this block is not the last block in
             // a map-like structure, delete it
-            let map_entries = db.map_entries();
-            tx_state.delete(
-                &mut self.block,
-                parent_deleted,
-                &mut block_cursor,
-                Some(&map_entries),
-            )?;
+            tx.delete(&mut self.block, parent_deleted)?;
         }
 
         if let Some(right) = context.right.as_mut() {
-            block_cursor.update(right.as_block())?;
+            tx.cursor.update(right.as_block())?;
         }
         if let Some(left) = context.left.as_mut() {
-            block_cursor.update(left.as_block())?;
+            tx.cursor.update(left.as_block())?;
         }
 
         Ok(())

@@ -9,7 +9,7 @@ use crate::state_vector::Snapshot;
 use crate::store::Db;
 use crate::store::block_store::{BlockCursor, SplitResult};
 use crate::store::content_store::ContentStore;
-use crate::transaction::TransactionState;
+use crate::transaction::{TransactionState, WriteTxScope};
 use crate::types::Capability;
 use crate::{Block, BlockHeader, BlockMut, Clock, In, Mounted, Out, Transaction, lib0};
 use serde::Serialize;
@@ -111,7 +111,7 @@ impl<'tx, 'db> Display for TextRef<&'tx Transaction<'db>> {
 
 impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
     fn insert_at<P>(
-        &mut self,
+        tx: &mut WriteTxScope<'_>,
         pos: &mut BlockPosition,
         value: P,
         attrs: Option<Box<Attrs>>,
@@ -119,96 +119,55 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
     where
         P: Prelim,
     {
-        let db = self.tx.db.get();
-        let blocks = db.blocks();
-        let mut cursor = blocks.cursor()?;
-
         let negated = if let Some(attrs) = attrs {
-            pos.minimize(&attrs, &mut cursor)?;
-            self.insert_attributes(pos, attrs)?
+            pos.minimize(&attrs, &mut tx.cursor)?;
+            pos.insert_attributes(tx, attrs)?
         } else {
             Attrs::new()
         };
 
-        let result = self.insert_internal(pos, value)?;
+        let result = pos.insert_internal(tx, value)?;
 
         if !negated.is_empty() {
-            self.insert_negated(pos, negated)?;
+            pos.insert_negated(tx, negated)?;
         }
-
-        Ok(result)
-    }
-
-    fn insert_internal<P: Prelim>(
-        &mut self,
-        pos: &mut BlockPosition,
-        value: P,
-    ) -> crate::Result<P::Return> {
-        let node_id = *self.node_id();
-        let db = self.tx.db.get();
-        let blocks = db.blocks();
-
-        let state = self.tx.state.get_or_init(db);
-        let id = state.next_id(value.clock_len());
-        let left = pos.left.as_ref();
-        let right = pos.right.as_ref();
-        let mut insert = InsertBlockData::new(
-            id,
-            value.clock_len(),
-            left,
-            right,
-            left,
-            right,
-            Node::Nested(node_id),
-            None,
-        );
-        value.prepare(&mut insert)?;
-        let mut ctx = IntegrationContext::create(&mut insert, Clock::new(0), &blocks)?;
-        insert.integrate(&db, state, &mut ctx)?;
-        let result = value.integrate(&mut insert, self.tx)?;
-        pos.left = Some(insert.block.last_id());
-        self.block = ctx.parent.unwrap();
 
         Ok(result)
     }
 
     fn format_at(
-        &mut self,
+        tx: &mut WriteTxScope<'_>,
         pos: &mut BlockPosition,
         len: usize,
         attrs: Option<Box<Attrs>>,
     ) -> crate::Result<()> {
-        let db = self.tx.db.get();
-        let blocks = db.blocks();
-        let mut cursor = blocks.cursor()?;
         if let Some(attrs) = attrs
             && !attrs.is_empty()
         {
-            pos.minimize(&attrs, &mut cursor)?;
-            let negated = self.insert_attributes(pos, attrs)?;
-            pos.forward_by(len, &mut cursor)?;
-            self.insert_negated(pos, negated)?;
+            pos.minimize(&attrs, &mut tx.cursor)?;
+            let negated = pos.insert_attributes(tx, attrs)?;
+            pos.forward_by(len, &mut tx.cursor)?;
+            pos.insert_negated(tx, negated)?;
             Ok(())
         } else {
-            pos.forward_by(len, &mut cursor)
+            pos.forward_by(len, &mut tx.cursor)
         }
     }
 
-    fn remove_at(&mut self, pos: &mut BlockPosition, len: usize) -> crate::Result<()> {
+    fn remove_at(
+        tx: &mut WriteTxScope<'_>,
+        pos: &mut BlockPosition,
+        len: usize,
+    ) -> crate::Result<()> {
         let mut remaining = len;
         let start = pos.right;
         let start_attrs = pos.attrs.clone();
-        let db = self.tx.db.get();
-        let blocks = db.blocks();
-        let mut cursor = blocks.cursor()?;
-        let state = self.tx.state.get_or_init(db);
-        let map_entries = db.map_entries();
-        let contents = db.contents();
+
         let mut deleted_count: u32 = 0;
         while let Some(block_id) = pos.right
             && remaining != 0
         {
-            let block = cursor.seek(block_id)?;
+            let block = tx.cursor.seek(block_id)?;
             if !block.is_deleted() {
                 match block.content_type() {
                     ContentType::String | ContentType::Embed | ContentType::Node => {
@@ -216,7 +175,8 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
                         let len = block.clock_len().get() as usize;
                         let to_delete = if remaining < len {
                             // split block (and the matching content store entry)
-                            let split_result = cursor.split_current((remaining as u32).into())?;
+                            let split_result =
+                                tx.cursor.split_current((remaining as u32).into())?;
                             block = match split_result {
                                 SplitResult::Unchanged(block) => block,
                                 SplitResult::Split(left, _) => left,
@@ -228,7 +188,7 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
                             remaining -= len;
                             len
                         };
-                        if state.delete(&mut block, false, &mut cursor, Some(&map_entries))? {
+                        if tx.delete(&mut block, false)? {
                             deleted_count += to_delete as u32;
                         }
                     }
@@ -236,7 +196,7 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
                 }
             }
 
-            forward(pos, &mut cursor, &contents)?;
+            forward(pos, &mut tx.cursor)?;
         }
 
         if remaining != 0 {
@@ -247,20 +207,13 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
             && !start_attrs.is_empty()
             && !pos.attrs.is_empty()
         {
-            clean_format_gap(
-                state,
-                &db,
-                start,
-                pos.right.as_ref(),
-                &start_attrs,
-                &mut pos.attrs,
-            )?;
+            clean_format_gap(tx, start, pos.right.as_ref(), &start_attrs, &mut pos.attrs)?;
         }
 
         if deleted_count > 0 {
             let parent_len = self.block.node_len() as u32 - deleted_count;
             self.block.set_node_len(parent_len);
-            cursor.update(self.block.as_block())?;
+            tx.cursor.update(self.block.as_block())?;
         }
 
         Ok(())
@@ -275,103 +228,10 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
             return Ok(());
         }
 
+        let mut tx = self.tx.write_context()?;
         let value = StringPrelim::new(chunk);
-        let mut pos = BlockPosition::seek(self.tx, self.block.start().copied(), index)?;
-        self.insert_at(&mut pos, value, None)
-    }
-
-    fn insert_attributes(
-        &mut self,
-        pos: &mut BlockPosition,
-        attrs: Box<Attrs>,
-    ) -> crate::Result<Attrs> {
-        let mut negated = Attrs::new();
-        for (name, value) in attrs.into_iter() {
-            if let Some(curr_value) = pos.attrs.get(&name)
-                && curr_value == &value
-            {
-                continue; // skip over
-            }
-
-            let fmt = FormatAttribute::compose(&name, &value)?;
-            negated.insert(name, value);
-
-            // insert attribute
-            self.insert_internal(pos, fmt)?;
-        }
-
-        Ok(negated)
-    }
-
-    fn insert_negated(&mut self, pos: &mut BlockPosition, mut attrs: Attrs) -> crate::Result<()> {
-        // first cleanup the attributes that were already ended
-        {
-            let db = self.tx.db.get();
-            let blocks = db.blocks();
-            let contents = db.contents();
-            let mut cursor = blocks.cursor()?;
-
-            while let Some(right_id) = pos.right {
-                let block = cursor.seek(right_id)?;
-                if block.is_deleted() {
-                    forward(pos, &mut cursor, &contents)?;
-                    continue;
-                }
-                if block.content_type() == ContentType::Format {
-                    let content = get_content(&block, &contents)?;
-                    let fmt = content.as_format()?;
-                    let key = fmt.key();
-                    if let Some(curr_value) = attrs.get(key)
-                        && curr_value == &fmt.value()?
-                    {
-                        attrs.remove(key);
-                        forward(pos, &mut cursor, &contents)?;
-                        continue;
-                    }
-                }
-                break;
-            }
-        }
-
-        // second add remaining attributes
-        let node_id = *self.node_id();
-        for (key, value) in attrs.iter() {
-            let fmt = FormatPrelim::new(key, value);
-            // Integrate the block in an inner scope so the db/blocks/state borrows
-            // are released before we hand `self.tx` to `fmt.integrate` below.
-            let mut insert = {
-                let db = self.tx.db.get();
-                let blocks = db.blocks();
-                let state = self.tx.state.get_or_init(db);
-                let id = state.next_id(1.into());
-                let left = pos.left.as_ref();
-                let right = pos.right.as_ref();
-                let mut insert = InsertBlockData::new(
-                    id,
-                    1.into(),
-                    left,
-                    right,
-                    left,
-                    right,
-                    Node::Nested(node_id),
-                    None,
-                );
-                fmt.prepare(&mut insert)?;
-                let mut ctx = IntegrationContext::create(&mut insert, Clock::new(0), &blocks)?;
-                insert.integrate(&db, state, &mut ctx)?;
-                pos.left = Some(insert.block.last_id());
-                self.block = ctx.parent.unwrap();
-                insert
-            };
-            fmt.integrate(&mut insert, self.tx)?;
-
-            // Re-acquire borrows for the forward step.
-            let db = self.tx.db.get();
-            let blocks = db.blocks();
-            let contents = db.contents();
-            let mut cursor = blocks.cursor()?;
-            forward(pos, &mut cursor, &contents)?;
-        }
+        let mut pos = BlockPosition::seek(&mut tx.cursor, self.block.start().copied(), index)?;
+        Self::insert_at(&mut tx, &mut pos, value, None)?;
         Ok(())
     }
 
@@ -395,8 +255,10 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
             .into_iter()
             .map(|(k, v)| (k.into(), v.into()))
             .collect();
-        let mut pos = BlockPosition::seek(&self.tx, self.block.start().copied(), index)?;
-        self.insert_at(
+        let mut tx = self.tx.write_context()?;
+        let mut pos = BlockPosition::seek(&mut tx.cursor, self.block.start().copied(), index)?;
+        Self::insert_at(
+            &mut tx,
             &mut pos,
             StringPrelim::new(chunk.as_ref()),
             Some(Box::new(attrs)),
@@ -407,8 +269,9 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
     where
         V: Prelim,
     {
-        let mut pos = BlockPosition::seek(self.tx, self.block.start().copied(), index)?;
-        self.insert_at(&mut pos, value, None)
+        let mut tx = self.tx.write_context()?;
+        let mut pos = BlockPosition::seek(&mut tx.cursor, self.block.start().copied(), index)?;
+        Self::insert_at(&mut tx, &mut pos, value, None)
     }
 
     pub fn insert_embed_with<S, A, P, V2>(
@@ -427,8 +290,9 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
             .into_iter()
             .map(|(k, v)| (k.into(), v.into()))
             .collect();
-        let mut pos = BlockPosition::seek(self.tx, self.block.start().copied(), index)?;
-        self.insert_at(&mut pos, value, Some(Box::new(attrs)))
+        let mut tx = self.tx.write_context()?;
+        let mut pos = BlockPosition::seek(&mut tx.cursor, self.block.start().copied(), index)?;
+        Self::insert_at(&mut tx, &mut pos, value, Some(Box::new(attrs)))
     }
 
     pub fn push<S>(&mut self, chunk: S) -> crate::Result<()>
@@ -458,8 +322,9 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
             return Ok(());
         }
         let remove_len = end - start + 1;
-        let mut pos = BlockPosition::seek(self.tx, self.block.start().copied(), start)?;
-        self.remove_at(&mut pos, remove_len)?;
+        let mut tx = self.tx.write_context()?;
+        let mut pos = BlockPosition::seek(&mut tx.cursor, self.block.start().copied(), start)?;
+        Self::remove_at(&mut tx, &mut pos, remove_len)?;
         Ok(())
     }
 
@@ -495,9 +360,10 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
         }
 
         let len = end - start + 1;
+        let mut tx = self.tx.write_context()?;
 
-        let mut pos = BlockPosition::seek(self.tx, self.block.start().copied(), start)?;
-        self.format_at(&mut pos, len, Some(Box::new(attrs)))
+        let mut pos = BlockPosition::seek(&mut tx.cursor, self.block.start().copied(), start)?;
+        Self::format_at(&mut tx, &mut pos, len, Some(Box::new(attrs)))
     }
 
     pub fn apply_delta<I>(&mut self, delta: I) -> crate::Result<()>
@@ -505,13 +371,14 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
         I: IntoIterator<Item = Delta<In>>,
     {
         let mut pos = BlockPosition::new(self.block.start().copied());
+        let mut tx = self.tx.write_context()?;
         for delta in delta {
             match delta {
                 Delta::Insert(value, fmt) => {
-                    self.insert_at(&mut pos, value, fmt)?;
+                    Self::insert_at(&mut tx, &mut pos, value, fmt)?;
                 }
-                Delta::Delete(len) => self.remove_at(&mut pos, len)?,
-                Delta::Retain(len, fmt) => self.format_at(&mut pos, len, fmt)?,
+                Delta::Delete(len) => Self::remove_at(&mut tx, &mut pos, len)?,
+                Delta::Retain(len, fmt) => Self::format_at(&mut tx, &mut pos, len, fmt)?,
             }
         }
         Ok(())
@@ -569,10 +436,10 @@ where
         Ok(())
     }
 
-    fn integrate(
+    fn integrate<'tx>(
         self,
         insert: &mut InsertBlockData,
-        tx: &mut Transaction,
+        tx: &mut WriteTxScope<'tx>,
     ) -> crate::Result<Self::Return> {
         let data = FormatAttribute::compose(self.key, &lib0::to_vec(&self.value)?)?;
         if data.len() > BlockHeader::INLINE_CONTENT_LEN {
@@ -614,10 +481,10 @@ impl<'a> Prelim for StringPrelim<'a> {
         Ok(())
     }
 
-    fn integrate(
+    fn integrate<'tx>(
         self,
         insert: &mut InsertBlockData,
-        tx: &mut Transaction,
+        tx: &mut WriteTxScope<'tx>,
     ) -> crate::Result<Self::Return> {
         if !self.can_inline() {
             let db = tx.db.get();
@@ -792,13 +659,9 @@ impl BlockPosition {
         Ok(())
     }
 
-    fn seek(tx: &Transaction<'_>, start: Option<ID>, index: usize) -> crate::Result<Self> {
-        let db = tx.db.get();
-        let blocks = db.blocks();
-        let mut block_cursor = blocks.cursor()?;
-
+    fn seek(cursor: &mut BlockCursor, start: Option<ID>, index: usize) -> crate::Result<Self> {
         let mut pos = Self::new(start);
-        pos.forward_by(index, &mut block_cursor)?;
+        pos.forward_by(index, cursor)?;
 
         Ok(pos)
     }
@@ -813,20 +676,50 @@ impl BlockPosition {
         }
     }
 
+    fn insert_internal<'tx, P: Prelim>(
+        &mut self,
+        tx: &mut WriteTxScope<'tx>,
+        value: P,
+    ) -> crate::Result<P::Return> {
+        let node_id = *self.node_id();
+
+        let id = tx.state.next_id(value.clock_len());
+        let left = self.left.as_ref();
+        let right = self.right.as_ref();
+        let mut insert = InsertBlockData::new(
+            id,
+            value.clock_len(),
+            left,
+            right,
+            left,
+            right,
+            Node::Nested(node_id),
+            None,
+        );
+        value.prepare(&mut insert)?;
+        let mut ctx = IntegrationContext::create(&mut insert, Clock::new(0), &mut tx.cursor)?;
+        insert.integrate(tx, &mut ctx)?;
+        let result = value.integrate(&mut insert, self.tx)?;
+        self.left = Some(insert.block.last_id());
+        self.block = ctx.parent.unwrap();
+
+        Ok(result)
+    }
+
     fn minimize(&mut self, attrs: &Attrs, cursor: &mut BlockCursor) -> crate::Result<()> {
         // go right while attrs[right.key] === right.value (or right is deleted)
-        let contents = cursor.content_store();
         while let Some(right_id) = self.right {
             let right = cursor.seek(right_id)?;
             if right.is_deleted() {
-                forward(self, cursor, &contents)?;
+                forward(self, cursor)?;
             } else {
                 if right.content_type() == ContentType::Format {
+                    let contents = cursor.content_store();
                     let content = get_content(&right, &contents)?;
                     let fmt = content.as_format()?;
                     if let Some(attr_value) = attrs.get(fmt.key()) {
                         if attr_value == &fmt.value()? {
-                            forward(self, cursor, &contents)?;
+                            forward(self, cursor)?;
                             continue;
                         }
                     }
@@ -836,13 +729,98 @@ impl BlockPosition {
         }
         Ok(())
     }
+
+    fn insert_attributes<'tx>(
+        &mut self,
+        tx: &mut WriteTxScope<'tx>,
+        attrs: Box<Attrs>,
+    ) -> crate::Result<Attrs> {
+        let mut negated = Attrs::new();
+        for (name, value) in attrs.into_iter() {
+            if let Some(curr_value) = self.attrs.get(&name)
+                && curr_value == &value
+            {
+                continue; // skip over
+            }
+
+            let fmt = FormatAttribute::compose(&name, &value)?;
+            negated.insert(name, value);
+
+            // insert attribute
+            self.insert_internal(tx, fmt)?;
+        }
+
+        Ok(negated)
+    }
+
+    fn insert_negated<'tx>(
+        &mut self,
+        tx: &mut WriteTxScope<'tx>,
+        mut attrs: Attrs,
+    ) -> crate::Result<()> {
+        // first cleanup the attributes that were already ended
+        {
+            while let Some(right_id) = self.right {
+                let block = tx.cursor.seek(right_id)?;
+                if block.is_deleted() {
+                    forward(self, &mut tx.cursor)?;
+                    continue;
+                }
+                if block.content_type() == ContentType::Format {
+                    let contents = tx.db.contents();
+                    let content = get_content(&block, &contents)?;
+                    let fmt = content.as_format()?;
+                    let key = fmt.key();
+                    if let Some(curr_value) = attrs.get(key)
+                        && curr_value == &fmt.value()?
+                    {
+                        attrs.remove(key);
+                        forward(self, &mut tx.cursor)?;
+                        continue;
+                    }
+                }
+                break;
+            }
+        }
+
+        // second add remaining attributes
+        let node_id = *self.node_id();
+        for (key, value) in attrs.iter() {
+            let fmt = FormatPrelim::new(key, value);
+            // Integrate the block in an inner scope so the db/blocks/state borrows
+            // are released before we hand `self.tx` to `fmt.integrate` below.
+            let mut insert = {
+                let id = tx.state.next_id(1.into());
+                let left = self.left.as_ref();
+                let right = self.right.as_ref();
+                let mut insert = InsertBlockData::new(
+                    id,
+                    1.into(),
+                    left,
+                    right,
+                    left,
+                    right,
+                    Node::Nested(node_id),
+                    None,
+                );
+                fmt.prepare(&mut insert)?;
+                let mut ctx =
+                    IntegrationContext::create(&mut insert, Clock::new(0), &mut tx.cursor)?;
+                insert.integrate(tx, &mut ctx)?;
+                self.left = Some(insert.block.last_id());
+                self.block = ctx.parent.unwrap();
+                insert
+            };
+            fmt.integrate(&mut insert, tx)?;
+
+            // Re-acquire borrows for the forward step.
+            forward(self, &mut tx.cursor)?;
+        }
+        Ok(())
+    }
 }
 
-fn forward(
-    pos: &mut BlockPosition,
-    cursor: &mut BlockCursor,
-    contents: &ContentStore,
-) -> crate::Result<bool> {
+fn forward(pos: &mut BlockPosition, cursor: &mut BlockCursor) -> crate::Result<bool> {
     if let Some(right) = pos.right.take() {
         let block = cursor.seek(right)?;
         if !block.is_deleted() {
@@ -851,7 +829,8 @@ fn forward(
                     pos.index += block.clock_len().get() as usize;
                 }
                 ContentType::Format => {
-                    let data = get_content(&block, &contents)?;
+                    let content_store = cursor.content_store();
+                    let data = get_content(&block, &content_store)?;
                     let fmt = data.as_format()?;
                     let key = fmt.key();
                     let value: lib0::Value = fmt.value()?;
@@ -873,23 +852,20 @@ fn forward(
     }
 }
 
-fn clean_format_gap(
-    tx_state: &mut TransactionState,
-    db: &Database,
+fn clean_format_gap<'tx>(
+    tx: &mut WriteTxScope<'tx>,
     start: &ID,
     end: Option<&ID>,
     start_attrs: &Attrs,
     end_attrs: &mut Attrs,
 ) -> crate::Result<usize> {
-    let blocks = db.blocks();
-    let mut cursor = blocks.cursor()?;
-    let contents = db.contents();
     let mut end = end.copied();
     while let Some(end_id) = end {
-        let block = cursor.seek(end_id)?;
+        let block = tx.cursor.seek(end_id)?;
         match block.content_type() {
             ContentType::String | ContentType::Embed => break,
             ContentType::Format if !block.is_deleted() => {
+                let contents = tx.db.contents();
                 let content = get_content(&block, &contents)?;
                 let fmt = content.as_format()?;
                 let key = fmt.key();
@@ -910,9 +886,10 @@ fn clean_format_gap(
     while let Some(current_id) = current
         && end != current
     {
-        let block = cursor.seek(current_id)?;
+        let block = tx.cursor.seek(current_id)?;
         if !block.is_deleted() {
             if block.content_type() == ContentType::Format {
+                let contents = tx.db.contents();
                 let content = get_content(&block, &contents)?;
                 let fmt = content.as_format()?;
                 let key = fmt.key();
@@ -920,7 +897,7 @@ fn clean_format_gap(
                 let e = end_attrs.get(key).unwrap_or(&Value::Null);
                 let s = start_attrs.get(key).unwrap_or(&Value::Null);
                 if e != &value || s == &value {
-                    tx_state.delete(&mut block.into(), false, &mut cursor, None)?;
+                    tx.delete(&mut block.into(), false)?;
                     cleanups += 1;
                 }
             }

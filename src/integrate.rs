@@ -3,7 +3,7 @@ use crate::block::{BlockMut, InsertBlockData};
 use crate::lmdb::Database;
 use crate::node::NodeType;
 use crate::store::Db;
-use crate::store::block_store::{BlockStore, SplitResult};
+use crate::store::block_store::{BlockCursor, BlockStore, SplitResult};
 use std::collections::HashSet;
 use std::ops::Deref;
 
@@ -18,11 +18,11 @@ impl IntegrationContext {
     pub fn create(
         target: &mut InsertBlockData,
         offset: Clock,
-        blocks: &BlockStore<'_>,
+        cursor: &mut BlockCursor<'_>,
     ) -> crate::Result<Self> {
         let left = if let Some(&origin) = target.block.origin_left() {
             let split_id = origin.add(1.into());
-            Some(match blocks.split(split_id) {
+            Some(match cursor.split(split_id) {
                 Ok(SplitResult::Split(left, _)) => left,
                 // - `Unchanged`: `origin + 1` is already at a block boundary, so `origin`
                 //   is the last clock of the previous block.
@@ -30,7 +30,7 @@ impl IntegrationContext {
                 //   clock of the last block in the list.
                 // In both cases the left neighbor is the block ending at `origin`.
                 Ok(SplitResult::Unchanged(_)) | Err(crate::Error::NotFound) => {
-                    blocks.cursor()?.seek_containing(origin)?.into()
+                    cursor.seek_containing(origin)?.into()
                 }
                 Err(e) => return Err(e),
             })
@@ -38,7 +38,7 @@ impl IntegrationContext {
             None
         };
         let right = if let Some(&origin) = target.block.origin_right() {
-            Some(match blocks.split(origin)? {
+            Some(match cursor.split(origin)? {
                 SplitResult::Unchanged(block) => block,
                 SplitResult::Split(_, right) => right,
             })
@@ -56,13 +56,13 @@ impl IntegrationContext {
             }
         }
         let parent = match target.parent() {
-            Some(node) => match blocks.get_or_insert_node(node.clone(), NodeType::Unknown) {
+            Some(node) => match cursor.get_or_insert_node(node.clone(), NodeType::Unknown) {
                 Ok(block) => Some(block),
                 Err(crate::Error::NotFound) => None,
                 Err(e) => return Err(e),
             },
             None => {
-                let block = blocks.get(*target.block.parent())?;
+                let block = cursor.seek(*target.block.parent())?;
                 Some(block.into())
             }
         };
@@ -84,18 +84,16 @@ impl IntegrationContext {
         }
     }
 
-    pub fn resolve_conflict(
+    pub fn resolve_conflict<'tx>(
         &mut self,
         target: &mut InsertBlockData,
-        db: &Database,
+        cursor: &mut BlockCursor<'tx>,
     ) -> crate::Result<()> {
-        let blocks = db.blocks();
-        let mut cursor = blocks.cursor()?;
         let parent = self.parent.as_mut().unwrap();
         let mut o = if let Some(left) = &self.left {
             left.right().cloned()
         } else if let Some(sub) = target.entry_key() {
-            let map_entries = db.map_entries();
+            let map_entries = cursor.db().map_entries();
             let mut o = map_entries.get(parent.id(), sub)?.copied();
             //let mut o = db.entry(*parent.id(), sub).optional()?.copied();
             while let Some(id) = o {
@@ -125,7 +123,7 @@ impl IntegrationContext {
             items_before_origin.insert(item);
             conflicting_items.insert(item);
 
-            let item = blocks.get(item)?;
+            let item = cursor.seek(item)?;
             if target.block.origin_left() == item.origin_left() {
                 // case 1
                 let item_id = item.id();
@@ -139,7 +137,7 @@ impl IntegrationContext {
                     break;
                 }
             } else {
-                if let Some(origin_left) = item.origin_left().and_then(|&id| blocks.get(id).ok()) {
+                if let Some(origin_left) = item.origin_left().and_then(|&id| cursor.seek(id).ok()) {
                     if items_before_origin.contains(origin_left.id()) {
                         if !conflicting_items.contains(origin_left.id()) {
                             left = Some(*item.id());

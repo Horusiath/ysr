@@ -12,11 +12,11 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, TryFromBytes};
 #[repr(transparent)]
 #[derive(Clone, Copy)]
 pub(crate) struct BlockStore<'tx> {
-    db: &'tx Database<'tx>,
+    db: Database<'tx>,
 }
 
 impl<'tx> BlockStore<'tx> {
-    pub fn new(db: &'tx Database<'tx>) -> Self {
+    pub fn new(db: Database<'tx>) -> Self {
         Self { db }
     }
 
@@ -24,9 +24,8 @@ impl<'tx> BlockStore<'tx> {
         BlockCursor::new(self.db)
     }
 
-    #[inline]
-    pub fn inner(&self) -> &'tx Database<'tx> {
-        self.db
+    pub fn contents(self) -> ContentStore<'tx> {
+        ContentStore::new(self.db)
     }
 
     pub fn get(&self, id: ID) -> crate::Result<Block<'tx>> {
@@ -42,6 +41,42 @@ impl<'tx> BlockStore<'tx> {
     pub fn insert(&self, block: Block<'_>) -> crate::Result<()> {
         let key = BlockKey::new(*block.id());
         self.db.put(key.as_bytes(), block.header().as_bytes())?;
+        Ok(())
+    }
+
+    pub fn split(&self, id: ID) -> crate::Result<SplitResult> {
+        let mut cursor = self.cursor()?;
+        cursor.split(id)
+    }
+
+    pub fn inspect(&self) -> Inspector<'_> {
+        Inspector { db: self.db }
+    }
+}
+
+impl<'tx> From<BlockStore<'tx>> for Database<'tx> {
+    fn from(value: BlockStore<'tx>) -> Self {
+        value.db
+    }
+}
+
+pub struct BlockCursor<'tx> {
+    cursor: Cursor<'tx>,
+    db: Database<'tx>,
+}
+
+impl<'tx> BlockCursor<'tx> {
+    const PREFIX: u8 = KEY_PREFIX_BLOCK;
+
+    pub fn new(db: Database<'tx>) -> crate::Result<Self> {
+        let cursor = db.cursor()?;
+        Ok(BlockCursor { cursor, db })
+    }
+
+    pub fn insert(&mut self, block: Block<'_>) -> crate::Result<()> {
+        let key = BlockKey::new(*block.id());
+        self.cursor
+            .put(key.as_bytes(), block.header().as_bytes(), 0)?;
         Ok(())
     }
 
@@ -72,34 +107,8 @@ impl<'tx> BlockStore<'tx> {
         }
     }
 
-    pub fn split(&self, id: ID) -> crate::Result<SplitResult> {
-        let mut cursor = self.cursor()?;
-        cursor.split(id)
-    }
-
-    pub fn inspect(&self) -> Inspector<'_> {
-        Inspector { db: self.db }
-    }
-}
-
-pub struct BlockCursor<'tx> {
-    cursor: Cursor<'tx>,
-    db: &'tx Database<'tx>,
-}
-
-impl<'tx> BlockCursor<'tx> {
-    const PREFIX: u8 = KEY_PREFIX_BLOCK;
-
-    pub fn new(db: &'tx Database<'tx>) -> crate::Result<Self> {
-        let cursor = db.cursor()?;
-        Ok(BlockCursor { cursor, db })
-    }
-
-    pub fn insert(&mut self, block: Block<'_>) -> crate::Result<()> {
-        let key = BlockKey::new(*block.id());
-        self.cursor
-            .put(key.as_bytes(), block.header().as_bytes(), 0)?;
-        Ok(())
+    pub(crate) fn db(&self) -> &Database<'tx> {
+        &self.db
     }
 
     /// Moves the cursor position into the given block location and replaces existing block header
@@ -332,7 +341,7 @@ impl BlockKey {
 }
 
 pub struct Inspector<'tx> {
-    db: &'tx Database<'tx>,
+    db: Database<'tx>,
 }
 
 impl<'tx> Debug for Inspector<'tx> {

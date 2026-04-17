@@ -592,7 +592,8 @@ impl<'de> Deserializer<'de> for BlockDeserializer<'de> {
         V: Visitor<'de>,
     {
         if let Some(&hash) = self.block.key_hash() {
-            let map_entries = self.blocks.inner().map_entries();
+            let db: Database<'_> = self.blocks.into();
+            let map_entries = db.map_entries();
             let mut keys = map_entries.keys_for_hash(*self.block.parent(), hash);
             match keys.next()? {
                 Some((key, _id)) => visitor.visit_str(key),
@@ -914,7 +915,7 @@ struct ListNodeDeserializer<'de> {
 
 impl<'de> ListNodeDeserializer<'de> {
     fn new(node: Block<'de>, blocks: BlockStore<'de>) -> Self {
-        let content_store = blocks.inner().contents();
+        let content_store = blocks.into().contents();
         let start = node.start().copied();
         ListNodeDeserializer {
             node,
@@ -937,11 +938,8 @@ impl<'de> SeqAccess<'de> for ListNodeDeserializer<'de> {
             Some(block_Id) => {
                 let block = self.blocks.get(block_Id)?;
                 if !block.is_deleted() {
-                    let deserializer = BlockDeserializer::new(
-                        block,
-                        self.blocks,
-                        self.content_store,
-                    );
+                    let deserializer =
+                        BlockDeserializer::new(block, self.blocks, self.content_store);
                     seed.deserialize(deserializer).map(Some)
                 } else {
                     // skip over deleted block
@@ -965,8 +963,8 @@ struct MapNodeDeserializer<'de> {
 
 impl<'de> MapNodeDeserializer<'de> {
     fn new(block: Block<'de>, blocks: BlockStore<'de>) -> Self {
-        let content_store = blocks.inner().contents();
-        let map_entries = blocks.inner().map_entries();
+        let content_store = blocks.into().contents();
+        let map_entries = blocks.into().map_entries();
         let map_entries = map_entries.entries(block.id());
         MapNodeDeserializer {
             blocks,
@@ -1009,8 +1007,7 @@ impl<'de> MapAccess<'de> for MapNodeDeserializer<'de> {
     {
         match self.current.take() {
             Some(block) => {
-                let deserializer =
-                    BlockDeserializer::new(block, self.blocks, self.content_store);
+                let deserializer = BlockDeserializer::new(block, self.blocks, self.content_store);
                 seed.deserialize(deserializer)
             }
             None => unreachable!(),
@@ -1020,7 +1017,7 @@ impl<'de> MapAccess<'de> for MapNodeDeserializer<'de> {
 
 impl<'de> From<BlockDeserializer<'de>> for MapNodeDeserializer<'de> {
     fn from(value: BlockDeserializer<'de>) -> Self {
-        let all_entries = value.blocks.inner().map_entries();
+        let all_entries = value.blocks.into().map_entries();
         let map_entries = all_entries.entries(value.block.id());
         MapNodeDeserializer {
             map_entries,
@@ -1081,7 +1078,7 @@ struct TextNodeDeserializer<'de> {
 
 impl<'de> TextNodeDeserializer<'de> {
     fn new(node: Block<'de>, blocks: BlockStore<'de>, xml_format: bool) -> Self {
-        let content_store = blocks.inner().contents();
+        let content_store = blocks.into().contents();
         TextNodeDeserializer {
             node,
             blocks,

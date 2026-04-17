@@ -7,13 +7,13 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 #[repr(transparent)]
 #[derive(Clone, Copy)]
 pub struct InternStringsStore<'tx> {
-    db: &'tx Database<'tx>,
+    db: Database<'tx>,
 }
 
 impl<'tx> InternStringsStore<'tx> {
     pub const PREFIX: u8 = KEY_PREFIX_INTERN_STR;
 
-    pub fn new(db: &'tx Database<'tx>) -> Self {
+    pub fn new(db: Database<'tx>) -> Self {
         Self { db }
     }
 
@@ -65,12 +65,12 @@ impl<'tx> InternStringsStore<'tx> {
 }
 
 pub enum Iter<'tx> {
-    UnInit(&'tx Database<'tx>),
+    UnInit(Database<'tx>),
     Init(Cursor<'tx>),
 }
 
 impl<'tx> Iter<'tx> {
-    fn new(db: &'tx Database<'tx>) -> Self {
+    fn new(db: Database<'tx>) -> Self {
         Self::UnInit(db)
     }
 
@@ -129,15 +129,16 @@ impl InternStringsKey {
 
     pub fn parse(key: &[u8]) -> Option<&Self> {
         if let Ok(this) = Self::ref_from_bytes(key)
-            && this.tag == KEY_PREFIX_INTERN_STR {
-                return Some(this);
-            }
+            && this.tag == KEY_PREFIX_INTERN_STR
+        {
+            return Some(this);
+        }
         None
     }
 }
 
 pub struct Inspector<'tx> {
-    db: &'tx Database<'tx>,
+    db: Database<'tx>,
 }
 
 impl<'tx> Debug for Inspector<'tx> {

@@ -19,6 +19,8 @@ use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
 use std::io::Write;
+use std::ops::{Deref, DerefMut};
+use std::task::Context;
 use zerocopy::IntoBytes;
 
 pub(crate) struct TransactionState {
@@ -64,86 +66,6 @@ impl TransactionState {
                 e.insert(*key_hash);
             }
         }
-    }
-
-    fn delete_list_members<'tx>(
-        &mut self,
-        start: ID,
-        block_cursor: &mut BlockCursor<'tx>,
-        map_entries: Option<&MapEntriesStore<'tx>>,
-    ) -> crate::Result<()> {
-        let mut current = Some(start);
-        while let Some(id) = current {
-            let mut block: BlockMut = block_cursor.seek(id)?.into();
-            if !self.delete(&mut block, true, block_cursor, map_entries)?
-                && block.id().clock < self.begin_state.get(&block.id().client)
-            {
-                // This will be gc'd later, and we want to merge it if possible
-                // We try to merge all deleted items after each transaction,
-                // but we have no knowledge about that this needs to be merged
-                // since it is not in transaction.ds. Hence, we add it to transaction._mergeStructs
-                self.merge_blocks.insert(*block.id());
-            }
-            current = block.right().copied();
-        }
-        Ok(())
-    }
-
-    fn delete_map_members<'tx>(
-        &mut self,
-        id: &ID,
-        block_cursor: &mut BlockCursor<'tx>,
-        map_entries: &MapEntriesStore<'tx>,
-    ) -> crate::Result<()> {
-        let mut to_delete = Vec::new();
-        let mut entries = map_entries.entries(id);
-        while let Some(_) = entries.next()? {
-            let child_id = *entries.block_id()?;
-            to_delete.push(child_id);
-        }
-
-        for entry_id in to_delete {
-            let mut block: BlockMut = block_cursor.seek(entry_id)?.into();
-            let existed_before = entry_id.clock < self.begin_state.get(&block.id().client);
-            let deleted = self.delete(&mut block, true, block_cursor, Some(map_entries))?;
-            if deleted && existed_before {
-                // same as above
-                self.merge_blocks.insert(entry_id);
-            }
-        }
-        Ok(())
-    }
-
-    pub(crate) fn delete<'tx>(
-        &mut self,
-        block: &mut BlockMut,
-        parent_deleted: bool,
-        block_cursor: &mut BlockCursor<'tx>,
-        map_entries: Option<&MapEntriesStore<'tx>>,
-    ) -> crate::Result<bool> {
-        if block.is_deleted() {
-            return Ok(false);
-        }
-        block.set_deleted();
-        block_cursor.update(block.as_block())?;
-
-        self.delete_set.insert(*block.id(), block.clock_len());
-        self.add_changed_type(*block.parent(), parent_deleted, block.key_hash());
-
-        match block.content_type() {
-            ContentType::Node => {
-                // iterate over list values of the node and delete them
-                if let Some(start) = block.start() {
-                    self.delete_list_members(*start, block_cursor, map_entries)?;
-                }
-                //iterate over map entries of the node and delete them
-                if let Some(map_entries) = map_entries {
-                    self.delete_map_members(block.id(), block_cursor, map_entries)?;
-                }
-            }
-            _ => { /* not used */ }
-        }
-        Ok(true)
     }
 
     fn precommit(
@@ -699,90 +621,21 @@ impl<'db> Transaction<'db> {
     pub fn apply_update<D: Decoder>(&mut self, decoder: &mut D) -> crate::Result<()> {
         let mut current = Some(Update::decode_with(decoder)?);
         while let Some(update) = current.take() {
+            let mut tx = self.write_context()?;
             let remaining = if !update.blocks.is_empty() {
-                self.apply_update_internal(update.blocks)?
+                tx.apply_update_internal(update.blocks)?
             } else {
                 BTreeMap::default()
             };
-            let pending_delete_set = self.apply_delete(&update.delete_set)?;
+            let pending_delete_set = tx.apply_delete(&update.delete_set)?;
+            drop(tx);
+
             current = self.handle_pending(Update {
                 blocks: remaining,
                 delete_set: pending_delete_set,
             })?;
         }
         Ok(())
-    }
-
-    fn apply_update_internal(
-        &mut self,
-        mut blocks: BTreeMap<ClientID, VecDeque<Carrier>>,
-    ) -> crate::Result<BTreeMap<ClientID, VecDeque<Carrier>>> {
-        let mut db = self.db.get();
-        let state = self.state.get_or_init(db);
-        let mut missing_sv = StateVector::default();
-        let mut remaining = BTreeMap::new();
-        let mut stack = Vec::new();
-
-        let mut current_client = blocks.last_entry();
-        let mut stack_head = match &mut current_client {
-            None => return Ok(remaining),
-            Some(e) => e.get_mut().pop_front(),
-        };
-
-        while let Some(carrier) = stack_head.take() {
-            if !carrier.is_skip() {
-                let id = *carrier.id();
-                if state.current_state.contains(&id) {
-                    // offset informs if current block partially overlaps with already integrated blocks
-                    let offset = state.current_state.get(&id.client) - id.clock;
-                    if let Some(dep) = Self::missing_dependency(&carrier, &state.current_state) {
-                        // current block is missing a dependency
-                        stack.push(carrier);
-                        match blocks.entry(dep) {
-                            Entry::Occupied(mut e) if !e.get().is_empty() => {
-                                // integrate blocks from the missing dependency client before continuing with the current client
-                                stack_head = e.get_mut().pop_front();
-                                current_client = Some(e);
-                                continue;
-                            }
-                            _ => {
-                                // This update message causally depends on another update message that doesn't exist yet
-                                missing_sv.set_min(dep, state.current_state.get(&dep));
-                                Self::unapplicable(&mut stack, &mut blocks, &mut remaining);
-                                current_client = blocks.last_entry();
-                            }
-                        }
-                    } else if offset == 0 || offset < carrier.len() {
-                        carrier.integrate(offset, state, &mut db)?;
-                    }
-                } else {
-                    // update from the same client is missing
-                    missing_sv.set_min(id.client, id.clock - 1);
-                    stack.push(carrier);
-                    Self::unapplicable(&mut stack, &mut blocks, &mut remaining);
-                    current_client = blocks.last_entry();
-                }
-            }
-
-            // move to the next stack head
-            if !stack.is_empty() {
-                stack_head = stack.pop();
-            } else if let Some(mut current) = current_client.take() {
-                current_client = if current.get().is_empty() {
-                    current.remove();
-                    let mut e = match blocks.last_entry() {
-                        Some(e) => e,
-                        None => break,
-                    };
-                    stack_head = e.get_mut().pop_front();
-                    Some(e)
-                } else {
-                    stack_head = current.get_mut().pop_front();
-                    Some(current)
-                }
-            }
-        }
-        Ok(remaining)
     }
 
     fn handle_pending(&mut self, update: Update) -> crate::Result<Option<Update>> {
@@ -866,120 +719,6 @@ impl<'db> Transaction<'db> {
         Ok(())
     }
 
-    fn apply_delete(&mut self, delete_set: &IDSet) -> crate::Result<IDSet> {
-        let mut unapplied = IDSet::default();
-        if delete_set.is_empty() {
-            return Ok(unapplied);
-        }
-        let db = self.db.get();
-        let state = self.state.get_or_init(db);
-        // We can ignore the case of GC and Delete structs, because we are going to skip them
-        let blocks = db.blocks();
-        let mut block_cursor = blocks.cursor()?;
-        for (&client, ranges) in delete_set.iter() {
-            let current_clock = state.current_state.get(&client);
-
-            for range in ranges.iter() {
-                let clock_start = range.start;
-                let clock_end = range.end;
-                if clock_start < current_clock {
-                    // range exists within already integrated blocks
-                    if current_clock < clock_end {
-                        unapplied.insert(ID::new(client, clock_start), clock_end - current_clock);
-                    }
-
-                    // We can ignore the case of GC and Delete structs, because we are going to skip them
-                    block_cursor.start_from(ID::new(client, clock_start))?;
-                    if let Some(mut block) = block_cursor.current().optional()? {
-                        if block.id().client != client {
-                            continue; // we shoot over the current client range
-                        }
-
-                        if !block.is_deleted() && block.id().clock < clock_start {
-                            // split the first item if necessary
-                            let offset = clock_start - block.id().clock;
-                            // block is the same as right, but we need specifically its reference residing in the db
-                            block_cursor.split_current(offset)?;
-                            block = block_cursor.current()?;
-                        }
-
-                        while block.id().client == client && block.id().clock < clock_end {
-                            if !block.is_deleted() {
-                                if block.id().clock + block.clock_len() > clock_end {
-                                    let offset = clock_end - block.id().clock;
-                                    block_cursor.split_current(offset)?;
-                                    block = block_cursor.prev()?.unwrap();
-                                }
-                                let mut block: BlockMut = block.into();
-                                block.set_deleted();
-                                block_cursor.update_current(block.header())?;
-                                state.delete_set.insert(*block.id(), block.clock_len());
-                            }
-                            block = match block_cursor.next()? {
-                                Some(b) => b,
-                                None => break,
-                            };
-                        }
-                    }
-                } else {
-                    unapplied.insert(ID::new(client, range.start), range.end - range.start);
-                }
-            }
-        }
-        Ok(unapplied)
-    }
-
-    /// Push all pending blocks with the same client ID as `block` into the database.
-    /// These blocks are not immediately integrated, since they are missing dependencies on other blocks.
-    fn unapplicable(
-        stack: &mut Vec<Carrier>,
-        blocks: &mut BTreeMap<ClientID, VecDeque<Carrier>>,
-        remaining: &mut BTreeMap<ClientID, VecDeque<Carrier>>,
-    ) {
-        for carrier in stack.drain(..) {
-            let client = carrier.id().client;
-            if let Some(mut unapplicable) = blocks.remove(&client) {
-                // decrement because we weren't able to apply previous operation
-                unapplicable.push_front(carrier);
-                remaining.insert(client, unapplicable);
-            } else {
-                // item was the last item on clientsStructRefs and the field was already cleared.
-                // Add item to restStructs and continue
-                remaining.insert(client, VecDeque::from([carrier]));
-            }
-        }
-    }
-
-    /// Check if current `block` has any missing dependencies on other blocks that are not yet integrated.
-    /// A dependency is missing if any of the block's origins (left, right, parent) point to a block that is not yet integrated.
-    /// Returns the client ID of the missing dependency, or None if all dependencies are satisfied.
-    fn missing_dependency(block: &Carrier, local_sv: &StateVector) -> Option<ClientID> {
-        if let Carrier::Block(insert) = block {
-            if let Some(origin) = &insert.block.origin_left()
-                && origin.client != insert.id().client
-                && origin.clock >= local_sv.get(&origin.client)
-            {
-                return Some(origin.client);
-            }
-
-            if let Some(right_origin) = &insert.block.origin_right()
-                && right_origin.client != insert.id().client
-                && right_origin.clock >= local_sv.get(&right_origin.client)
-            {
-                return Some(right_origin.client);
-            }
-
-            if let Some(Node::Nested(parent)) = insert.parent()
-                && parent.client != insert.id().client
-                && parent.clock >= local_sv.get(&parent.client)
-            {
-                return Some(parent.client);
-            }
-        }
-
-        None
-    }
-
     pub fn commit(mut self, summary: Option<&mut TransactionSummary>) -> crate::Result<()> {
         if let Some(mut state) = self.state.take() {
             let db = self.db.get();
@@ -990,6 +729,14 @@ impl<'db> Transaction<'db> {
 
     pub fn snapshot(&self) -> crate::Result<Snapshot> {
         todo!()
+    }
+
+    pub fn read_context(&self) -> crate::Result<ReadTxScope> {
+        ReadTxScope::new(self)
+    }
+
+    pub fn write_context(&mut self) -> crate::Result<WriteTxScope> {
+        WriteTxScope::new(self)
     }
 }
 
@@ -1094,5 +841,298 @@ impl<'tx> PendingUpdate<'tx> {
 
     pub fn is_empty(&self) -> bool {
         self.update.is_empty() && self.delete_set.is_empty() && self.missing_sv.is_empty()
+    }
+}
+
+pub struct ReadTxScope<'tx> {
+    pub db: Database<'tx>,
+    pub cursor: BlockCursor<'tx>,
+}
+
+impl<'tx> ReadTxScope<'tx> {
+    pub fn new(tx: &'tx Transaction<'_>) -> crate::Result<Self> {
+        let db = tx.db.get();
+        let cursor = BlockCursor::new(db)?;
+        Ok(Self { db, cursor })
+    }
+}
+
+pub struct WriteTxScope<'tx> {
+    inner: ReadTxScope<'tx>,
+    pub state: &'tx mut TransactionState,
+}
+
+impl<'tx> WriteTxScope<'tx> {
+    pub fn new(tx: &'tx mut Transaction<'_>) -> crate::Result<Self> {
+        let db = tx.db.get();
+        let cursor = BlockCursor::new(db)?;
+        let state = tx.state.get_or_init(db);
+        Ok(Self {
+            inner: ReadTxScope { db, cursor },
+            state,
+        })
+    }
+
+    pub(crate) fn delete(
+        &mut self,
+        block: &mut BlockMut,
+        parent_deleted: bool,
+    ) -> crate::Result<bool> {
+        if block.is_deleted() {
+            return Ok(false);
+        }
+        block.set_deleted();
+        self.cursor.update(block.as_block())?;
+
+        self.state.delete_set.insert(*block.id(), block.clock_len());
+        self.state
+            .add_changed_type(*block.parent(), parent_deleted, block.key_hash());
+
+        match block.content_type() {
+            ContentType::Node => {
+                // iterate over list values of the node and delete them
+                if let Some(start) = block.start() {
+                    self.delete_list_members(*start)?;
+                }
+                //iterate over map entries of the node and delete them
+                self.delete_map_members(block.id())?;
+            }
+            _ => { /* not used */ }
+        }
+        Ok(true)
+    }
+
+    fn delete_list_members(&mut self, start: ID) -> crate::Result<()> {
+        let mut current = Some(start);
+        while let Some(id) = current {
+            let mut block: BlockMut = self.cursor.seek(id)?.into();
+            if !self.delete(&mut block, true)?
+                && block.id().clock < self.state.begin_state.get(&block.id().client)
+            {
+                // This will be gc'd later, and we want to merge it if possible
+                // We try to merge all deleted items after each transaction,
+                // but we have no knowledge about that this needs to be merged
+                // since it is not in transaction.rs. Hence, we add it to transaction._mergeStructs
+                self.state.merge_blocks.insert(*block.id());
+            }
+            current = block.right().copied();
+        }
+        Ok(())
+    }
+
+    fn delete_map_members(&mut self, id: &ID) -> crate::Result<()> {
+        let mut to_delete = Vec::new();
+        {
+            let map_entries = self.db.map_entries();
+            let mut entries = map_entries.entries(id);
+            while let Some(_) = entries.next()? {
+                let child_id = *entries.block_id()?;
+                to_delete.push(child_id);
+            }
+        }
+
+        for entry_id in to_delete {
+            let mut block: BlockMut = self.cursor.seek(entry_id)?.into();
+            let existed_before = entry_id.clock < self.state.begin_state.get(&block.id().client);
+            let deleted = self.delete(&mut block, true)?;
+            if deleted && existed_before {
+                // same as above
+                self.state.merge_blocks.insert(entry_id);
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_update_internal(
+        &mut self,
+        mut blocks: BTreeMap<ClientID, VecDeque<Carrier>>,
+    ) -> crate::Result<BTreeMap<ClientID, VecDeque<Carrier>>> {
+        let mut missing_sv = StateVector::default();
+        let mut remaining = BTreeMap::new();
+        let mut stack = Vec::new();
+
+        let mut current_client = blocks.last_entry();
+        let mut stack_head = match &mut current_client {
+            None => return Ok(remaining),
+            Some(e) => e.get_mut().pop_front(),
+        };
+
+        while let Some(carrier) = stack_head.take() {
+            if !carrier.is_skip() {
+                let id = *carrier.id();
+                if self.state.current_state.contains(&id) {
+                    // offset informs if current block partially overlaps with already integrated blocks
+                    let offset = self.state.current_state.get(&id.client) - id.clock;
+                    if let Some(dep) = Self::missing_dependency(&carrier, &self.state.current_state)
+                    {
+                        // current block is missing a dependency
+                        stack.push(carrier);
+                        match blocks.entry(dep) {
+                            Entry::Occupied(mut e) if !e.get().is_empty() => {
+                                // integrate blocks from the missing dependency client before continuing with the current client
+                                stack_head = e.get_mut().pop_front();
+                                current_client = Some(e);
+                                continue;
+                            }
+                            _ => {
+                                // This update message causally depends on another update message that doesn't exist yet
+                                missing_sv.set_min(dep, self.state.current_state.get(&dep));
+                                Self::unapplicable(&mut stack, &mut blocks, &mut remaining);
+                                current_client = blocks.last_entry();
+                            }
+                        }
+                    } else if offset == 0 || offset < carrier.len() {
+                        carrier.integrate(offset, self)?;
+                    }
+                } else {
+                    // update from the same client is missing
+                    missing_sv.set_min(id.client, id.clock - 1);
+                    stack.push(carrier);
+                    Self::unapplicable(&mut stack, &mut blocks, &mut remaining);
+                    current_client = blocks.last_entry();
+                }
+            }
+
+            // move to the next stack head
+            if !stack.is_empty() {
+                stack_head = stack.pop();
+            } else if let Some(mut current) = current_client.take() {
+                current_client = if current.get().is_empty() {
+                    current.remove();
+                    let mut e = match blocks.last_entry() {
+                        Some(e) => e,
+                        None => break,
+                    };
+                    stack_head = e.get_mut().pop_front();
+                    Some(e)
+                } else {
+                    stack_head = current.get_mut().pop_front();
+                    Some(current)
+                }
+            }
+        }
+        Ok(remaining)
+    }
+
+    fn apply_delete(&mut self, delete_set: &IDSet) -> crate::Result<IDSet> {
+        let mut unapplied = IDSet::default();
+        if delete_set.is_empty() {
+            return Ok(unapplied);
+        }
+        // We can ignore the case of GC and Delete structs, because we are going to skip them
+        for (&client, ranges) in delete_set.iter() {
+            let current_clock = self.state.current_state.get(&client);
+
+            for range in ranges.iter() {
+                let clock_start = range.start;
+                let clock_end = range.end;
+                if clock_start < current_clock {
+                    // range exists within already integrated blocks
+                    if current_clock < clock_end {
+                        unapplied.insert(ID::new(client, clock_start), clock_end - current_clock);
+                    }
+
+                    // We can ignore the case of GC and Delete structs, because we are going to skip them
+                    self.cursor.start_from(ID::new(client, clock_start))?;
+                    if let Some(mut block) = self.cursor.current().optional()? {
+                        if block.id().client != client {
+                            continue; // we shoot over the current client range
+                        }
+
+                        if !block.is_deleted() && block.id().clock < clock_start {
+                            // split the first item if necessary
+                            let offset = clock_start - block.id().clock;
+                            // block is the same as right, but we need specifically its reference residing in the db
+                            self.cursor.split_current(offset)?;
+                            block = self.cursor.current()?;
+                        }
+
+                        while block.id().client == client && block.id().clock < clock_end {
+                            if !block.is_deleted() {
+                                if block.id().clock + block.clock_len() > clock_end {
+                                    let offset = clock_end - block.id().clock;
+                                    self.cursor.split_current(offset)?;
+                                    block = self.cursor.prev()?.unwrap();
+                                }
+                                let mut block: BlockMut = block.into();
+                                block.set_deleted();
+                                self.cursor.update_current(block.header())?;
+                                self.state.delete_set.insert(*block.id(), block.clock_len());
+                            }
+                            block = match self.cursor.next()? {
+                                Some(b) => b,
+                                None => break,
+                            };
+                        }
+                    }
+                } else {
+                    unapplied.insert(ID::new(client, range.start), range.end - range.start);
+                }
+            }
+        }
+        Ok(unapplied)
+    }
+    /// Push all pending blocks with the same client ID as `block` into the database.
+    /// These blocks are not immediately integrated, since they are missing dependencies on other blocks.
+    fn unapplicable(
+        stack: &mut Vec<Carrier>,
+        blocks: &mut BTreeMap<ClientID, VecDeque<Carrier>>,
+        remaining: &mut BTreeMap<ClientID, VecDeque<Carrier>>,
+    ) {
+        for carrier in stack.drain(..) {
+            let client = carrier.id().client;
+            if let Some(mut unapplicable) = blocks.remove(&client) {
+                // decrement because we weren't able to apply previous operation
+                unapplicable.push_front(carrier);
+                remaining.insert(client, unapplicable);
+            } else {
+                // item was the last item on clientsStructRefs and the field was already cleared.
+                // Add item to restStructs and continue
+                remaining.insert(client, VecDeque::from([carrier]));
+            }
+        }
+    }
+
+    /// Check if current `block` has any missing dependencies on other blocks that are not yet integrated.
+    /// A dependency is missing if any of the block's origins (left, right, parent) point to a block that is not yet integrated.
+    /// Returns the client ID of the missing dependency, or None if all dependencies are satisfied.
+    fn missing_dependency(block: &Carrier, local_sv: &StateVector) -> Option<ClientID> {
+        if let Carrier::Block(insert) = block {
+            if let Some(origin) = &insert.block.origin_left()
+                && origin.client != insert.id().client
+                && origin.clock >= local_sv.get(&origin.client)
+            {
+                return Some(origin.client);
+            }
+
+            if let Some(right_origin) = &insert.block.origin_right()
+                && right_origin.client != insert.id().client
+                && right_origin.clock >= local_sv.get(&right_origin.client)
+            {
+                return Some(right_origin.client);
+            }
+
+            if let Some(Node::Nested(parent)) = insert.parent()
+                && parent.client != insert.id().client
+                && parent.clock >= local_sv.get(&parent.client)
+            {
+                return Some(parent.client);
+            }
+        }
+
+        None
+    }
+}
+
+impl<'tx> Deref for WriteTxScope<'tx> {
+    type Target = ReadTxScope<'tx>;
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl<'tx> DerefMut for WriteTxScope<'tx> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
     }
 }

@@ -8,7 +8,7 @@ use crate::lmdb::Database;
 use crate::node::{Node, NodeID, NodeType};
 use crate::read::{Decode, Decoder, ReadExt};
 use crate::store::Db;
-use crate::transaction::TransactionState;
+use crate::transaction::{TransactionState, WriteTxScope};
 use crate::write::Encoder;
 use crate::{ClientID, Clock, U32};
 use bytes::{BufMut, BytesMut};
@@ -543,27 +543,21 @@ impl Carrier {
     }
 
     #[inline(always)]
-    pub fn integrate(
-        self,
-        offset: Clock,
-        state: &mut TransactionState,
-        db: &mut Database,
-    ) -> crate::Result<()> {
+    pub fn integrate<'tx>(self, offset: Clock, tx: &mut WriteTxScope<'tx>) -> crate::Result<()> {
         match self {
             Carrier::GC(range) => {
                 let id = range.head();
-                state
+                tx.state
                     .current_state
                     .set_max(id.client, id.clock + range.len());
             }
             Carrier::Block(mut block) => {
                 let id = *block.id();
-                let blocks = db.blocks();
-                let mut context = IntegrationContext::create(&mut block, offset, &blocks)?;
-                state
+                let mut i = IntegrationContext::create(&mut block, offset, &mut tx.cursor)?;
+                tx.state
                     .current_state
                     .set_max(id.client, id.clock + block.clock_len());
-                block.integrate(db, state, &mut context)?;
+                block.integrate(tx, &mut i)?;
             }
             Carrier::Skip(_) => { /* ignore skip blocks */ }
         }

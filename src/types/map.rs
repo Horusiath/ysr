@@ -7,6 +7,7 @@ use crate::node::{Node, NodeID, NodeType};
 use crate::prelim::Prelim;
 use crate::store::map_entries::{MapEntries, MapKey};
 use crate::store::{Db, MapEntriesStore};
+use crate::transaction::WriteTxScope;
 use crate::types::Capability;
 use crate::{Clock, Error, In, Mounted, Optional, Transaction, Unmounted, lib0};
 use std::collections::{BTreeMap, HashMap};
@@ -104,12 +105,12 @@ impl<'tx, 'db> MapRef<&'tx mut Transaction<'db>> {
         K: AsRef<str>,
         V: Prelim,
     {
-        let key = key.as_ref();
         let node_id = *self.node_id();
-        let db = self.tx.db.get();
-        let state = self.tx.state.get_or_init(db);
-        let id = state.next_id(value.clock_len());
-        let map_entries = db.map_entries();
+        let mut tx = self.tx.write_context()?;
+
+        let key = key.as_ref();
+        let id = tx.state.next_id(value.clock_len());
+        let map_entries = tx.db.map_entries();
         let left_id = map_entries.get(&node_id, key)?;
         let mut insert = InsertBlockData::new(
             id,
@@ -122,10 +123,9 @@ impl<'tx, 'db> MapRef<&'tx mut Transaction<'db>> {
             Some(key),
         );
         value.prepare(&mut insert)?;
-        let blocks = db.blocks();
-        let mut ctx = IntegrationContext::create(&mut insert, Clock::new(0), &blocks)?;
-        insert.integrate(&db, state, &mut ctx)?;
-        value.integrate(&mut insert, self.tx)?;
+        let mut ctx = IntegrationContext::create(&mut insert, Clock::new(0), &mut tx.cursor)?;
+        insert.integrate(&mut tx, &mut ctx)?;
+        value.integrate(&mut insert, &mut tx)?;
         self.block = ctx.parent.unwrap();
         Ok(())
     }
@@ -135,22 +135,19 @@ impl<'tx, 'db> MapRef<&'tx mut Transaction<'db>> {
         K: AsRef<str>,
     {
         let parent_id = *self.node_id();
-        let db = self.tx.db.get();
-        let state = self.tx.state.get_or_init(db);
-        let map_entries = db.map_entries();
+        let mut tx = self.tx.write_context()?;
+        let map_entries = tx.db.map_entries();
         let block_id = match map_entries.get(&parent_id, key.as_ref())? {
             None => return Ok(false),
             Some(id) => *id,
         };
-        let blocks = db.blocks();
-        let mut block_cursor = blocks.cursor()?;
-        let block = match block_cursor.seek(block_id).optional()? {
+        let block = match tx.cursor.seek(block_id).optional()? {
             None => return Ok(false),
             Some(block) => block,
         };
         if !block.is_deleted() {
             let mut block: BlockMut = block.into();
-            state.delete(&mut block, false, &mut block_cursor, Some(&map_entries))?;
+            tx.delete(&mut block, false)?;
             Ok(true)
         } else {
             Ok(false)
@@ -159,17 +156,15 @@ impl<'tx, 'db> MapRef<&'tx mut Transaction<'db>> {
 
     pub fn clear(&mut self) -> crate::Result<()> {
         let parent_id = *self.node_id();
-        let db = self.tx.db.get();
-        let state = self.tx.state.get_or_init(db);
+        let mut tx = self.tx.write_context()?;
+        let db = tx.db;
         let map_entries = db.map_entries();
-        let blocks = db.blocks();
-        let mut cursor = blocks.cursor()?;
         let mut iter = map_entries.entries(&parent_id);
         while let Some(_) = iter.next()? {
             let id = iter.block_id()?;
-            if let Some(block) = cursor.seek(*id).optional()? {
+            if let Some(block) = tx.cursor.seek(*id).optional()? {
                 let mut block: BlockMut = block.into();
-                state.delete(&mut block, false, &mut cursor, Some(&map_entries))?;
+                tx.delete(&mut block, false)?;
             }
         }
         Ok(())
@@ -303,10 +298,10 @@ impl Prelim for MapPrelim {
         Ok(())
     }
 
-    fn integrate(
+    fn integrate<'tx>(
         self,
         insert: &mut InsertBlockData,
-        tx: &mut Transaction,
+        tx: &mut WriteTxScope<'tx>,
     ) -> crate::Result<Self::Return> {
         let unmounted: Unmounted<Map> = Unmounted::nested(*insert.block.id());
         if !self.0.is_empty() {

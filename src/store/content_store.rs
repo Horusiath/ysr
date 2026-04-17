@@ -10,13 +10,13 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 #[repr(transparent)]
 #[derive(Clone, Copy)]
 pub(crate) struct ContentStore<'a> {
-    db: &'a Database<'a>,
+    db: Database<'a>,
 }
 
 impl<'a> ContentStore<'a> {
     const PREFIX: u8 = KEY_PREFIX_CONTENT;
 
-    pub fn new(db: &'a Database<'a>) -> Self {
+    pub fn new(db: Database<'a>) -> Self {
         ContentStore { db }
     }
 
@@ -86,7 +86,7 @@ impl<'a> ContentStore<'a> {
     }
 
     pub fn read_range(&self, content_type: ContentType, range: BlockRange) -> ReadRange<'_> {
-        ReadRange::new(self.db, content_type, range)
+        ReadRange::new(&self.db, content_type, range)
     }
 
     pub fn split_string(&self, id: ID, offset: Clock) -> crate::Result<()> {
@@ -119,7 +119,7 @@ fn parse_id(key: &[u8]) -> crate::Result<Option<&ID>> {
 }
 
 pub struct Inspect<'tx> {
-    db: &'tx Database<'tx>,
+    db: Database<'tx>,
 }
 
 impl<'tx> Debug for Inspect<'tx> {

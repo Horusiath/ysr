@@ -42,16 +42,16 @@ impl<'tx> Db<'tx> for Database<'tx> {
     }
 
     fn blocks(&self) -> BlockStore<'_> {
-        BlockStore::new(self)
+        BlockStore::new(*self)
     }
 
     fn contents(&self) -> ContentStore<'_> {
-        ContentStore::new(self)
+        ContentStore::new(*self)
     }
 
     #[inline]
     fn intern_strings(&self) -> InternStringsStore<'_> {
-        InternStringsStore::new(self)
+        InternStringsStore::new(*self)
     }
 
     fn map_entries(&self) -> MapEntriesStore<'_> {

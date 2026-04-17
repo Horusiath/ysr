@@ -8,6 +8,7 @@ use crate::node::{Node, NodeType};
 use crate::prelim::Prelim;
 use crate::store::Db;
 use crate::store::block_store::SplitResult;
+use crate::transaction::{ReadTxScope, WriteTxScope};
 use crate::types::Capability;
 use crate::{
     BlockMut, Clock, DynRef, ID, In, Mounted, Optional, Out, Transaction, Unmounted, lib0,
@@ -88,17 +89,19 @@ impl<'tx, 'db> ListRef<&'tx Transaction<'db>> {
 }
 
 impl<'tx, 'db> ListRef<&'tx mut Transaction<'db>> {
-    fn seek(&self, index: usize) -> crate::Result<(Option<ID>, Option<ID>)> {
+    fn seek(
+        ctx: &mut ReadTxScope<'_>,
+        start: Option<ID>,
+        index: usize,
+    ) -> crate::Result<(Option<ID>, Option<ID>)> {
         let mut remaining = Clock::new(index as u32);
         let mut left: Option<ID> = None;
-        let mut right: Option<ID> = self.block.start().copied();
+        let mut right: Option<ID> = start;
 
-        let db = self.tx.db.get();
-        let blocks = db.blocks();
         while let Some(id) = right
             && remaining > Clock::new(0)
         {
-            let block = blocks.get(id)?;
+            let block = ctx.cursor.seek(id)?;
             if block.clock_len() > remaining {
                 let id = block.id();
                 left = Some(ID::new(id.client, id.clock + remaining));
@@ -123,23 +126,21 @@ impl<'tx, 'db> ListRef<&'tx mut Transaction<'db>> {
     where
         T: Prelim,
     {
-        let (left, right) = self.seek(index)?;
-
-        let db = self.tx.db.get();
-        let blocks = db.blocks();
-        let state = self.tx.state.get_or_init(db);
+        let mut ctx = self.tx.write_context()?;
+        let start = self.block.start().copied();
+        let (left, right) = Self::seek(&mut ctx, start, index)?;
 
         let node: Node = (*self.block.id()).into();
         let left = left.as_ref();
         let right = right.as_ref();
-        let id = state.next_id(value.clock_len());
+        let id = ctx.state.next_id(value.clock_len());
         let mut insert =
             InsertBlockData::new(id, Clock::new(1), left, right, left, right, node, None);
         value.prepare(&mut insert)?;
-        let mut ctx = IntegrationContext::create(&mut insert, Clock::new(0), &blocks)?;
-        insert.integrate(&db, state, &mut ctx)?;
-        value.integrate(&mut insert, self.tx)?;
-        self.block = ctx.parent.unwrap();
+        let mut i = IntegrationContext::create(&mut insert, Clock::new(0), &mut ctx.cursor)?;
+        insert.integrate(&mut ctx, &mut i)?;
+        value.integrate(&mut insert, &mut ctx)?;
+        self.block = i.parent.unwrap();
         Ok(())
     }
 
@@ -148,7 +149,9 @@ impl<'tx, 'db> ListRef<&'tx mut Transaction<'db>> {
         T: Prelim,
         I: IntoIterator<Item = T>,
     {
-        let (mut left, right) = self.seek(index)?;
+        let mut tx = self.tx.write_context()?;
+        let start = self.block.start().copied();
+        let (mut left, right) = Self::seek(&mut tx, start, index)?;
 
         let node: Node = (*self.block.id()).into();
 
@@ -156,11 +159,7 @@ impl<'tx, 'db> ListRef<&'tx mut Transaction<'db>> {
             let l = left.as_ref();
             let r = right.as_ref();
 
-            let db = self.tx.db.get();
-            let blocks = db.blocks();
-            let state = self.tx.state.get_or_init(db);
-
-            let mut id = state.next_id(value.clock_len());
+            let mut id = tx.state.next_id(value.clock_len());
             let mut insert =
                 InsertBlockData::new(id, Clock::new(1), l, r, l, r, node.clone(), None);
 
@@ -169,9 +168,9 @@ impl<'tx, 'db> ListRef<&'tx mut Transaction<'db>> {
             left = Some(insert.block.last_id());
 
             value.prepare(&mut insert)?;
-            let mut ctx = IntegrationContext::create(&mut insert, Clock::new(0), &blocks)?;
-            insert.integrate(&db, state, &mut ctx)?;
-            value.integrate(&mut insert, self.tx)?;
+            let mut ctx = IntegrationContext::create(&mut insert, Clock::new(0), &mut tx.cursor)?;
+            insert.integrate(&mut tx, &mut ctx)?;
+            value.integrate(&mut insert, &mut tx)?;
             self.block = ctx.parent.unwrap();
         }
 
@@ -219,22 +218,19 @@ impl<'tx, 'db> ListRef<&'tx mut Transaction<'db>> {
 
         let mut to_delete = end - start + 1;
 
-        let db = self.tx.db.get();
-        let state = self.tx.state.get_or_init(db);
-        let blocks = db.blocks();
-        let mut cursor = blocks.cursor()?;
+        let mut tx = self.tx.write_context()?;
 
         // first let's position cursor at the start of the range
         let mut current = self.block.start().copied();
         while let Some(block_id) = current
             && start != 0
         {
-            cursor.seek(block_id)?;
-            let block = cursor.current()?;
+            tx.cursor.seek(block_id)?;
+            let block = tx.cursor.current()?;
             if !block.is_deleted() && block.is_countable() {
                 let block_len = block.clock_len().get() as usize;
                 if block_len > start {
-                    match cursor.split_current(Clock::new(start as u32))? {
+                    match tx.cursor.split_current(Clock::new(start as u32))? {
                         SplitResult::Unchanged(left) => left,
                         SplitResult::Split(left, _right) => left,
                     };
@@ -248,16 +244,15 @@ impl<'tx, 'db> ListRef<&'tx mut Transaction<'db>> {
         }
 
         // then remove as many blocks as needed
-        let map_entries = db.map_entries();
         while let Some(block_id) = current.take()
             && to_delete != 0
         {
-            let block = cursor.seek(block_id)?;
+            let block = tx.cursor.seek(block_id)?;
             if !block.is_deleted() && block.is_countable() {
                 let mut block: BlockMut = block.into();
                 let block_len = block.clock_len().get() as usize;
                 if block_len > to_delete {
-                    block = match cursor.split_current(Clock::new(to_delete as u32))? {
+                    block = match tx.cursor.split_current(Clock::new(to_delete as u32))? {
                         SplitResult::Unchanged(left) => left,
                         SplitResult::Split(left, _) => left,
                     };
@@ -266,7 +261,7 @@ impl<'tx, 'db> ListRef<&'tx mut Transaction<'db>> {
                     to_delete -= block_len;
                 }
                 let parent_len = self.block.node_len() as u32 - block_len as u32;
-                if state.delete(&mut block, false, &mut cursor, Some(&map_entries))? {
+                if tx.delete(&mut block, false)? {
                     self.block.set_node_len(parent_len);
                 }
             }
@@ -275,8 +270,8 @@ impl<'tx, 'db> ListRef<&'tx mut Transaction<'db>> {
         }
 
         // update current parent node length
-        cursor.seek(*self.block.id())?;
-        cursor.update_current(self.block.header())?;
+        tx.cursor.seek(*self.block.id())?;
+        tx.cursor.update_current(self.block.header())?;
 
         Ok(())
     }
@@ -412,10 +407,10 @@ impl Prelim for ListPrelim {
         Ok(())
     }
 
-    fn integrate(
+    fn integrate<'tx>(
         self,
         insert: &mut InsertBlockData,
-        tx: &mut Transaction,
+        tx: &mut WriteTxScope<'tx>,
     ) -> crate::Result<Self::Return> {
         let unmounted: Unmounted<List> = Unmounted::nested(*insert.block.id());
         if !self.0.is_empty() {
