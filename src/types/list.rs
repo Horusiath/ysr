@@ -8,7 +8,7 @@ use crate::node::{Node, NodeType};
 use crate::prelim::Prelim;
 use crate::store::Db;
 use crate::store::block_store::SplitResult;
-use crate::transaction::{ReadTxScope, WriteTxScope};
+use crate::transaction::{TxMutScope, TxScope};
 use crate::types::Capability;
 use crate::{
     BlockMut, Clock, DynRef, ID, In, Mounted, Optional, Out, Transaction, Unmounted, lib0,
@@ -90,7 +90,7 @@ impl<'tx, 'db> ListRef<&'tx Transaction<'db>> {
 
 impl<'tx, 'db> ListRef<&'tx mut Transaction<'db>> {
     fn seek(
-        ctx: &mut ReadTxScope<'_>,
+        ctx: &mut TxScope<'_>,
         start: Option<ID>,
         index: usize,
     ) -> crate::Result<(Option<ID>, Option<ID>)> {
@@ -153,27 +153,36 @@ impl<'tx, 'db> ListRef<&'tx mut Transaction<'db>> {
         let start = self.block.start().copied();
         let (mut left, right) = Self::seek(&mut tx, start, index)?;
 
-        let node: Node = (*self.block.id()).into();
-
         for value in values {
-            let l = left.as_ref();
-            let r = right.as_ref();
-
-            let mut id = tx.state.next_id(value.clock_len());
-            let mut insert =
-                InsertBlockData::new(id, Clock::new(1), l, r, l, r, node.clone(), None);
-
-            // new left ID for the next iteration
-            id.clock += value.clock_len();
-            left = Some(insert.block.last_id());
-
-            value.prepare(&mut insert)?;
-            let mut ctx = IntegrationContext::create(&mut insert, Clock::new(0), &mut tx.cursor)?;
-            insert.integrate(&mut tx, &mut ctx)?;
-            value.integrate(&mut insert, &mut tx)?;
-            self.block = ctx.parent.unwrap();
+            Self::insert_fragment(&mut self.block, &mut tx, &mut left, right.as_ref(), value)?;
         }
 
+        Ok(())
+    }
+
+    fn insert_fragment<T: Prelim>(
+        parent: &mut BlockMut,
+        tx: &mut TxMutScope<'_>,
+        left: &mut Option<ID>,
+        right: Option<&ID>,
+        value: T,
+    ) -> crate::Result<()> {
+        let node: Node = (*parent.id()).into();
+        let l = left.as_ref();
+
+        let mut id = tx.state.next_id(value.clock_len());
+        let mut insert =
+            InsertBlockData::new(id, Clock::new(1), l, right, l, right, node.clone(), None);
+
+        // new left ID for the next iteration
+        id.clock += value.clock_len();
+        *left = Some(insert.block.last_id());
+
+        value.prepare(&mut insert)?;
+        let mut ctx = IntegrationContext::create(&mut insert, Clock::new(0), &mut tx.cursor)?;
+        insert.integrate(tx, &mut ctx)?;
+        value.integrate(&mut insert, tx)?;
+        *parent = ctx.parent.unwrap();
         Ok(())
     }
 
@@ -410,14 +419,15 @@ impl Prelim for ListPrelim {
     fn integrate<'tx>(
         self,
         insert: &mut InsertBlockData,
-        tx: &mut WriteTxScope<'tx>,
+        tx: &mut TxMutScope<'tx>,
     ) -> crate::Result<Self::Return> {
         let unmounted: Unmounted<List> = Unmounted::nested(*insert.block.id());
         if !self.0.is_empty() {
-            let mut mounted = unmounted.mount_mut(tx)?;
+            let parent = insert.as_block_mut();
+            let mut left = None;
+            let right = None;
             for input in self.0 {
-                //TODO: optimize for batch insert
-                mounted.push_back(input)?;
+                ListRef::insert_fragment(parent, tx, &mut left, right, input)?;
             }
         }
         Ok(unmounted)

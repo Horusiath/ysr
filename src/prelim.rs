@@ -1,6 +1,6 @@
 use crate::block::InsertBlockData;
 use crate::content::{Content, ContentType};
-use crate::transaction::WriteTxScope;
+use crate::transaction::TxMutScope;
 use crate::{Clock, Transaction};
 use serde::Serialize;
 use smallvec::smallvec;
@@ -15,7 +15,7 @@ pub trait Prelim {
     fn integrate<'tx>(
         self,
         insert: &mut InsertBlockData,
-        tx: &mut WriteTxScope<'tx>,
+        tx: &mut TxMutScope<'tx>,
     ) -> crate::Result<Self::Return>;
 }
 
@@ -40,7 +40,7 @@ where
     fn integrate<'tx>(
         self,
         _insert: &mut InsertBlockData,
-        _tx: &mut WriteTxScope<'tx>,
+        _tx: &mut TxMutScope<'tx>,
     ) -> crate::Result<Self::Return> {
         Ok(())
     }

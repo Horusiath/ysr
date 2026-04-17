@@ -7,7 +7,7 @@ use crate::node::{Node, NodeID, NodeType};
 use crate::prelim::Prelim;
 use crate::store::map_entries::{MapEntries, MapKey};
 use crate::store::{Db, MapEntriesStore};
-use crate::transaction::WriteTxScope;
+use crate::transaction::{TxMutScope, TxScope};
 use crate::types::Capability;
 use crate::{Clock, Error, In, Mounted, Optional, Transaction, Unmounted, lib0};
 use std::collections::{BTreeMap, HashMap};
@@ -25,7 +25,7 @@ impl Capability for Map {
     }
 }
 
-impl<'tx: 'db, 'db> MapRef<&'tx Transaction<'db>> {
+impl<'db, 'tx: 'db> MapRef<&'tx Transaction<'db>> {
     pub fn get<K, V>(&self, key: K) -> crate::Result<V>
     where
         K: AsRef<str>,
@@ -105,13 +105,21 @@ impl<'tx, 'db> MapRef<&'tx mut Transaction<'db>> {
         K: AsRef<str>,
         V: Prelim,
     {
-        let node_id = *self.node_id();
         let mut tx = self.tx.write_context()?;
+        Self::insert_internal(&mut self.block, &mut tx, key.as_ref(), value)?;
+        Ok(())
+    }
 
-        let key = key.as_ref();
+    fn insert_internal<V: Prelim>(
+        parent: &mut BlockMut,
+        tx: &mut TxMutScope<'_>,
+        key: &str,
+        value: V,
+    ) -> crate::Result<()> {
+        let node_id = parent.id();
         let id = tx.state.next_id(value.clock_len());
         let map_entries = tx.db.map_entries();
-        let left_id = map_entries.get(&node_id, key)?;
+        let left_id = map_entries.get(node_id, key)?;
         let mut insert = InsertBlockData::new(
             id,
             Clock::new(1),
@@ -119,14 +127,14 @@ impl<'tx, 'db> MapRef<&'tx mut Transaction<'db>> {
             None,
             left_id,
             None,
-            Node::Nested(node_id),
+            Node::Nested(*node_id),
             Some(key),
         );
         value.prepare(&mut insert)?;
         let mut ctx = IntegrationContext::create(&mut insert, Clock::new(0), &mut tx.cursor)?;
-        insert.integrate(&mut tx, &mut ctx)?;
-        value.integrate(&mut insert, &mut tx)?;
-        self.block = ctx.parent.unwrap();
+        insert.integrate(tx, &mut ctx)?;
+        value.integrate(&mut insert, tx)?;
+        *parent = ctx.parent.unwrap();
         Ok(())
     }
 
@@ -301,13 +309,13 @@ impl Prelim for MapPrelim {
     fn integrate<'tx>(
         self,
         insert: &mut InsertBlockData,
-        tx: &mut WriteTxScope<'tx>,
+        tx: &mut TxMutScope<'tx>,
     ) -> crate::Result<Self::Return> {
         let unmounted: Unmounted<Map> = Unmounted::nested(*insert.block.id());
         if !self.0.is_empty() {
-            let mut mounted = unmounted.mount_mut(tx)?;
+            let block = insert.as_block_mut();
             for (key, value) in self.0 {
-                mounted.insert(key, value)?;
+                MapRef::insert_internal(block, tx, &key, value)?;
             }
         }
         Ok(unmounted)

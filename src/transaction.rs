@@ -731,12 +731,12 @@ impl<'db> Transaction<'db> {
         todo!()
     }
 
-    pub fn read_context(&self) -> crate::Result<ReadTxScope> {
-        ReadTxScope::new(self)
+    pub fn read_context(&self) -> crate::Result<TxScope<'_>> {
+        TxScope::new(self)
     }
 
-    pub fn write_context(&mut self) -> crate::Result<WriteTxScope> {
-        WriteTxScope::new(self)
+    pub fn write_context(&mut self) -> crate::Result<TxMutScope<'_>> {
+        TxMutScope::new(self)
     }
 }
 
@@ -844,12 +844,12 @@ impl<'tx> PendingUpdate<'tx> {
     }
 }
 
-pub struct ReadTxScope<'tx> {
+pub struct TxScope<'tx> {
     pub db: Database<'tx>,
     pub cursor: BlockCursor<'tx>,
 }
 
-impl<'tx> ReadTxScope<'tx> {
+impl<'tx> TxScope<'tx> {
     pub fn new(tx: &'tx Transaction<'_>) -> crate::Result<Self> {
         let db = tx.db.get();
         let cursor = BlockCursor::new(db)?;
@@ -857,18 +857,18 @@ impl<'tx> ReadTxScope<'tx> {
     }
 }
 
-pub struct WriteTxScope<'tx> {
-    inner: ReadTxScope<'tx>,
+pub struct TxMutScope<'tx> {
+    inner: TxScope<'tx>,
     pub state: &'tx mut TransactionState,
 }
 
-impl<'tx> WriteTxScope<'tx> {
+impl<'tx> TxMutScope<'tx> {
     pub fn new(tx: &'tx mut Transaction<'_>) -> crate::Result<Self> {
         let db = tx.db.get();
         let cursor = BlockCursor::new(db)?;
         let state = tx.state.get_or_init(db);
         Ok(Self {
-            inner: ReadTxScope { db, cursor },
+            inner: TxScope { db, cursor },
             state,
         })
     }
@@ -1124,14 +1124,14 @@ impl<'tx> WriteTxScope<'tx> {
     }
 }
 
-impl<'tx> Deref for WriteTxScope<'tx> {
-    type Target = ReadTxScope<'tx>;
+impl<'tx> Deref for TxMutScope<'tx> {
+    type Target = TxScope<'tx>;
     fn deref(&self) -> &Self::Target {
         &self.inner
     }
 }
 
-impl<'tx> DerefMut for WriteTxScope<'tx> {
+impl<'tx> DerefMut for TxMutScope<'tx> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.inner
     }

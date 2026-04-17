@@ -8,7 +8,7 @@ use crate::lmdb::Database;
 use crate::node::{Node, NodeID, NodeType};
 use crate::read::{Decode, Decoder, ReadExt};
 use crate::store::Db;
-use crate::transaction::{TransactionState, WriteTxScope};
+use crate::transaction::{TransactionState, TxMutScope};
 use crate::write::Encoder;
 use crate::{ClientID, Clock, U32};
 use bytes::{BufMut, BytesMut};
@@ -543,7 +543,7 @@ impl Carrier {
     }
 
     #[inline(always)]
-    pub fn integrate<'tx>(self, offset: Clock, tx: &mut WriteTxScope<'tx>) -> crate::Result<()> {
+    pub fn integrate<'tx>(self, offset: Clock, tx: &mut TxMutScope<'tx>) -> crate::Result<()> {
         match self {
             Carrier::GC(range) => {
                 let id = range.head();

@@ -2,14 +2,13 @@ use crate::block::{ID, InsertBlockData};
 use crate::content::{Content, ContentType, FormatAttribute};
 use crate::integrate::IntegrationContext;
 use crate::lib0::Value;
-use crate::lmdb::Database;
 use crate::node::{Node, NodeType};
 use crate::prelim::Prelim;
 use crate::state_vector::Snapshot;
 use crate::store::Db;
 use crate::store::block_store::{BlockCursor, SplitResult};
 use crate::store::content_store::ContentStore;
-use crate::transaction::{TransactionState, WriteTxScope};
+use crate::transaction::{TxMutScope, TxScope};
 use crate::types::Capability;
 use crate::{Block, BlockHeader, BlockMut, Clock, In, Mounted, Out, Transaction, lib0};
 use serde::Serialize;
@@ -29,25 +28,29 @@ impl Capability for Text {
     }
 }
 
-impl<'tx, 'db> TextRef<&'tx Transaction<'db>> {
+impl<'db, 'tx: 'db> TextRef<&'tx Transaction<'db>> {
     pub fn len(&self) -> usize {
         self.block.node_len()
     }
 
     /// Returns an iterator over uncommitted changes (deltas) made to this text type
     /// within its current transaction scope.
-    pub fn uncommitted(&self) -> Uncommitted<'tx> {
+    pub fn uncommitted(&self) -> Uncommitted<'db, 'tx> {
         Uncommitted::new(self)
     }
 
     /// Returns an iterator over all text and embedded chunks grouped by their applied attributes.
-    pub fn chunks(&self) -> Chunks<'tx> {
+    pub fn chunks(&self) -> Chunks<'db, 'tx> {
         self.chunks_between(None, None)
     }
 
     /// Returns an iterator over all text and embedded chunks grouped by their applied attributes,
     /// scoped between two provided snapshots.
-    pub fn chunks_between(&self, from: Option<&Snapshot>, to: Option<&Snapshot>) -> Chunks<'tx> {
+    pub fn chunks_between(
+        &self,
+        from: Option<&Snapshot>,
+        to: Option<&Snapshot>,
+    ) -> Chunks<'db, 'tx> {
         Chunks::new(self, from, to)
     }
 }
@@ -111,7 +114,7 @@ impl<'tx, 'db> Display for TextRef<&'tx Transaction<'db>> {
 
 impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
     fn insert_at<P>(
-        tx: &mut WriteTxScope<'_>,
+        tx: &mut TxMutScope<'_>,
         pos: &mut BlockPosition,
         value: P,
         attrs: Option<Box<Attrs>>,
@@ -136,7 +139,7 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
     }
 
     fn format_at(
-        tx: &mut WriteTxScope<'_>,
+        tx: &mut TxMutScope<'_>,
         pos: &mut BlockPosition,
         len: usize,
         attrs: Option<Box<Attrs>>,
@@ -155,7 +158,7 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
     }
 
     fn remove_at(
-        tx: &mut WriteTxScope<'_>,
+        tx: &mut TxMutScope<'_>,
         pos: &mut BlockPosition,
         len: usize,
     ) -> crate::Result<()> {
@@ -439,12 +442,11 @@ where
     fn integrate<'tx>(
         self,
         insert: &mut InsertBlockData,
-        tx: &mut WriteTxScope<'tx>,
+        tx: &mut TxMutScope<'tx>,
     ) -> crate::Result<Self::Return> {
         let data = FormatAttribute::compose(self.key, &lib0::to_vec(&self.value)?)?;
         if data.len() > BlockHeader::INLINE_CONTENT_LEN {
-            let db = tx.db.get();
-            let contents = db.contents();
+            let contents = tx.db.contents();
             contents.insert(*insert.block.id(), &data)?;
         }
         Ok(())
@@ -484,11 +486,10 @@ impl<'a> Prelim for StringPrelim<'a> {
     fn integrate<'tx>(
         self,
         insert: &mut InsertBlockData,
-        tx: &mut WriteTxScope<'tx>,
+        tx: &mut TxMutScope<'tx>,
     ) -> crate::Result<Self::Return> {
         if !self.can_inline() {
-            let db = tx.db.get();
-            let contents = db.contents();
+            let contents = tx.db.contents();
             contents.insert(*insert.block.id(), self.data.as_bytes())?;
         }
         Ok(())
@@ -526,17 +527,17 @@ impl<T> Delta<T> {
     }
 }
 
-pub struct Uncommitted<'tx> {
-    tx: &'tx mut Transaction<'tx>,
+pub struct Uncommitted<'db, 'tx> {
+    tx: &'tx mut Transaction<'db>,
 }
 
-impl<'tx> Uncommitted<'tx> {
-    fn new(text: &TextRef<&'tx Transaction<'_>>) -> Self {
+impl<'db, 'tx> Uncommitted<'tx, 'db> {
+    fn new(text: &TextRef<&'tx Transaction<'db>>) -> Self {
         todo!()
     }
 }
 
-impl<'tx> Iterator for Uncommitted<'tx> {
+impl<'db, 'tx> Iterator for Uncommitted<'db, 'tx> {
     type Item = crate::Result<Delta<Out>>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -544,13 +545,13 @@ impl<'tx> Iterator for Uncommitted<'tx> {
     }
 }
 
-pub struct Chunks<'tx> {
-    tx: &'tx mut Transaction<'tx>,
+pub struct Chunks<'db, 'tx> {
+    tx: &'tx mut Transaction<'db>,
 }
 
-impl<'tx> Chunks<'tx> {
+impl<'db, 'tx> Chunks<'db, 'tx> {
     fn new(
-        text: &TextRef<&'tx Transaction<'_>>,
+        text: &TextRef<&'tx Transaction<'db>>,
         from: Option<&Snapshot>,
         to: Option<&Snapshot>,
     ) -> Self {
@@ -558,7 +559,7 @@ impl<'tx> Chunks<'tx> {
     }
 }
 
-impl<'tx> Iterator for Chunks<'tx> {
+impl<'db, 'tx> Iterator for Chunks<'db, 'tx> {
     type Item = crate::Result<Chunk>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -685,7 +686,7 @@ impl<'a> BlockPosition<'a> {
 
     fn insert_internal<'tx, P: Prelim>(
         &mut self,
-        tx: &mut WriteTxScope<'tx>,
+        tx: &mut TxMutScope<'tx>,
         value: P,
     ) -> crate::Result<P::Return> {
         let node_id = *self.parent.id();
@@ -739,7 +740,7 @@ impl<'a> BlockPosition<'a> {
 
     fn insert_attributes<'tx>(
         &mut self,
-        tx: &mut WriteTxScope<'tx>,
+        tx: &mut TxMutScope<'tx>,
         attrs: Box<Attrs>,
     ) -> crate::Result<Attrs> {
         let mut negated = Attrs::new();
@@ -762,7 +763,7 @@ impl<'a> BlockPosition<'a> {
 
     fn insert_negated<'tx>(
         &mut self,
-        tx: &mut WriteTxScope<'tx>,
+        tx: &mut TxMutScope<'tx>,
         mut attrs: Attrs,
     ) -> crate::Result<()> {
         // first cleanup the attributes that were already ended
@@ -860,7 +861,7 @@ fn forward(pos: &mut BlockPosition, cursor: &mut BlockCursor) -> crate::Result<b
 }
 
 fn clean_format_gap<'tx>(
-    tx: &mut WriteTxScope<'tx>,
+    tx: &mut TxMutScope<'tx>,
     start: &ID,
     end: Option<&ID>,
     start_attrs: &Attrs,

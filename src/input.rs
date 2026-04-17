@@ -1,7 +1,7 @@
 use crate::block::InsertBlockData;
 use crate::lib0::Value;
 use crate::prelim::Prelim;
-use crate::transaction::WriteTxScope;
+use crate::transaction::TxMutScope;
 use crate::{Clock, ListPrelim, MapPrelim, Out, Transaction};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -51,7 +51,7 @@ impl Prelim for In {
     fn integrate<'tx>(
         self,
         insert: &mut InsertBlockData,
-        tx: &mut WriteTxScope<'tx>,
+        tx: &mut TxMutScope<'tx>,
     ) -> crate::Result<Self::Return> {
         match self {
             In::Value(value) => Ok(Out::Value(value)),

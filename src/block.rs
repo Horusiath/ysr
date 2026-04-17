@@ -4,7 +4,7 @@ use crate::integrate::IntegrationContext;
 use crate::lmdb::Database;
 use crate::node::{Named, Node, NodeID, NodeType};
 use crate::store::Db;
-use crate::transaction::{TransactionState, WriteTxScope};
+use crate::transaction::{TransactionState, TxMutScope};
 use crate::write::{Encoder, WriteExt};
 use crate::{ClientID, Clock, Optional, U32};
 use crate::{Error, Result};
@@ -883,7 +883,7 @@ impl InsertBlockData {
 
     pub(crate) fn integrate<'tx>(
         &mut self,
-        tx: &mut WriteTxScope<'tx>,
+        tx: &mut TxMutScope<'tx>,
         context: &mut IntegrationContext,
     ) -> crate::Result<()> {
         if context.offset > 0 {
