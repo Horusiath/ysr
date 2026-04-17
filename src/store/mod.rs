@@ -33,7 +33,7 @@ pub trait Db<'tx> {
     fn map_entries(&self) -> MapEntriesStore<'tx>;
     fn state_vector(&self) -> StateVectorStore<'tx>;
     fn delete_set(&self) -> DeleteSetStore<'tx>;
-    fn inspect<'a>(&'a self) -> DbInspector<'a, 'tx>;
+    fn inspect(&self) -> DbInspector<'tx>;
 }
 
 impl<'tx> Db<'tx> for Database<'tx> {
@@ -66,8 +66,8 @@ impl<'tx> Db<'tx> for Database<'tx> {
         DeleteSetStore::new(*self)
     }
 
-    fn inspect<'a>(&'a self) -> DbInspector<'a, 'tx> {
-        DbInspector::new(self)
+    fn inspect(&self) -> DbInspector<'tx> {
+        DbInspector::new(*self)
     }
 }
 

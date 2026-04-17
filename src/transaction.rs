@@ -20,7 +20,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
 use std::io::Write;
 use std::ops::{Deref, DerefMut};
-use std::task::Context;
 use zerocopy::IntoBytes;
 
 pub(crate) struct TransactionState {
