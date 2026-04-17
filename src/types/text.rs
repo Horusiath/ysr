@@ -211,9 +211,9 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
         }
 
         if deleted_count > 0 {
-            let parent_len = self.block.node_len() as u32 - deleted_count;
-            self.block.set_node_len(parent_len);
-            tx.cursor.update(self.block.as_block())?;
+            let parent_len = pos.parent.node_len() as u32 - deleted_count;
+            pos.parent.set_node_len(parent_len);
+            tx.cursor.update(pos.parent.as_block())?;
         }
 
         Ok(())
@@ -230,7 +230,7 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
 
         let mut tx = self.tx.write_context()?;
         let value = StringPrelim::new(chunk);
-        let mut pos = BlockPosition::seek(&mut tx.cursor, self.block.start().copied(), index)?;
+        let mut pos = BlockPosition::seek(&mut tx.cursor, &mut self.block, index)?;
         Self::insert_at(&mut tx, &mut pos, value, None)?;
         Ok(())
     }
@@ -256,7 +256,7 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
             .map(|(k, v)| (k.into(), v.into()))
             .collect();
         let mut tx = self.tx.write_context()?;
-        let mut pos = BlockPosition::seek(&mut tx.cursor, self.block.start().copied(), index)?;
+        let mut pos = BlockPosition::seek(&mut tx.cursor, &mut self.block, index)?;
         Self::insert_at(
             &mut tx,
             &mut pos,
@@ -270,7 +270,7 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
         V: Prelim,
     {
         let mut tx = self.tx.write_context()?;
-        let mut pos = BlockPosition::seek(&mut tx.cursor, self.block.start().copied(), index)?;
+        let mut pos = BlockPosition::seek(&mut tx.cursor, &mut self.block, index)?;
         Self::insert_at(&mut tx, &mut pos, value, None)
     }
 
@@ -291,7 +291,7 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
             .map(|(k, v)| (k.into(), v.into()))
             .collect();
         let mut tx = self.tx.write_context()?;
-        let mut pos = BlockPosition::seek(&mut tx.cursor, self.block.start().copied(), index)?;
+        let mut pos = BlockPosition::seek(&mut tx.cursor, &mut self.block, index)?;
         Self::insert_at(&mut tx, &mut pos, value, Some(Box::new(attrs)))
     }
 
@@ -323,7 +323,7 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
         }
         let remove_len = end - start + 1;
         let mut tx = self.tx.write_context()?;
-        let mut pos = BlockPosition::seek(&mut tx.cursor, self.block.start().copied(), start)?;
+        let mut pos = BlockPosition::seek(&mut tx.cursor, &mut self.block, start)?;
         Self::remove_at(&mut tx, &mut pos, remove_len)?;
         Ok(())
     }
@@ -362,7 +362,7 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
         let len = end - start + 1;
         let mut tx = self.tx.write_context()?;
 
-        let mut pos = BlockPosition::seek(&mut tx.cursor, self.block.start().copied(), start)?;
+        let mut pos = BlockPosition::seek(&mut tx.cursor, &mut self.block, start)?;
         Self::format_at(&mut tx, &mut pos, len, Some(Box::new(attrs)))
     }
 
@@ -370,7 +370,7 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
     where
         I: IntoIterator<Item = Delta<In>>,
     {
-        let mut pos = BlockPosition::new(self.block.start().copied());
+        let mut pos = BlockPosition::new(&mut self.block);
         let mut tx = self.tx.write_context()?;
         for delta in delta {
             match delta {
@@ -584,16 +584,19 @@ impl Delta<In> {
     }
 }
 
-struct BlockPosition {
+struct BlockPosition<'a> {
+    parent: &'a mut BlockMut,
     attrs: Attrs,
     index: usize,
     left: Option<ID>,
     right: Option<ID>,
 }
 
-impl BlockPosition {
-    fn new(right: Option<ID>) -> Self {
+impl<'a> BlockPosition<'a> {
+    fn new(parent: &'a mut BlockMut) -> Self {
+        let right = parent.start().copied();
         BlockPosition {
+            parent,
             attrs: Attrs::new(),
             index: 0,
             left: None,
@@ -659,8 +662,12 @@ impl BlockPosition {
         Ok(())
     }
 
-    fn seek(cursor: &mut BlockCursor, start: Option<ID>, index: usize) -> crate::Result<Self> {
-        let mut pos = Self::new(start);
+    fn seek(
+        cursor: &mut BlockCursor,
+        parent: &'a mut BlockMut,
+        index: usize,
+    ) -> crate::Result<Self> {
+        let mut pos = Self::new(parent);
         pos.forward_by(index, cursor)?;
 
         Ok(pos)
@@ -681,7 +688,7 @@ impl BlockPosition {
         tx: &mut WriteTxScope<'tx>,
         value: P,
     ) -> crate::Result<P::Return> {
-        let node_id = *self.node_id();
+        let node_id = *self.parent.id();
 
         let id = tx.state.next_id(value.clock_len());
         let left = self.left.as_ref();
@@ -699,9 +706,9 @@ impl BlockPosition {
         value.prepare(&mut insert)?;
         let mut ctx = IntegrationContext::create(&mut insert, Clock::new(0), &mut tx.cursor)?;
         insert.integrate(tx, &mut ctx)?;
-        let result = value.integrate(&mut insert, self.tx)?;
+        let result = value.integrate(&mut insert, tx)?;
         self.left = Some(insert.block.last_id());
-        self.block = ctx.parent.unwrap();
+        *self.parent = ctx.parent.unwrap();
 
         Ok(result)
     }
@@ -784,7 +791,7 @@ impl BlockPosition {
         }
 
         // second add remaining attributes
-        let node_id = *self.node_id();
+        let node_id = *self.parent.id();
         for (key, value) in attrs.iter() {
             let fmt = FormatPrelim::new(key, value);
             // Integrate the block in an inner scope so the db/blocks/state borrows
@@ -808,7 +815,7 @@ impl BlockPosition {
                     IntegrationContext::create(&mut insert, Clock::new(0), &mut tx.cursor)?;
                 insert.integrate(tx, &mut ctx)?;
                 self.left = Some(insert.block.last_id());
-                self.block = ctx.parent.unwrap();
+                *self.parent = ctx.parent.unwrap();
                 insert
             };
             fmt.integrate(&mut insert, tx)?;

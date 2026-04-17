@@ -6,11 +6,11 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 #[repr(transparent)]
 pub struct StateVectorStore<'tx> {
-    db: &'tx Database<'tx>,
+    db: Database<'tx>,
 }
 
 impl<'tx> StateVectorStore<'tx> {
-    pub fn new(db: &'tx Database<'tx>) -> Self {
+    pub fn new(db: Database<'tx>) -> Self {
         Self { db }
     }
 

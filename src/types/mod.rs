@@ -58,10 +58,12 @@ where
         &self,
         tx: &'tx mut Transaction<'db>,
     ) -> crate::Result<Mounted<Cap, &'tx mut Transaction<'db>>> {
-        let db = tx.db.get();
-        let blocks = db.blocks();
-        let cursor = blocks.cursor()?;
-        let block = cursor.get_or_insert_node(self.node.clone(), Cap::node_type())?;
+        let block = {
+            let db = tx.db.get();
+            let blocks = db.blocks();
+            let cursor = blocks.cursor()?;
+            cursor.get_or_insert_node(self.node.clone(), Cap::node_type())?
+        };
         Ok(Mounted::new(block, tx))
     }
 

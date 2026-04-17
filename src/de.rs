@@ -915,7 +915,8 @@ struct ListNodeDeserializer<'de> {
 
 impl<'de> ListNodeDeserializer<'de> {
     fn new(node: Block<'de>, blocks: BlockStore<'de>) -> Self {
-        let content_store = blocks.into().contents();
+        let db: Database<'de> = blocks.into();
+        let content_store = db.contents();
         let start = node.start().copied();
         ListNodeDeserializer {
             node,
@@ -963,8 +964,9 @@ struct MapNodeDeserializer<'de> {
 
 impl<'de> MapNodeDeserializer<'de> {
     fn new(block: Block<'de>, blocks: BlockStore<'de>) -> Self {
-        let content_store = blocks.into().contents();
-        let map_entries = blocks.into().map_entries();
+        let db: Database<'de> = blocks.into();
+        let content_store = db.contents();
+        let map_entries = db.map_entries();
         let map_entries = map_entries.entries(block.id());
         MapNodeDeserializer {
             blocks,
@@ -1017,7 +1019,8 @@ impl<'de> MapAccess<'de> for MapNodeDeserializer<'de> {
 
 impl<'de> From<BlockDeserializer<'de>> for MapNodeDeserializer<'de> {
     fn from(value: BlockDeserializer<'de>) -> Self {
-        let all_entries = value.blocks.into().map_entries();
+        let db: Database<'de> = value.blocks.into();
+        let all_entries = db.map_entries();
         let map_entries = all_entries.entries(value.block.id());
         MapNodeDeserializer {
             map_entries,
@@ -1078,7 +1081,8 @@ struct TextNodeDeserializer<'de> {
 
 impl<'de> TextNodeDeserializer<'de> {
     fn new(node: Block<'de>, blocks: BlockStore<'de>, xml_format: bool) -> Self {
-        let content_store = blocks.into().contents();
+        let db: Database<'de> = blocks.into();
+        let content_store = db.contents();
         TextNodeDeserializer {
             node,
             blocks,

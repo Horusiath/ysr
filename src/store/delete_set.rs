@@ -7,13 +7,13 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 #[repr(transparent)]
 pub struct DeleteSetStore<'tx> {
-    db: &'tx Database<'tx>,
+    db: Database<'tx>,
 }
 
 impl<'tx> DeleteSetStore<'tx> {
     pub const PREFIX: u8 = 0x06;
 
-    pub fn new(db: &'tx Database<'tx>) -> DeleteSetStore<'tx> {
+    pub fn new(db: Database<'tx>) -> DeleteSetStore<'tx> {
         DeleteSetStore { db }
     }
 
@@ -100,13 +100,13 @@ pub struct Iter<'tx> {
 }
 
 enum IterState<'tx> {
-    Uninit(&'tx Database<'tx>),
+    Uninit(Database<'tx>),
     Init(Cursor<'tx>),
     Finished,
 }
 
 impl<'tx> Iter<'tx> {
-    fn new(db: &'tx Database<'tx>) -> Iter<'tx> {
+    fn new(db: Database<'tx>) -> Iter<'tx> {
         Iter {
             state: IterState::Uninit(db),
         }

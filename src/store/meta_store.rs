@@ -11,7 +11,7 @@ use zerocopy::IntoBytes;
 #[repr(transparent)]
 #[derive(Clone, Copy)]
 pub struct MetaStore<'tx> {
-    db: &'tx Database<'tx>,
+    db: Database<'tx>,
 }
 
 impl<'tx> MetaStore<'tx> {
@@ -23,7 +23,7 @@ impl<'tx> MetaStore<'tx> {
     /// Metadata key for missing state vector data.
     pub const KEY_MISSING_SV: &'static str = "$missing_sv";
 
-    pub fn new(db: &'tx Database<'tx>) -> Self {
+    pub fn new(db: Database<'tx>) -> Self {
         Self { db }
     }
 
@@ -107,7 +107,7 @@ fn meta_key(key: &str) -> SmallVec<[u8; 24]> {
 }
 
 pub enum Iter<'a> {
-    UnInit(&'a Database<'a>),
+    UnInit(Database<'a>),
     Init(Cursor<'a>),
 }
 

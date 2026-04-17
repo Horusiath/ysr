@@ -26,44 +26,44 @@ pub(super) const KEY_PREFIX_MAP: u8 = 0x04;
 pub(super) const KEY_PREFIX_CONTENT: u8 = 0x05;
 
 pub trait Db<'tx> {
-    fn meta(&self) -> MetaStore<'_>;
-    fn blocks(&self) -> BlockStore<'_>;
-    fn contents(&self) -> ContentStore<'_>;
-    fn intern_strings(&self) -> InternStringsStore<'_>;
-    fn map_entries(&self) -> MapEntriesStore<'_>;
-    fn state_vector(&self) -> StateVectorStore<'_>;
-    fn delete_set(&self) -> DeleteSetStore<'_>;
+    fn meta(&self) -> MetaStore<'tx>;
+    fn blocks(&self) -> BlockStore<'tx>;
+    fn contents(&self) -> ContentStore<'tx>;
+    fn intern_strings(&self) -> InternStringsStore<'tx>;
+    fn map_entries(&self) -> MapEntriesStore<'tx>;
+    fn state_vector(&self) -> StateVectorStore<'tx>;
+    fn delete_set(&self) -> DeleteSetStore<'tx>;
     fn inspect<'a>(&'a self) -> DbInspector<'a, 'tx>;
 }
 
 impl<'tx> Db<'tx> for Database<'tx> {
-    fn meta(&self) -> MetaStore<'_> {
-        MetaStore::new(self)
+    fn meta(&self) -> MetaStore<'tx> {
+        MetaStore::new(*self)
     }
 
-    fn blocks(&self) -> BlockStore<'_> {
+    fn blocks(&self) -> BlockStore<'tx> {
         BlockStore::new(*self)
     }
 
-    fn contents(&self) -> ContentStore<'_> {
+    fn contents(&self) -> ContentStore<'tx> {
         ContentStore::new(*self)
     }
 
     #[inline]
-    fn intern_strings(&self) -> InternStringsStore<'_> {
+    fn intern_strings(&self) -> InternStringsStore<'tx> {
         InternStringsStore::new(*self)
     }
 
-    fn map_entries(&self) -> MapEntriesStore<'_> {
-        MapEntriesStore::new(self)
+    fn map_entries(&self) -> MapEntriesStore<'tx> {
+        MapEntriesStore::new(*self)
     }
 
-    fn state_vector(&self) -> StateVectorStore<'_> {
-        StateVectorStore::new(self)
+    fn state_vector(&self) -> StateVectorStore<'tx> {
+        StateVectorStore::new(*self)
     }
 
-    fn delete_set(&self) -> DeleteSetStore<'_> {
-        DeleteSetStore::new(self)
+    fn delete_set(&self) -> DeleteSetStore<'tx> {
+        DeleteSetStore::new(*self)
     }
 
     fn inspect<'a>(&'a self) -> DbInspector<'a, 'tx> {

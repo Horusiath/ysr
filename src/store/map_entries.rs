@@ -9,12 +9,12 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 #[repr(transparent)]
 #[derive(Clone, Copy)]
 pub struct MapEntriesStore<'tx> {
-    db: &'tx Database<'tx>,
+    db: Database<'tx>,
 }
 
 impl<'tx> MapEntriesStore<'tx> {
     pub const PREFIX: u8 = KEY_PREFIX_MAP;
-    pub fn new(db: &'tx Database<'tx>) -> Self {
+    pub fn new(db: Database<'tx>) -> Self {
         Self { db }
     }
 
@@ -112,13 +112,13 @@ impl HashKeyPrefix {
 }
 
 enum HashKeysState<'tx> {
-    Uninit(&'tx Database<'tx>),
+    Uninit(Database<'tx>),
     Init(Cursor<'tx>),
     Finished,
 }
 
 impl<'tx> HashKeys<'tx> {
-    pub fn new(db: &'tx Database<'tx>, node_id: NodeID, hash: crate::U32) -> Self {
+    pub fn new(db: Database<'tx>, node_id: NodeID, hash: crate::U32) -> Self {
         let key = HashKeyPrefix::new(node_id, hash);
 
         HashKeys {
@@ -179,13 +179,13 @@ pub struct MapEntries<'tx> {
 }
 
 enum MapEntriesState<'tx> {
-    Uninit(&'tx Database<'tx>),
+    Uninit(Database<'tx>),
     Init(Cursor<'tx>),
     Finished,
 }
 
 impl<'tx> MapEntries<'tx> {
-    pub fn new(db: &'tx Database<'tx>, node_id: NodeID) -> Self {
+    pub fn new(db: Database<'tx>, node_id: NodeID) -> Self {
         MapEntries {
             state: MapEntriesState::Uninit(db),
             node_id,
@@ -316,13 +316,13 @@ pub struct Iter<'tx> {
 }
 
 enum IterState<'tx> {
-    Uninit(&'tx Database<'tx>),
+    Uninit(Database<'tx>),
     Init(Cursor<'tx>),
     Finished,
 }
 
 impl<'tx> Iter<'tx> {
-    pub fn new(db: &'tx Database<'tx>) -> Self {
+    pub fn new(db: Database<'tx>) -> Self {
         Iter {
             state: IterState::Uninit(db),
         }
@@ -373,7 +373,7 @@ impl<'tx> Iter<'tx> {
 }
 
 pub struct Inspector<'tx> {
-    db: &'tx Database<'tx>,
+    db: Database<'tx>,
 }
 
 impl<'tx> Debug for Inspector<'tx> {
