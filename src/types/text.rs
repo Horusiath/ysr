@@ -110,13 +110,44 @@ impl<'tx, 'db> Display for TextRef<&'tx Transaction<'db>> {
 }
 
 impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
-    fn insert_at<P: Prelim>(
+    fn insert_at<P>(
+        &mut self,
+        pos: &mut BlockPosition,
+        value: P,
+        attrs: Option<Box<Attrs>>,
+    ) -> crate::Result<P::Return>
+    where
+        P: Prelim,
+    {
+        let db = self.tx.db.get();
+        let blocks = db.blocks();
+        let mut cursor = blocks.cursor()?;
+
+        let negated = if let Some(attrs) = attrs {
+            pos.minimize(&attrs, &mut cursor)?;
+            self.insert_attributes(pos, attrs)?
+        } else {
+            Attrs::new()
+        };
+
+        let result = self.insert_internal(pos, value)?;
+
+        if !negated.is_empty() {
+            self.insert_negated(pos, negated)?;
+        }
+
+        Ok(result)
+    }
+
+    fn insert_internal<P: Prelim>(
         &mut self,
         pos: &mut BlockPosition,
         value: P,
     ) -> crate::Result<P::Return> {
         let node_id = *self.node_id();
         let db = self.tx.db.get();
+        let blocks = db.blocks();
+
         let state = self.tx.state.get_or_init(db);
         let id = state.next_id(value.clock_len());
         let left = pos.left.as_ref();
@@ -132,179 +163,35 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
             None,
         );
         value.prepare(&mut insert)?;
-        let blocks = db.blocks();
         let mut ctx = IntegrationContext::create(&mut insert, Clock::new(0), &blocks)?;
         insert.integrate(&db, state, &mut ctx)?;
         let result = value.integrate(&mut insert, self.tx)?;
         pos.left = Some(insert.block.last_id());
         self.block = ctx.parent.unwrap();
+
         Ok(result)
     }
 
-    pub fn insert<S>(&mut self, index: usize, chunk: S) -> crate::Result<()>
-    where
-        S: AsRef<str>,
-    {
-        let chunk = chunk.as_ref();
-        if chunk.is_empty() {
-            return Ok(());
-        }
-
-        let value = StringPrelim::new(chunk);
-        let mut pos = BlockPosition::seek(self.tx, self.block.start().copied(), index)?;
-        self.insert_at(&mut pos, value)
-    }
-
-    fn insert_negated(&mut self, pos: &mut BlockPosition, attrs: &mut Attrs) -> crate::Result<()> {
-        // first cleanup the attributes that were already ended
+    fn format_at(
+        &mut self,
+        pos: &mut BlockPosition,
+        len: usize,
+        attrs: Option<Box<Attrs>>,
+    ) -> crate::Result<()> {
+        let db = self.tx.db.get();
+        let blocks = db.blocks();
+        let mut cursor = blocks.cursor()?;
+        if let Some(attrs) = attrs
+            && !attrs.is_empty()
         {
-            let db = self.tx.db.get();
-            let blocks = db.blocks();
-            let contents = db.contents();
-            let mut cursor = blocks.cursor()?;
-
-            while let Some(right_id) = pos.right {
-                let block = cursor.seek(right_id)?;
-                if block.is_deleted() {
-                    forward(pos, &mut cursor, &contents)?;
-                    continue;
-                }
-                if block.content_type() == ContentType::Format {
-                    let content = get_content(&block, &contents)?;
-                    let fmt = content.as_format()?;
-                    let key = fmt.key();
-                    if let Some(curr_value) = attrs.get(key)
-                        && curr_value == &fmt.value()?
-                    {
-                        attrs.remove(key);
-                        forward(pos, &mut cursor, &contents)?;
-                        continue;
-                    }
-                }
-                break;
-            }
+            pos.minimize(&attrs, &mut cursor)?;
+            let negated = self.insert_attributes(pos, attrs)?;
+            pos.forward_by(len, &mut cursor)?;
+            self.insert_negated(pos, negated)?;
+            Ok(())
+        } else {
+            pos.forward_by(len, &mut cursor)
         }
-
-        // second add remaining attributes
-        let node_id = *self.node_id();
-        for (key, value) in attrs.iter() {
-            let fmt = FormatPrelim::new(key, value);
-            // Integrate the block in an inner scope so the db/blocks/state borrows
-            // are released before we hand `self.tx` to `fmt.integrate` below.
-            let mut insert = {
-                let db = self.tx.db.get();
-                let blocks = db.blocks();
-                let state = self.tx.state.get_or_init(db);
-                let id = state.next_id(1.into());
-                let left = pos.left.as_ref();
-                let right = pos.right.as_ref();
-                let mut insert = InsertBlockData::new(
-                    id,
-                    1.into(),
-                    left,
-                    right,
-                    left,
-                    right,
-                    Node::Nested(node_id),
-                    None,
-                );
-                fmt.prepare(&mut insert)?;
-                let mut ctx = IntegrationContext::create(&mut insert, Clock::new(0), &blocks)?;
-                insert.integrate(&db, state, &mut ctx)?;
-                pos.left = Some(insert.block.last_id());
-                self.block = ctx.parent.unwrap();
-                insert
-            };
-            fmt.integrate(&mut insert, self.tx)?;
-
-            // Re-acquire borrows for the forward step.
-            let db = self.tx.db.get();
-            let blocks = db.blocks();
-            let contents = db.contents();
-            let mut cursor = blocks.cursor()?;
-            forward(pos, &mut cursor, &contents)?;
-        }
-        Ok(())
-    }
-
-    fn insert_with_internal<P: Prelim>(
-        &mut self,
-        index: usize,
-        value: P,
-        mut attrs: Attrs,
-    ) -> crate::Result<P::Return> {
-        let mut pos = BlockPosition::seek(self.tx, self.block.start().copied(), index)?;
-        pos.unset_missing(&mut attrs);
-        if pos.right.is_some() {
-            let db = self.tx.db.get();
-            let blocks = db.blocks();
-            let contents = db.contents();
-            let mut cursor = blocks.cursor()?;
-            pos.minimize(&attrs, &mut cursor, &contents)?;
-        }
-
-        let result = self.insert_at(&mut pos, value)?;
-
-        self.insert_negated(&mut pos, &mut attrs)?;
-        Ok(result)
-    }
-
-    pub fn insert_with<S1, S2, A, V>(
-        &mut self,
-        index: usize,
-        chunk: S1,
-        attrs: A,
-    ) -> crate::Result<()>
-    where
-        S1: AsRef<str>,
-        S2: Into<String>,
-        V: Into<Value>,
-        A: IntoIterator<Item = (S2, V)>,
-    {
-        let chunk = chunk.as_ref();
-        if chunk.is_empty() {
-            return Ok(());
-        }
-        let attrs: Attrs = attrs
-            .into_iter()
-            .map(|(k, v)| (k.into(), v.into()))
-            .collect();
-        self.insert_with_internal(index, StringPrelim::new(chunk), attrs)
-    }
-
-    pub fn insert_embed<V>(&mut self, index: usize, value: V) -> crate::Result<V::Return>
-    where
-        V: Prelim,
-    {
-        let mut pos = BlockPosition::seek(self.tx, self.block.start().copied(), index)?;
-        self.insert_at(&mut pos, value)
-    }
-
-    pub fn insert_embed_with<S, A, P, V2>(
-        &mut self,
-        index: usize,
-        value: P,
-        attrs: A,
-    ) -> crate::Result<P::Return>
-    where
-        S: Into<String>,
-        P: Prelim,
-        V2: Into<Value>,
-        A: IntoIterator<Item = (S, V2)>,
-    {
-        let attrs: Attrs = attrs
-            .into_iter()
-            .map(|(k, v)| (k.into(), v.into()))
-            .collect();
-        self.insert_with_internal(index, value, attrs)
-    }
-
-    pub fn push<S>(&mut self, chunk: S) -> crate::Result<()>
-    where
-        S: AsRef<str>,
-    {
-        let len = self.len();
-        self.insert(len, chunk)
     }
 
     fn remove_at(&mut self, pos: &mut BlockPosition, len: usize) -> crate::Result<()> {
@@ -379,11 +266,184 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
         Ok(())
     }
 
+    pub fn insert<S>(&mut self, index: usize, chunk: S) -> crate::Result<()>
+    where
+        S: AsRef<str>,
+    {
+        let chunk = chunk.as_ref();
+        if chunk.is_empty() {
+            return Ok(());
+        }
+
+        let value = StringPrelim::new(chunk);
+        let mut pos = BlockPosition::seek(self.tx, self.block.start().copied(), index)?;
+        self.insert_at(&mut pos, value, None)
+    }
+
+    fn insert_attributes(
+        &mut self,
+        pos: &mut BlockPosition,
+        attrs: Box<Attrs>,
+    ) -> crate::Result<Attrs> {
+        let mut negated = Attrs::new();
+        for (name, value) in attrs.into_iter() {
+            if let Some(curr_value) = pos.attrs.get(&name)
+                && curr_value == &value
+            {
+                continue; // skip over
+            }
+
+            let fmt = FormatAttribute::compose(&name, &value)?;
+            negated.insert(name, value);
+
+            // insert attribute
+            self.insert_internal(pos, fmt)?;
+        }
+
+        Ok(negated)
+    }
+
+    fn insert_negated(&mut self, pos: &mut BlockPosition, mut attrs: Attrs) -> crate::Result<()> {
+        // first cleanup the attributes that were already ended
+        {
+            let db = self.tx.db.get();
+            let blocks = db.blocks();
+            let contents = db.contents();
+            let mut cursor = blocks.cursor()?;
+
+            while let Some(right_id) = pos.right {
+                let block = cursor.seek(right_id)?;
+                if block.is_deleted() {
+                    forward(pos, &mut cursor, &contents)?;
+                    continue;
+                }
+                if block.content_type() == ContentType::Format {
+                    let content = get_content(&block, &contents)?;
+                    let fmt = content.as_format()?;
+                    let key = fmt.key();
+                    if let Some(curr_value) = attrs.get(key)
+                        && curr_value == &fmt.value()?
+                    {
+                        attrs.remove(key);
+                        forward(pos, &mut cursor, &contents)?;
+                        continue;
+                    }
+                }
+                break;
+            }
+        }
+
+        // second add remaining attributes
+        let node_id = *self.node_id();
+        for (key, value) in attrs.iter() {
+            let fmt = FormatPrelim::new(key, value);
+            // Integrate the block in an inner scope so the db/blocks/state borrows
+            // are released before we hand `self.tx` to `fmt.integrate` below.
+            let mut insert = {
+                let db = self.tx.db.get();
+                let blocks = db.blocks();
+                let state = self.tx.state.get_or_init(db);
+                let id = state.next_id(1.into());
+                let left = pos.left.as_ref();
+                let right = pos.right.as_ref();
+                let mut insert = InsertBlockData::new(
+                    id,
+                    1.into(),
+                    left,
+                    right,
+                    left,
+                    right,
+                    Node::Nested(node_id),
+                    None,
+                );
+                fmt.prepare(&mut insert)?;
+                let mut ctx = IntegrationContext::create(&mut insert, Clock::new(0), &blocks)?;
+                insert.integrate(&db, state, &mut ctx)?;
+                pos.left = Some(insert.block.last_id());
+                self.block = ctx.parent.unwrap();
+                insert
+            };
+            fmt.integrate(&mut insert, self.tx)?;
+
+            // Re-acquire borrows for the forward step.
+            let db = self.tx.db.get();
+            let blocks = db.blocks();
+            let contents = db.contents();
+            let mut cursor = blocks.cursor()?;
+            forward(pos, &mut cursor, &contents)?;
+        }
+        Ok(())
+    }
+
+    pub fn insert_with<S1, S2, A, V>(
+        &mut self,
+        index: usize,
+        chunk: S1,
+        attrs: A,
+    ) -> crate::Result<()>
+    where
+        S1: AsRef<str>,
+        S2: Into<String>,
+        V: Into<Value>,
+        A: IntoIterator<Item = (S2, V)>,
+    {
+        let chunk = chunk.as_ref();
+        if chunk.is_empty() {
+            return Ok(());
+        }
+        let attrs: Attrs = attrs
+            .into_iter()
+            .map(|(k, v)| (k.into(), v.into()))
+            .collect();
+        let mut pos = BlockPosition::seek(&self.tx, self.block.start().copied(), index)?;
+        self.insert_at(
+            &mut pos,
+            StringPrelim::new(chunk.as_ref()),
+            Some(Box::new(attrs)),
+        )
+    }
+
+    pub fn insert_embed<V>(&mut self, index: usize, value: V) -> crate::Result<V::Return>
+    where
+        V: Prelim,
+    {
+        let mut pos = BlockPosition::seek(self.tx, self.block.start().copied(), index)?;
+        self.insert_at(&mut pos, value, None)
+    }
+
+    pub fn insert_embed_with<S, A, P, V2>(
+        &mut self,
+        index: usize,
+        value: P,
+        attrs: A,
+    ) -> crate::Result<P::Return>
+    where
+        S: Into<String>,
+        P: Prelim,
+        V2: Into<Value>,
+        A: IntoIterator<Item = (S, V2)>,
+    {
+        let attrs: Attrs = attrs
+            .into_iter()
+            .map(|(k, v)| (k.into(), v.into()))
+            .collect();
+        let mut pos = BlockPosition::seek(self.tx, self.block.start().copied(), index)?;
+        self.insert_at(&mut pos, value, Some(Box::new(attrs)))
+    }
+
+    pub fn push<S>(&mut self, chunk: S) -> crate::Result<()>
+    where
+        S: AsRef<str>,
+    {
+        let len = self.len();
+        self.insert(len, chunk)
+    }
+
     pub fn remove_range<R>(&mut self, range: R) -> crate::Result<()>
     where
         R: RangeBounds<usize>,
     {
-        let mut start = match range.start_bound() {
+        let start = match range.start_bound() {
             Bound::Included(&index) => index,
             Bound::Excluded(&index) => index + 1,
             Bound::Unbounded => 0,
@@ -403,80 +463,58 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
         Ok(())
     }
 
-    pub fn format<A, S, V>(&mut self, _start: usize, _end: usize, _attrs: A) -> crate::Result<()>
+    pub fn format<A, S, V, R>(&mut self, range: R, attrs: A) -> crate::Result<()>
     where
-        S: AsRef<str>,
-        V: Serialize,
         A: IntoIterator<Item = (S, V)>,
+        S: Into<String>,
+        V: Into<Value>,
+        R: RangeBounds<usize>,
     {
-        /*
+        let attrs: Attrs = attrs
+            .into_iter()
+            .map(|(k, v)| (k.into(), v.into()))
+            .collect();
 
-        minimize_attr_changes(pos, &attrs);
-        let mut negated_attrs = insert_attributes(this, txn, pos, attrs.clone()); //TODO: remove `attrs.clone()`
-        let encoding = txn.doc().get_ref().offset_kind();
-        // iterate until first non-format or null is found
-        // delete all formats with attributes[format.key] != null
-        // also check the attributes after the first non-format as we do not want to insert redundant
-        // negated attributes there
-        while let Some(right) = pos.right {
-            if !(len > 0 || (!negated_attrs.is_empty() && is_valid_target(right))) {
-                break;
-            }
-
-            if !right.is_deleted() {
-                let (mut doc, state) = txn.split_mut();
-                let doc = &mut *doc;
-                match &right.content {
-                    ItemContent::Format(key, value) => {
-                        if let Some(v) = attrs.get(key) {
-                            if v == value.as_ref() {
-                                negated_attrs.remove(key);
-                            } else {
-                                negated_attrs.insert(key.clone(), *value.clone());
-                            }
-                            state.delete_item(doc, right);
-                        }
-                    }
-                    ItemContent::String(s) => {
-                        let content_len = right.content_len(encoding);
-                        if len < content_len {
-                            // split block
-                            let offset = s.block_offset(len, encoding);
-                            let new_right = doc.blocks.split_block(right, offset, OffsetKind::Utf16);
-                            pos.left = Some(right);
-                            pos.right = new_right;
-                            break;
-                        }
-                        len -= content_len;
-                    }
-                    _ => {
-                        let content_len = right.len();
-                        if len < content_len {
-                            let new_right = doc.blocks.split_block(right, len, OffsetKind::Utf16);
-                            pos.left = Some(right);
-                            pos.right = new_right;
-                            break;
-                        }
-                        len -= content_len;
-                    }
-                }
-            }
-
-            if !pos.forward() {
-                break;
-            }
+        if attrs.is_empty() {
+            return Ok(());
         }
 
-        insert_negated_attributes(this, txn, pos, negated_attrs);
-             */
-        todo!()
+        let start = match range.start_bound() {
+            Bound::Included(&index) => index,
+            Bound::Excluded(&index) => index + 1,
+            Bound::Unbounded => 0,
+        };
+        let end = match range.end_bound() {
+            Bound::Included(&index) => index,
+            Bound::Excluded(&index) => index - 1,
+            Bound::Unbounded => self.block.node_len(),
+        };
+
+        if end < start {
+            return Ok(());
+        }
+
+        let len = end - start + 1;
+
+        let mut pos = BlockPosition::seek(self.tx, self.block.start().copied(), start)?;
+        self.format_at(&mut pos, len, Some(Box::new(attrs)))
     }
 
-    pub fn apply_delta<I>(&mut self, _delta: I) -> crate::Result<()>
+    pub fn apply_delta<I>(&mut self, delta: I) -> crate::Result<()>
     where
         I: IntoIterator<Item = Delta<In>>,
     {
-        todo!()
+        let mut pos = BlockPosition::new(self.block.start().copied());
+        for delta in delta {
+            match delta {
+                Delta::Insert(value, fmt) => {
+                    self.insert_at(&mut pos, value, fmt)?;
+                }
+                Delta::Delete(len) => self.remove_at(&mut pos, len)?,
+                Delta::Retain(len, fmt) => self.format_at(&mut pos, len, fmt)?,
+            }
+        }
+        Ok(())
     }
 }
 
@@ -597,15 +635,15 @@ pub type Attrs = BTreeMap<String, Value>;
 pub enum Delta<T = Out> {
     /// Determines a change that resulted in insertion of a piece of text, which optionally could
     /// have been formatted with provided set of attributes.
-    Inserted(T, Option<Box<Attrs>>),
+    Insert(T, Option<Box<Attrs>>),
 
     /// Determines a change that resulted in removing a consecutive range of characters.
-    Deleted(u32),
+    Delete(usize),
 
     /// Determines a number of consecutive unchanged characters. Used to recognize non-edited spaces
-    /// between [Delta::Inserted] and/or [Delta::Deleted] chunks. Can contain an optional set of
+    /// between [Delta::Insert] and/or [Delta::Delete] chunks. Can contain an optional set of
     /// attributes, which have been used to format an existing piece of text.
-    Retain(u32, Option<Box<Attrs>>),
+    Retain(usize, Option<Box<Attrs>>),
 }
 
 impl<T> Delta<T> {
@@ -614,8 +652,8 @@ impl<T> Delta<T> {
         F: FnOnce(T) -> U,
     {
         match self {
-            Delta::Inserted(value, attrs) => Delta::Inserted(f(value), attrs),
-            Delta::Deleted(len) => Delta::Deleted(len),
+            Delta::Insert(value, attrs) => Delta::Insert(f(value), attrs),
+            Delta::Delete(len) => Delta::Delete(len),
             Delta::Retain(len, attrs) => Delta::Retain(len, attrs),
         }
     }
@@ -662,20 +700,20 @@ impl<'tx> Iterator for Chunks<'tx> {
 }
 
 impl Delta<In> {
-    pub fn retain(len: u32) -> Self {
+    pub fn retain(len: usize) -> Self {
         Delta::Retain(len, None)
     }
 
     pub fn insert<T: Into<In>>(value: T) -> Self {
-        Delta::Inserted(value.into(), None)
+        Delta::Insert(value.into(), None)
     }
 
     pub fn insert_with<T: Into<In>>(value: T, attrs: Attrs) -> Self {
-        Delta::Inserted(value.into(), Some(Box::new(attrs)))
+        Delta::Insert(value.into(), Some(Box::new(attrs)))
     }
 
-    pub fn delete(len: u32) -> Self {
-        Delta::Deleted(len)
+    pub fn delete(len: usize) -> Self {
+        Delta::Delete(len)
     }
 }
 
@@ -775,24 +813,20 @@ impl BlockPosition {
         }
     }
 
-    fn minimize(
-        &mut self,
-        attrs: &Attrs,
-        cursor: &mut BlockCursor,
-        contents: &ContentStore,
-    ) -> crate::Result<()> {
+    fn minimize(&mut self, attrs: &Attrs, cursor: &mut BlockCursor) -> crate::Result<()> {
         // go right while attrs[right.key] === right.value (or right is deleted)
+        let contents = cursor.content_store();
         while let Some(right_id) = self.right {
             let right = cursor.seek(right_id)?;
             if right.is_deleted() {
-                forward(self, cursor, contents)?;
+                forward(self, cursor, &contents)?;
             } else {
                 if right.content_type() == ContentType::Format {
                     let content = get_content(&right, &contents)?;
                     let fmt = content.as_format()?;
                     if let Some(attr_value) = attrs.get(fmt.key()) {
                         if attr_value == &fmt.value()? {
-                            forward(self, cursor, contents)?;
+                            forward(self, cursor, &contents)?;
                             continue;
                         }
                     }
@@ -1375,7 +1409,7 @@ mod test {
             txt1.insert_with(0, "abc", a.clone()).unwrap();
             let uncommitted: Vec<_> = txt1.uncommitted().map(Result::unwrap).collect();
 
-            let expected = vec![Delta::Inserted("abc".into(), Some(Box::new(a.clone())))];
+            let expected = vec![Delta::Insert("abc".into(), Some(Box::new(a.clone())))];
 
             assert_eq!(txt1.to_string(), "abc".to_string());
             assert_eq!(
@@ -1403,7 +1437,7 @@ mod test {
             let mut txt1 = txt.mount_mut(&mut txn).unwrap();
             txt1.remove_range(0..1).unwrap();
             let uncommitted: Vec<_> = txt1.uncommitted().map(Result::unwrap).collect();
-            let expected = vec![Delta::Deleted(1)];
+            let expected = vec![Delta::Delete(1)];
 
             assert_eq!(txt1.to_string(), "bc");
             assert_eq!(
@@ -1432,7 +1466,7 @@ mod test {
             txt1.remove_range(1..2).unwrap();
             let uncommitted: Vec<_> = txt1.uncommitted().map(Result::unwrap).collect();
 
-            let expected = vec![Delta::Retain(1, None), Delta::Deleted(1)];
+            let expected = vec![Delta::Retain(1, None), Delta::Delete(1)];
 
             assert_eq!(txt1.to_string(), "b");
             assert_eq!(
@@ -1462,7 +1496,7 @@ mod test {
             txt1.insert_with(0, "z", a.clone()).unwrap();
             let uncommitted: Vec<_> = txt1.uncommitted().map(Result::unwrap).collect();
 
-            let expected = vec![Delta::Inserted(Out::from("z"), Some(Box::new(a.clone())))];
+            let expected = vec![Delta::Insert(Out::from("z"), Some(Box::new(a.clone())))];
 
             assert_eq!(txt1.to_string(), "zb".to_string());
             assert_eq!(
@@ -1490,7 +1524,7 @@ mod test {
             txt1.insert(0, "y").unwrap();
             let uncommitted: Vec<_> = txt1.uncommitted().map(Result::unwrap).collect();
 
-            let expected = vec![Delta::Inserted("y".into(), None)];
+            let expected = vec![Delta::Insert("y".into(), None)];
 
             assert_eq!(txt1.to_string(), "yzb".to_string());
             assert_eq!(
@@ -1517,7 +1551,7 @@ mod test {
             let mut txn = d1.transact_mut("test").unwrap();
             let mut txt1 = txt.mount_mut(&mut txn).unwrap();
             let b = Attrs::from([("bold".into(), Value::Null)]);
-            txt1.format(0, 2, b.clone()).unwrap();
+            txt1.format(0..2, b.clone()).unwrap();
             let uncommitted: Vec<_> = txt1.uncommitted().map(Result::unwrap).collect();
 
             let expected = vec![Delta::Retain(1, None), Delta::Retain(1, Some(Box::new(b)))];
@@ -1566,9 +1600,9 @@ mod test {
             let uncommitted: Vec<_> = txt1.uncommitted().map(Result::unwrap).collect();
 
             let expected = vec![
-                Delta::Inserted("a".into(), Some(Box::new(a1.clone()))),
-                Delta::Inserted(embed.clone().into(), Some(Box::new(a2.clone()))),
-                Delta::Inserted("b".into(), Some(Box::new(a1.clone()))),
+                Delta::Insert("a".into(), Some(Box::new(a1.clone()))),
+                Delta::Insert(embed.clone().into(), Some(Box::new(a2.clone()))),
+                Delta::Insert("b".into(), Some(Box::new(a1.clone()))),
             ];
             assert_eq!(uncommitted, expected);
             t1.commit(None).unwrap();
@@ -1624,7 +1658,7 @@ mod test {
 
         let mut t1 = d1.transact_mut("test").unwrap();
         let mut txt1 = txt.mount_mut(&mut t1).unwrap();
-        txt1.format(1, 2, attrs.clone()).unwrap();
+        txt1.format(1..3, attrs.clone()).unwrap();
 
         let uncommitted: Vec<_> = txt1.uncommitted().map(Result::unwrap).collect();
         let expected = vec![
@@ -1764,7 +1798,7 @@ mod test {
 
         let start = "👯".len();
         let end = start + "🙇‍♀️🙇‍♀️".len();
-        txt.format(start, end, Attrs::default()).unwrap();
+        txt.format(start..end, Attrs::default()).unwrap();
         let start = "👯🙇‍♀️🙇‍♀️".len();
         let end = start + "⏰".len();
         txt.remove_range(start..end).unwrap(); // will delete ⏰ and 👩‍❤️‍💋‍👨
@@ -1786,7 +1820,7 @@ mod test {
         txt.insert(0, "👯").unwrap();
         let start = "👯".len();
         let end = start + "🙇‍♀️🙇‍♀️".len();
-        txt.format(start, end, Attrs::default()).unwrap();
+        txt.format(start..end, Attrs::default()).unwrap();
 
         // will delete ⏰ and 👩‍❤️‍💋‍👨
         let start = "👯🙇‍♀️🙇‍♀️".len();
@@ -1810,11 +1844,11 @@ mod test {
         txt.insert(0, "👯").unwrap();
         let start = "👯".len();
         let end = start + "❤️❤️🙇‍♀️🙇‍♀️⏰".len();
-        txt.format(start, end, Attrs::new()).unwrap();
+        txt.format(start..end, Attrs::new()).unwrap();
         txt.insert("👯❤️❤️🙇‍♀️🙇‍♀️⏰".len(), "⏰").unwrap();
         let start = "👯❤️❤️🙇‍♀️🙇‍♀️⏰⏰".len();
         let end = start + "👩‍❤️‍💋‍👨".len();
-        txt.format(start, end, Attrs::new()).unwrap();
+        txt.format(start..end, Attrs::new()).unwrap();
         let start = "👯❤️❤️🙇‍♀️🙇‍♀️⏰⏰👩‍❤️‍💋‍👩".len();
         let end = start + "👩‍❤️‍💋‍👨".len();
         txt.remove_range(start..end).unwrap();
@@ -1917,7 +1951,7 @@ mod test {
         let italic = Attrs::from_iter([("i".into(), true.into())]);
 
         text.insert_with(0, "hello world", italic.clone()).unwrap(); // "<i>hello world</i>"
-        text.format(6, 11, bold.clone()).unwrap(); // "<i>hello <b>world</b></i>"
+        text.format(6..11, bold.clone()).unwrap(); // "<i>hello <b>world</b></i>"
         let image = vec![0, 0, 0, 0];
         text.insert_embed(5, Value::from(image.clone())).unwrap(); // insert binary after "hello"
         let array = text.insert_embed(5, ListPrelim::default()).unwrap(); // insert array ref after "hello"
@@ -2104,7 +2138,7 @@ mod test {
 
         let delta = vec![
             Delta::insert("a"),
-            Delta::Inserted(
+            Delta::Insert(
                 "".into(),
                 Some(Box::new(Attrs::from([("bold".into(), true.into())]))),
             ),
