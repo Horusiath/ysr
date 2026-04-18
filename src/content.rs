@@ -216,7 +216,7 @@ impl<'a> Content<'a> {
     where
         T: DeserializeOwned,
     {
-        if self.content_type != ContentType::Json {
+        if self.content_type != ContentType::Atom {
             return Err(crate::Error::InvalidMapping("atom"));
         }
         let atom: T = lib0::from_slice(self.data.as_ref())?;

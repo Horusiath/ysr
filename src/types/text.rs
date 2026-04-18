@@ -2,7 +2,7 @@ use crate::block::{ID, InsertBlockData};
 use crate::content::{Content, ContentType, FormatAttribute};
 use crate::integrate::IntegrationContext;
 use crate::lib0::Value;
-use crate::node::{Node, NodeType};
+use crate::node::{Node, NodeID, NodeType};
 use crate::prelim::Prelim;
 use crate::state_vector::Snapshot;
 use crate::store::Db;
@@ -46,12 +46,18 @@ impl<'db, 'tx: 'db> TextRef<&'tx Transaction<'db>> {
 
     /// Returns an iterator over all text and embedded chunks grouped by their applied attributes,
     /// scoped between two provided snapshots.
-    pub fn chunks_between(
+    pub fn chunks_between<'a>(
         &self,
-        from: Option<&Snapshot>,
-        to: Option<&Snapshot>,
-    ) -> Chunks<'db, 'tx> {
-        Chunks::new(self, from, to)
+        from: Option<&'a Snapshot>,
+        to: Option<&'a Snapshot>,
+    ) -> Chunks<'a, 'tx> {
+        let tx = self
+            .tx
+            .read_context()
+            .expect("todo: handle errors in chunk iterator creation");
+        let start = self.block.start().copied();
+
+        Chunks::new(tx, start, from, to)
     }
 }
 
@@ -545,25 +551,149 @@ impl<'db, 'tx> Iterator for Uncommitted<'db, 'tx> {
     }
 }
 
-pub struct Chunks<'db, 'tx> {
-    tx: &'tx mut Transaction<'db>,
+pub struct Chunks<'a, 'tx> {
+    tx: TxScope<'tx>,
+    current: Option<ID>,
+    from: Option<&'a Snapshot>,
+    to: Option<&'a Snapshot>,
+
+    buf: String,
+    current_attrs: Option<Box<Attrs>>,
+    pending: Option<Chunk>,
 }
 
-impl<'db, 'tx> Chunks<'db, 'tx> {
+impl<'a, 'tx> Chunks<'a, 'tx> {
     fn new(
-        text: &TextRef<&'tx Transaction<'db>>,
-        from: Option<&Snapshot>,
-        to: Option<&Snapshot>,
+        tx: TxScope<'tx>,
+        start: Option<ID>,
+        from: Option<&'a Snapshot>,
+        to: Option<&'a Snapshot>,
     ) -> Self {
-        todo!()
+        Chunks {
+            tx,
+            current: start,
+            from,
+            to,
+            buf: String::new(),
+            current_attrs: None,
+            pending: None,
+        }
+    }
+
+    fn pack_str(&mut self) -> Option<Chunk> {
+        if !self.buf.is_empty() {
+            let attributes = self.current_attrs.take();
+            let mut buf = std::mem::replace(&mut self.buf, String::new());
+            buf.shrink_to_fit();
+            Some(Chunk {
+                insert: Out::Value(buf.into()),
+                attributes,
+                id: None,
+            })
+        } else {
+            None
+        }
+    }
+
+    fn seen(snapshot: Option<&Snapshot>, block: &Block<'_>) -> bool {
+        if let Some(s) = snapshot {
+            s.is_visible(block.id())
+        } else {
+            !block.is_deleted()
+        }
+    }
+
+    fn update_attrs(&mut self, key: &str, value: lib0::Value) {
+        let attrs = self.current_attrs.get_or_insert_default();
+        if value.is_null() {
+            attrs.remove(key);
+        } else {
+            attrs.insert(key.to_string(), value);
+        }
+    }
+
+    fn stash_or_return(&mut self, out: Out) -> Chunk {
+        if let Some(chunk) = self.pack_str() {
+            // There was already a string chunk that we were collecting, we need to
+            // emit it first. Therefore, we store this chunk for the next method call
+            self.pending = Some(Chunk {
+                insert: out,
+                attributes: self.current_attrs.clone(),
+                id: None,
+            });
+            chunk
+        } else {
+            Chunk {
+                insert: out,
+                attributes: self.current_attrs.clone(),
+                id: None,
+            }
+        }
+    }
+
+    fn move_next(&mut self) -> crate::Result<Option<Chunk>> {
+        if let Some(chunk) = self.pending.take() {
+            // in some cases like `stash_or_return` we might get 2 chunks to emit, but this method
+            // only emits one at the time, so we might have a pending chunk from the previous step
+            return Ok(Some(chunk));
+        }
+
+        while let Some(id) = self.current.take() {
+            let block = self.tx.cursor.seek(id)?;
+            self.current = block.right().copied();
+
+            // check if block is within the bounds we're looking after
+            if Self::seen(self.to, &block) && (self.from.is_none() || Self::seen(self.from, &block))
+            {
+                match block.content_type() {
+                    ContentType::String => {
+                        let contents = self.tx.db.contents();
+                        let content = get_content(&block, &contents)?;
+                        let str = content.as_str()?;
+                        self.buf.push_str(str);
+                    }
+                    ContentType::Embed => {
+                        let contents = self.tx.db.contents();
+                        let content = get_content(&block, &contents)?;
+                        let out: Out = Out::Value(content.as_atom()?);
+                        return Ok(Some(self.stash_or_return(out)));
+                    }
+                    ContentType::Node => {
+                        let out: Out = Out::Node(*block.id());
+                        return Ok(Some(self.stash_or_return(out)));
+                    }
+                    ContentType::Format => {
+                        if Self::seen(self.to, &block) {
+                            let chunk = self.pack_str();
+                            let contents = self.tx.db.contents();
+                            let content = get_content(&block, &contents)?;
+                            let fmt = content.as_format()?;
+                            self.update_attrs(fmt.key(), fmt.value()?);
+
+                            if let Some(chunk) = chunk {
+                                return Ok(Some(chunk));
+                            }
+                        }
+                    }
+                    _ => { /* ignore */ }
+                }
+            }
+        }
+
+        // this is always (potentially) the last block
+        Ok(self.pack_str())
     }
 }
 
-impl<'db, 'tx> Iterator for Chunks<'db, 'tx> {
+impl<'a, 'tx> Iterator for Chunks<'a, 'tx> {
     type Item = crate::Result<Chunk>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        todo!()
+        match self.move_next() {
+            Ok(Some(chunk)) => Some(Ok(chunk)),
+            Ok(None) => None,
+            Err(err) => Some(Err(err)),
+        }
     }
 }
 
