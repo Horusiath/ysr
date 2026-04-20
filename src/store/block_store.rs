@@ -329,11 +329,15 @@ impl<'tx> BlockCursor<'tx> {
             Err(e) => return Err(e.into()),
         };
 
-        if let Some(block) = self.current().optional()? {
+        if let Some(block) = self.current().optional()?
+            && block.is_deleted()
+        {
             ds.insert(*block.id(), block.clock_len());
         }
         while let Some(block) = self.next()? {
-            ds.insert(*block.id(), block.clock_len());
+            if block.is_deleted() {
+                ds.insert(*block.id(), block.clock_len());
+            }
         }
         ds.squash();
         Ok(ds)
