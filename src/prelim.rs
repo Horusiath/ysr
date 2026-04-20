@@ -67,7 +67,7 @@ impl Prelim for DeltaPrelim {
     fn prepare(&self) -> crate::Result<Prepare> {
         match &self.0 {
             In::Value(Value::String(str)) => Ok(Prepare::Values(smallvec![Content::string(str)])),
-            In::Value(value) => value.prepare(),
+            In::Value(value) => Ok(Prepare::Values(smallvec![Content::embed(value)?])),
             In::List(prelim) => prelim.prepare(),
             In::Map(prelim) => prelim.prepare(),
         }

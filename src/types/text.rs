@@ -385,11 +385,13 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
         for delta in delta {
             match delta {
                 Delta::Insert(value, fmt) => {
-                    Self::insert_at(&mut tx, &mut pos, DeltaPrelim(value), fmt)
+                    if !value.is_empty() {
+                        Self::insert_at(&mut tx, &mut pos, DeltaPrelim(value), fmt)?;
+                    }
                 }
-                Delta::Delete(len) => Self::remove_at(&mut tx, &mut pos, len),
-                Delta::Retain(len, fmt) => Self::format_at(&mut tx, &mut pos, len, fmt),
-            }?;
+                Delta::Delete(len) => Self::remove_at(&mut tx, &mut pos, len)?,
+                Delta::Retain(len, fmt) => Self::format_at(&mut tx, &mut pos, len, fmt)?,
+            }
         }
         Ok(())
     }
@@ -537,9 +539,9 @@ impl<'a, 'tx> Chunks<'a, 'tx> {
 
     fn pack_str(&mut self) -> Option<Chunk> {
         if !self.buf.is_empty() {
-            let attributes = match self.current_attrs.take() {
+            let attributes = match &self.current_attrs {
                 Some(attrs) if attrs.is_empty() => None,
-                other => other,
+                other => other.clone(),
             };
             let mut buf = std::mem::replace(&mut self.buf, String::new());
             buf.shrink_to_fit();
@@ -617,7 +619,7 @@ impl<'a, 'tx> Chunks<'a, 'tx> {
                     ContentType::Embed => {
                         let contents = self.tx.db.contents();
                         let content = get_content(&block, &contents)?;
-                        let out: Out = Out::Value(content.as_atom()?);
+                        let out: Out = Out::Value(content.as_embed()?);
                         return Ok(Some(self.stash_or_return(out)));
                     }
                     ContentType::Node => {
@@ -1959,10 +1961,10 @@ mod test {
         let mut text = txt.mount_mut(&mut txn).unwrap();
 
         text.insert(0, "hello").unwrap();
-        let prev = txn.snapshot_committed().unwrap();
+        let prev = txn.snapshot_uncommitted().unwrap();
         let mut text = txt.mount_mut(&mut txn).unwrap();
         text.insert(5, " world").unwrap();
-        let next = txn.snapshot_committed().unwrap();
+        let next = txn.snapshot_uncommitted().unwrap();
         let text = txt.mount(&txn).unwrap();
         let diff: Vec<_> = text
             .chunks_between(Some(&next), Some(&prev))
@@ -2108,12 +2110,12 @@ mod test {
 
         let mut txt = root.mount_mut(&mut txn).unwrap();
         txt.apply_delta([Delta::insert("abcd")]).unwrap();
-        let snapshot1 = txn.snapshot_committed().unwrap(); // 'abcd'
+        let snapshot1 = txn.snapshot_uncommitted().unwrap(); // 'abcd'
 
         let mut txt = root.mount_mut(&mut txn).unwrap();
         txt.apply_delta([Delta::retain(1), Delta::insert("x"), Delta::delete(1)])
             .unwrap();
-        let snapshot2 = txn.snapshot_committed().unwrap(); // 'axcd'
+        let snapshot2 = txn.snapshot_uncommitted().unwrap(); // 'axcd'
 
         let mut txt = root.mount_mut(&mut txn).unwrap();
         txt.apply_delta([
@@ -2157,7 +2159,7 @@ mod test {
         let mut txt = root.mount_mut(&mut txn).unwrap();
 
         txt.apply_delta([Delta::insert("abcd")]).unwrap();
-        let snapshot1 = txn.snapshot_committed().unwrap();
+        let snapshot1 = txn.snapshot_uncommitted().unwrap();
         let mut txt = root.mount_mut(&mut txn).unwrap();
         txt.apply_delta([Delta::retain(4), Delta::insert("e")])
             .unwrap();
