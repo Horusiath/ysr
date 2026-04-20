@@ -1,15 +1,13 @@
 use crate::block::{BlockMut, ID, InsertBlockData};
-use crate::content::ContentType;
 use crate::de::Materialize;
-use crate::integrate::IntegrationContext;
 use crate::lmdb::Database;
 use crate::node::{Node, NodeID, NodeType};
 use crate::prelim::Prelim;
 use crate::store::map_entries::{MapEntries, MapKey};
 use crate::store::{Db, MapEntriesStore};
-use crate::transaction::{TxMutScope, TxScope};
+use crate::transaction::TxMutScope;
 use crate::types::Capability;
-use crate::{Clock, Error, In, Mounted, Optional, Transaction, Unmounted, lib0};
+use crate::{Clock, Error, In, Mounted, Optional, Prepare, Transaction, Unmounted, lib0};
 use std::collections::{BTreeMap, HashMap};
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
@@ -117,24 +115,9 @@ impl<'tx, 'db> MapRef<&'tx mut Transaction<'db>> {
         value: V,
     ) -> crate::Result<()> {
         let node_id = parent.id();
-        let id = tx.state.next_id(value.clock_len());
         let map_entries = tx.db.map_entries();
         let left_id = map_entries.get(node_id, key)?;
-        let mut insert = InsertBlockData::new(
-            id,
-            Clock::new(1),
-            left_id,
-            None,
-            left_id,
-            None,
-            Node::Nested(*node_id),
-            Some(key),
-        );
-        value.prepare(&mut insert)?;
-        let mut ctx = IntegrationContext::create(&mut insert, Clock::new(0), &mut tx.cursor)?;
-        insert.integrate(tx, &mut ctx)?;
-        value.integrate(&mut insert, tx)?;
-        *parent = ctx.parent.unwrap();
+        InsertBlockData::insert_block(tx, parent, left_id, None, Some(key), value)?;
         Ok(())
     }
 
@@ -290,7 +273,6 @@ impl<'db> Iter<'db> {
 #[repr(transparent)]
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct MapPrelim(BTreeMap<String, In>);
-
 impl Prelim for MapPrelim {
     type Return = Unmounted<Map>;
 
@@ -299,29 +281,23 @@ impl Prelim for MapPrelim {
         Clock::new(1) // the map object itself is 1 element
     }
 
-    fn prepare(&self, insert: &mut InsertBlockData) -> crate::Result<()> {
-        let block = insert.as_block_mut();
-        block.set_content_type(ContentType::Node);
-        block.set_node_type(NodeType::Map);
-        Ok(())
+    fn prepare(&self) -> crate::Result<Prepare> {
+        Ok(Prepare::Node(NodeType::Map))
     }
 
     fn integrate<'tx>(
         self,
-        insert: &mut InsertBlockData,
+        parent: &mut BlockMut,
         tx: &mut TxMutScope<'tx>,
     ) -> crate::Result<Self::Return> {
-        let unmounted: Unmounted<Map> = Unmounted::nested(*insert.block.id());
         if !self.0.is_empty() {
-            let block = insert.as_block_mut();
             for (key, value) in self.0 {
-                MapRef::insert_internal(block, tx, &key, value)?;
+                MapRef::insert_internal(parent, tx, &key, value)?;
             }
         }
-        Ok(unmounted)
+        Ok(Unmounted::new(Node::from(*parent.id())))
     }
 }
-
 impl Deref for MapPrelim {
     type Target = BTreeMap<String, In>;
 
@@ -330,20 +306,17 @@ impl Deref for MapPrelim {
         &self.0
     }
 }
-
 impl DerefMut for MapPrelim {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }
 }
-
 impl From<BTreeMap<String, In>> for MapPrelim {
     fn from(value: BTreeMap<String, In>) -> Self {
         MapPrelim(value)
     }
 }
-
 impl FromIterator<(String, In)> for MapPrelim {
     fn from_iter<T: IntoIterator<Item = (String, In)>>(iter: T) -> Self {
         MapPrelim(iter.into_iter().collect())

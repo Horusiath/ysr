@@ -1,20 +1,21 @@
 use crate::block::{ID, InsertBlockData};
 use crate::content::{Content, ContentType, FormatAttribute};
-use crate::integrate::IntegrationContext;
 use crate::lib0::Value;
-use crate::node::{Node, NodeID, NodeType};
-use crate::prelim::Prelim;
+use crate::node::NodeType;
+use crate::prelim::{DeltaPrelim, Prelim, StringPrelim};
 use crate::state_vector::Snapshot;
 use crate::store::Db;
 use crate::store::block_store::{BlockCursor, SplitResult};
 use crate::store::content_store::ContentStore;
 use crate::transaction::{TxMutScope, TxScope};
 use crate::types::Capability;
-use crate::{Block, BlockHeader, BlockMut, Clock, In, Mounted, Out, Transaction, lib0};
+use crate::{Block, BlockMut, Clock, In, Mounted, Out, Prepare, Transaction, lib0};
 use serde::Serialize;
+use smallvec::smallvec;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, Bound};
 use std::fmt::{Display, Formatter};
+use std::marker::PhantomData;
 use std::ops::{Deref, RangeBounds};
 
 pub type TextRef<Txn> = Mounted<Text, Txn>;
@@ -36,7 +37,7 @@ impl<'db, 'tx: 'db> TextRef<&'tx Transaction<'db>> {
     /// Returns an iterator over uncommitted changes (deltas) made to this text type
     /// within its current transaction scope.
     pub fn uncommitted(&self) -> Uncommitted<'db, 'tx> {
-        Uncommitted::new(self)
+        Uncommitted::new(self.block.as_block(), todo!())
     }
 
     /// Returns an iterator over all text and embedded chunks grouped by their applied attributes.
@@ -117,7 +118,6 @@ impl<'tx, 'db> Display for TextRef<&'tx Transaction<'db>> {
         Ok(())
     }
 }
-
 impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
     fn insert_at<P>(
         tx: &mut TxMutScope<'_>,
@@ -384,11 +384,11 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
         for delta in delta {
             match delta {
                 Delta::Insert(value, fmt) => {
-                    Self::insert_at(&mut tx, &mut pos, value, fmt)?;
+                    Self::insert_at(&mut tx, &mut pos, DeltaPrelim(value), fmt)
                 }
-                Delta::Delete(len) => Self::remove_at(&mut tx, &mut pos, len)?,
-                Delta::Retain(len, fmt) => Self::format_at(&mut tx, &mut pos, len, fmt)?,
-            }
+                Delta::Delete(len) => Self::remove_at(&mut tx, &mut pos, len),
+                Delta::Retain(len, fmt) => Self::format_at(&mut tx, &mut pos, len, fmt),
+            }?;
         }
         Ok(())
     }
@@ -439,65 +439,18 @@ where
         Clock::new(1)
     }
 
-    fn prepare(&self, insert: &mut InsertBlockData) -> crate::Result<()> {
-        let block = insert.as_block_mut();
-        block.set_content_type(ContentType::Format);
-        Ok(())
+    fn prepare(&self) -> crate::Result<Prepare> {
+        Ok(Prepare::Values(smallvec![Content::format(
+            self.key,
+            &self.value
+        )?]))
     }
 
     fn integrate<'tx>(
         self,
-        insert: &mut InsertBlockData,
+        parent: &mut BlockMut,
         tx: &mut TxMutScope<'tx>,
     ) -> crate::Result<Self::Return> {
-        let data = FormatAttribute::compose(self.key, &lib0::to_vec(&self.value)?)?;
-        if data.len() > BlockHeader::INLINE_CONTENT_LEN {
-            let contents = tx.db.contents();
-            contents.insert(*insert.block.id(), &data)?;
-        }
-        Ok(())
-    }
-}
-
-#[repr(transparent)]
-struct StringPrelim<'a> {
-    data: &'a str,
-}
-
-impl<'a> StringPrelim<'a> {
-    fn new(data: &'a str) -> Self {
-        StringPrelim { data }
-    }
-
-    fn can_inline(&self) -> bool {
-        self.data.len() <= BlockHeader::INLINE_CONTENT_LEN
-    }
-}
-
-impl<'a> Prelim for StringPrelim<'a> {
-    type Return = ();
-
-    fn clock_len(&self) -> Clock {
-        let utf16_len = self.data.encode_utf16().count();
-        Clock::new(utf16_len as u32)
-    }
-
-    fn prepare(&self, insert: &mut InsertBlockData) -> crate::Result<()> {
-        let block = insert.as_block_mut();
-        block.set_content_type(ContentType::String);
-        block.set_inline_content(&Content::str(&self.data));
-        Ok(())
-    }
-
-    fn integrate<'tx>(
-        self,
-        insert: &mut InsertBlockData,
-        tx: &mut TxMutScope<'tx>,
-    ) -> crate::Result<Self::Return> {
-        if !self.can_inline() {
-            let contents = tx.db.contents();
-            contents.insert(*insert.block.id(), self.data.as_bytes())?;
-        }
         Ok(())
     }
 }
@@ -533,12 +486,13 @@ impl<T> Delta<T> {
     }
 }
 
-pub struct Uncommitted<'db, 'tx> {
-    tx: &'tx mut Transaction<'db>,
+pub struct Uncommitted<'a, 'tx> {
+    _a: PhantomData<&'a ()>,
+    _b: PhantomData<&'tx ()>,
 }
 
-impl<'db, 'tx> Uncommitted<'tx, 'db> {
-    fn new(text: &TextRef<&'tx Transaction<'db>>) -> Self {
+impl<'a, 'tx> Uncommitted<'a, 'tx> {
+    fn new(block: Block<'tx>, tx: TxMutScope<'tx>) -> Self {
         todo!()
     }
 }
@@ -819,28 +773,12 @@ impl<'a> BlockPosition<'a> {
         tx: &mut TxMutScope<'tx>,
         value: P,
     ) -> crate::Result<P::Return> {
-        let node_id = *self.parent.id();
-
-        let id = tx.state.next_id(value.clock_len());
         let left = self.left.as_ref();
         let right = self.right.as_ref();
-        let mut insert = InsertBlockData::new(
-            id,
-            value.clock_len(),
-            left,
-            right,
-            left,
-            right,
-            Node::Nested(node_id),
-            None,
-        );
-        value.prepare(&mut insert)?;
-        let mut ctx = IntegrationContext::create(&mut insert, Clock::new(0), &mut tx.cursor)?;
-        insert.integrate(tx, &mut ctx)?;
-        let result = value.integrate(&mut insert, tx)?;
-        self.left = Some(insert.block.last_id());
-        *self.parent = ctx.parent.unwrap();
 
+        let (block, result) =
+            InsertBlockData::insert_block(tx, &mut self.parent, left, right, None, value)?;
+        self.left = Some(block.last_id());
         Ok(result)
     }
 
@@ -922,34 +860,17 @@ impl<'a> BlockPosition<'a> {
         }
 
         // second add remaining attributes
-        let node_id = *self.parent.id();
         for (key, value) in attrs.iter() {
             let fmt = FormatPrelim::new(key, value);
-            // Integrate the block in an inner scope so the db/blocks/state borrows
-            // are released before we hand `self.tx` to `fmt.integrate` below.
-            let mut insert = {
-                let id = tx.state.next_id(1.into());
-                let left = self.left.as_ref();
-                let right = self.right.as_ref();
-                let mut insert = InsertBlockData::new(
-                    id,
-                    1.into(),
-                    left,
-                    right,
-                    left,
-                    right,
-                    Node::Nested(node_id),
-                    None,
-                );
-                fmt.prepare(&mut insert)?;
-                let mut ctx =
-                    IntegrationContext::create(&mut insert, Clock::new(0), &mut tx.cursor)?;
-                insert.integrate(tx, &mut ctx)?;
-                self.left = Some(insert.block.last_id());
-                *self.parent = ctx.parent.unwrap();
-                insert
-            };
-            fmt.integrate(&mut insert, tx)?;
+            let (block, _) = InsertBlockData::insert_block(
+                tx,
+                &mut self.parent,
+                self.left.as_ref(),
+                self.right.as_ref(),
+                None,
+                fmt,
+            )?;
+            self.left = Some(block.last_id());
 
             // Re-acquire borrows for the forward step.
             forward(self, &mut tx.cursor)?;

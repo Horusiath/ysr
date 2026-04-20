@@ -1,7 +1,5 @@
 use crate::block::InsertBlockData;
-use crate::content::ContentType;
 use crate::de::Materialize;
-use crate::integrate::IntegrationContext;
 use crate::lib0::Value;
 use crate::lmdb::Database;
 use crate::node::{Node, NodeType};
@@ -11,7 +9,7 @@ use crate::store::block_store::SplitResult;
 use crate::transaction::{TxMutScope, TxScope};
 use crate::types::Capability;
 use crate::{
-    BlockMut, Clock, DynRef, ID, In, Mounted, Optional, Out, Transaction, Unmounted, lib0,
+    BlockMut, Clock, DynRef, ID, In, Mounted, Optional, Out, Prepare, Transaction, Unmounted, lib0,
 };
 use std::collections::Bound;
 use std::ops::{Deref, DerefMut, RangeBounds};
@@ -130,17 +128,15 @@ impl<'tx, 'db> ListRef<&'tx mut Transaction<'db>> {
         let start = self.block.start().copied();
         let (left, right) = Self::seek(&mut ctx, start, index)?;
 
-        let node: Node = (*self.block.id()).into();
-        let left = left.as_ref();
-        let right = right.as_ref();
-        let id = ctx.state.next_id(value.clock_len());
-        let mut insert =
-            InsertBlockData::new(id, Clock::new(1), left, right, left, right, node, None);
-        value.prepare(&mut insert)?;
-        let mut i = IntegrationContext::create(&mut insert, Clock::new(0), &mut ctx.cursor)?;
-        insert.integrate(&mut ctx, &mut i)?;
-        value.integrate(&mut insert, &mut ctx)?;
-        self.block = i.parent.unwrap();
+        InsertBlockData::insert_block(
+            &mut ctx,
+            &mut self.block,
+            left.as_ref(),
+            right.as_ref(),
+            None,
+            value,
+        )?;
+
         Ok(())
     }
 
@@ -150,39 +146,30 @@ impl<'tx, 'db> ListRef<&'tx mut Transaction<'db>> {
         I: IntoIterator<Item = T>,
     {
         let mut tx = self.tx.write_context()?;
-        let start = self.block.start().copied();
-        let (mut left, right) = Self::seek(&mut tx, start, index)?;
-
-        for value in values {
-            Self::insert_fragment(&mut self.block, &mut tx, &mut left, right.as_ref(), value)?;
-        }
-
-        Ok(())
+        Self::insert_range_internal(&mut self.block, &mut tx, index, values)
     }
 
-    fn insert_fragment<T: Prelim>(
-        parent: &mut BlockMut,
+    fn insert_range_internal<T, I>(
+        block: &mut BlockMut,
         tx: &mut TxMutScope<'_>,
-        left: &mut Option<ID>,
-        right: Option<&ID>,
-        value: T,
-    ) -> crate::Result<()> {
-        let node: Node = (*parent.id()).into();
-        let l = left.as_ref();
+        index: usize,
+        values: I,
+    ) -> crate::Result<()>
+    where
+        T: Prelim,
+        I: IntoIterator<Item = T>,
+    {
+        let start = block.start().copied();
+        let (mut l, r) = Self::seek(tx, start, index)?;
 
-        let mut id = tx.state.next_id(value.clock_len());
-        let mut insert =
-            InsertBlockData::new(id, Clock::new(1), l, right, l, right, node.clone(), None);
+        for value in values {
+            let (block, _) =
+                InsertBlockData::insert_block(tx, block, l.as_ref(), r.as_ref(), None, value)?;
 
-        // new left ID for the next iteration
-        id.clock += value.clock_len();
-        *left = Some(insert.block.last_id());
+            // new left ID for the next iteration
+            l = Some(block.last_id());
+        }
 
-        value.prepare(&mut insert)?;
-        let mut ctx = IntegrationContext::create(&mut insert, Clock::new(0), &mut tx.cursor)?;
-        insert.integrate(tx, &mut ctx)?;
-        value.integrate(&mut insert, tx)?;
-        *parent = ctx.parent.unwrap();
         Ok(())
     }
 
@@ -400,7 +387,6 @@ where
 #[repr(transparent)]
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ListPrelim(Vec<In>);
-
 impl Prelim for ListPrelim {
     type Return = Unmounted<List>;
 
@@ -409,31 +395,19 @@ impl Prelim for ListPrelim {
         Clock::new(1) // the list object itself is 1 element
     }
 
-    fn prepare(&self, insert: &mut InsertBlockData) -> crate::Result<()> {
-        let block = insert.as_block_mut();
-        block.set_content_type(ContentType::Node);
-        block.set_node_type(NodeType::List);
-        Ok(())
+    fn prepare(&self) -> crate::Result<Prepare> {
+        Ok(Prepare::Node(NodeType::Map))
     }
 
     fn integrate<'tx>(
         self,
-        insert: &mut InsertBlockData,
+        block: &mut BlockMut,
         tx: &mut TxMutScope<'tx>,
     ) -> crate::Result<Self::Return> {
-        let unmounted: Unmounted<List> = Unmounted::nested(*insert.block.id());
-        if !self.0.is_empty() {
-            let parent = insert.as_block_mut();
-            let mut left = None;
-            let right = None;
-            for input in self.0 {
-                ListRef::insert_fragment(parent, tx, &mut left, right, input)?;
-            }
-        }
-        Ok(unmounted)
+        ListRef::insert_range_internal(block, tx, 0, self.0)?;
+        Ok(Unmounted::new(Node::from(*block.id())))
     }
 }
-
 impl Deref for ListPrelim {
     type Target = Vec<In>;
 
@@ -441,13 +415,11 @@ impl Deref for ListPrelim {
         &self.0
     }
 }
-
 impl DerefMut for ListPrelim {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }
 }
-
 impl From<Vec<In>> for ListPrelim {
     fn from(value: Vec<In>) -> Self {
         Self(value)

@@ -1,12 +1,12 @@
 use crate::block_reader::BlockRange;
 use crate::content::{Content, ContentType, utf16_to_utf8};
 use crate::integrate::IntegrationContext;
-use crate::lmdb::Database;
 use crate::node::{Named, Node, NodeID, NodeType};
+use crate::prelim::Prelim;
 use crate::store::Db;
-use crate::transaction::{TransactionState, TxMutScope};
+use crate::transaction::TxMutScope;
 use crate::write::{Encoder, WriteExt};
-use crate::{ClientID, Clock, Optional, U32};
+use crate::{ClientID, Clock, Optional, Prepare, U32};
 use crate::{Error, Result};
 use bitflags::bitflags;
 use bytes::Bytes;
@@ -737,6 +737,46 @@ impl InsertBlockData {
             entry: entry_key.map(|key| Bytes::copy_from_slice(key.as_bytes())),
             content: smallvec![],
         }
+    }
+
+    pub fn insert_block<'tx, P>(
+        tx: &mut TxMutScope<'tx>,
+        parent: &mut BlockMut,
+        left: Option<&ID>,
+        right: Option<&ID>,
+        entry_key: Option<&str>,
+        value: P,
+    ) -> crate::Result<(BlockMut, P::Return)>
+    where
+        P: Prelim,
+    {
+        let node: Node = (*parent.id()).into();
+        let len = value.clock_len();
+        let id = tx.state.next_id(len);
+        let mut block = {
+            let mut insert =
+                InsertBlockData::new(id, len, left, right, left, right, node, entry_key);
+
+            match value.prepare()? {
+                Prepare::Node(node_type) => {
+                    insert.block.set_content_type(ContentType::Node);
+                    insert.block.set_node_type(node_type);
+                }
+                Prepare::Values(values) => {
+                    if let Some(head) = values.first() {
+                        insert.block.set_content_type(head.content_type());
+                    }
+                    insert.content = values
+                }
+            }
+            let mut ctx = IntegrationContext::create(&mut insert, Clock::new(0), &mut tx.cursor)?;
+            insert.integrate(tx, &mut ctx)?;
+            *parent = ctx.parent.unwrap();
+            insert.block
+        };
+
+        let result = value.integrate(&mut block, tx)?;
+        Ok((block, result))
     }
 
     pub fn content(&self) -> &[Content<'_>] {

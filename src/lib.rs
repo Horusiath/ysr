@@ -26,6 +26,7 @@ pub use crate::block::{Block, BlockHeader, BlockMut, ID};
 pub use input::In;
 pub use multi_doc::MultiDoc;
 pub use output::Out;
+pub use prelim::*;
 pub use read::DecoderV1;
 use serde::{Deserialize, Serialize};
 use smallvec::CollectionAllocErr;
