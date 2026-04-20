@@ -926,9 +926,6 @@ impl<'a> BlockPosition<'a> {
                 fmt,
             )?;
             self.left = Some(block.last_id());
-
-            // Re-acquire borrows for the forward step.
-            forward(self, &mut tx.cursor)?;
         }
         Ok(())
     }
