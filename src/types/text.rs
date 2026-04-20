@@ -229,7 +229,7 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
         Ok(())
     }
 
-    pub fn insert<S>(&mut self, index: usize, chunk: S) -> crate::Result<()>
+    pub fn insert<S>(&mut self, utf16_index: usize, chunk: S) -> crate::Result<()>
     where
         S: AsRef<str>,
     {
@@ -240,14 +240,14 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
 
         let mut tx = self.tx.write_context()?;
         let value = StringPrelim::new(chunk);
-        let mut pos = BlockPosition::seek(&mut tx.cursor, &mut self.block, index)?;
+        let mut pos = BlockPosition::seek(&mut tx.cursor, &mut self.block, utf16_index)?;
         Self::insert_at(&mut tx, &mut pos, value, None)?;
         Ok(())
     }
 
     pub fn insert_with<S1, S2, A, V>(
         &mut self,
-        index: usize,
+        utf16_index: usize,
         chunk: S1,
         attrs: A,
     ) -> crate::Result<()>
@@ -266,7 +266,7 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
             .map(|(k, v)| (k.into(), v.into()))
             .collect();
         let mut tx = self.tx.write_context()?;
-        let mut pos = BlockPosition::seek(&mut tx.cursor, &mut self.block, index)?;
+        let mut pos = BlockPosition::seek(&mut tx.cursor, &mut self.block, utf16_index)?;
         Self::insert_at(
             &mut tx,
             &mut pos,
@@ -275,18 +275,18 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
         )
     }
 
-    pub fn insert_embed<V>(&mut self, index: usize, value: V) -> crate::Result<V::Return>
+    pub fn insert_embed<V>(&mut self, utf16_index: usize, value: V) -> crate::Result<V::Return>
     where
         V: Prelim,
     {
         let mut tx = self.tx.write_context()?;
-        let mut pos = BlockPosition::seek(&mut tx.cursor, &mut self.block, index)?;
+        let mut pos = BlockPosition::seek(&mut tx.cursor, &mut self.block, utf16_index)?;
         Self::insert_at(&mut tx, &mut pos, value, None)
     }
 
     pub fn insert_embed_with<S, A, P, V2>(
         &mut self,
-        index: usize,
+        utf16_index: usize,
         value: P,
         attrs: A,
     ) -> crate::Result<P::Return>
@@ -301,7 +301,7 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
             .map(|(k, v)| (k.into(), v.into()))
             .collect();
         let mut tx = self.tx.write_context()?;
-        let mut pos = BlockPosition::seek(&mut tx.cursor, &mut self.block, index)?;
+        let mut pos = BlockPosition::seek(&mut tx.cursor, &mut self.block, utf16_index)?;
         Self::insert_at(&mut tx, &mut pos, value, Some(Box::new(attrs)))
     }
 
@@ -313,16 +313,16 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
         self.insert(len, chunk)
     }
 
-    pub fn remove_range<R>(&mut self, range: R) -> crate::Result<()>
+    pub fn remove_range<R>(&mut self, utf16_range: R) -> crate::Result<()>
     where
         R: RangeBounds<usize>,
     {
-        let start = match range.start_bound() {
+        let start = match utf16_range.start_bound() {
             Bound::Included(&index) => index,
             Bound::Excluded(&index) => index + 1,
             Bound::Unbounded => 0,
         };
-        let end = match range.end_bound() {
+        let end = match utf16_range.end_bound() {
             Bound::Included(&index) => index,
             Bound::Excluded(&index) => index - 1,
             Bound::Unbounded => self.block.node_len(),
@@ -338,7 +338,7 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
         Ok(())
     }
 
-    pub fn format<A, S, V, R>(&mut self, range: R, attrs: A) -> crate::Result<()>
+    pub fn format<A, S, V, R>(&mut self, utf16_range: R, attrs: A) -> crate::Result<()>
     where
         A: IntoIterator<Item = (S, V)>,
         S: Into<String>,
@@ -354,12 +354,12 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
             return Ok(());
         }
 
-        let start = match range.start_bound() {
+        let start = match utf16_range.start_bound() {
             Bound::Included(&index) => index,
             Bound::Excluded(&index) => index + 1,
             Bound::Unbounded => 0,
         };
-        let end = match range.end_bound() {
+        let end = match utf16_range.end_bound() {
             Bound::Included(&index) => index,
             Bound::Excluded(&index) => index - 1,
             Bound::Unbounded => self.block.node_len(),
@@ -682,7 +682,7 @@ impl Delta<In> {
 struct BlockPosition<'a> {
     parent: &'a mut BlockMut,
     attrs: Attrs,
-    index: usize,
+    utf16_index: usize,
     left: Option<ID>,
     right: Option<ID>,
 }
@@ -693,7 +693,7 @@ impl<'a> BlockPosition<'a> {
         BlockPosition {
             parent,
             attrs: Attrs::new(),
-            index: 0,
+            utf16_index: 0,
             left: None,
             right,
         }
@@ -742,11 +742,11 @@ impl<'a> BlockPosition<'a> {
                                 unreachable!("split point is strictly inside the block");
                             }
                         }
-                        self.index += remaining;
+                        self.utf16_index += remaining;
                         break;
                     } else {
                         remaining -= len;
-                        self.index += len;
+                        self.utf16_index += len;
                     }
                 }
             }
@@ -760,10 +760,10 @@ impl<'a> BlockPosition<'a> {
     fn seek(
         cursor: &mut BlockCursor,
         parent: &'a mut BlockMut,
-        index: usize,
+        utf16_index: usize,
     ) -> crate::Result<Self> {
         let mut pos = Self::new(parent);
-        pos.forward_by(index, cursor)?;
+        pos.forward_by(utf16_index, cursor)?;
 
         Ok(pos)
     }
@@ -891,7 +891,7 @@ fn forward(pos: &mut BlockPosition, cursor: &mut BlockCursor) -> crate::Result<b
         if !block.is_deleted() {
             match block.content_type() {
                 ContentType::String | ContentType::Embed => {
-                    pos.index += block.clock_len().get() as usize;
+                    pos.utf16_index += block.clock_len().get() as usize;
                 }
                 ContentType::Format => {
                     let content_store = cursor.content_store();
@@ -1838,11 +1838,11 @@ mod test {
 
         txt.insert(0, "👯🙇‍♀️🙇‍♀️⏰👩‍❤️‍💋‍👨").unwrap();
 
-        let start = "👯".len();
-        let end = start + "🙇‍♀️🙇‍♀️".len();
+        let start = "👯".encode_utf16().count();
+        let end = start + "🙇‍♀️🙇‍♀️".encode_utf16().count();
         txt.format(start..end, Attrs::default()).unwrap();
-        let start = "👯🙇‍♀️🙇‍♀️".len();
-        let end = start + "⏰".len();
+        let start = "👯🙇‍♀️🙇‍♀️".encode_utf16().count();
+        let end = start + "⏰".encode_utf16().count();
         txt.remove_range(start..end).unwrap(); // will delete ⏰ and 👩‍❤️‍💋‍👨
 
         assert_eq!(txt.to_string(), "👯🙇‍♀️🙇‍♀️👩‍❤️‍💋‍👨");
@@ -1860,13 +1860,13 @@ mod test {
 
         txt.insert(0, "🙇‍♀️🙇‍♀️⏰👩‍❤️‍💋‍👨").unwrap();
         txt.insert(0, "👯").unwrap();
-        let start = "👯".len();
-        let end = start + "🙇‍♀️🙇‍♀️".len();
+        let start = "👯".encode_utf16().count();
+        let end = start + "🙇‍♀️🙇‍♀️".encode_utf16().count();
         txt.format(start..end, Attrs::default()).unwrap();
 
         // will delete ⏰ and 👩‍❤️‍💋‍👨
-        let start = "👯🙇‍♀️🙇‍♀️".len();
-        let end = start + "⏰".len();
+        let start = "👯🙇‍♀️🙇‍♀️".encode_utf16().count();
+        let end = start + "⏰".encode_utf16().count();
         txt.remove_range(start..end).unwrap(); // will delete ⏰ and 👩‍❤️‍💋‍👨
 
         assert_eq!(&txt.to_string(), "👯🙇‍♀️🙇‍♀️👩‍❤️‍💋‍👨");
@@ -1884,15 +1884,16 @@ mod test {
 
         txt.insert(0, "❤️❤️🙇‍♀️🙇‍♀️⏰👩‍❤️‍💋‍👨👩‍❤️‍💋‍👨").unwrap();
         txt.insert(0, "👯").unwrap();
-        let start = "👯".len();
-        let end = start + "❤️❤️🙇‍♀️🙇‍♀️⏰".len();
+        let start = "👯".encode_utf16().count();
+        let end = start + "❤️❤️🙇‍♀️🙇‍♀️⏰".encode_utf16().count();
         txt.format(start..end, Attrs::new()).unwrap();
-        txt.insert("👯❤️❤️🙇‍♀️🙇‍♀️⏰".len(), "⏰").unwrap();
-        let start = "👯❤️❤️🙇‍♀️🙇‍♀️⏰⏰".len();
-        let end = start + "👩‍❤️‍💋‍👨".len();
+        txt.insert("👯❤️❤️🙇‍♀️🙇‍♀️⏰".encode_utf16().count(), "⏰")
+            .unwrap();
+        let start = "👯❤️❤️🙇‍♀️🙇‍♀️⏰⏰".encode_utf16().count();
+        let end = start + "👩‍❤️‍💋‍👨".encode_utf16().count();
         txt.format(start..end, Attrs::new()).unwrap();
-        let start = "👯❤️❤️🙇‍♀️🙇‍♀️⏰⏰👩‍❤️‍💋‍👩".len();
-        let end = start + "👩‍❤️‍💋‍👨".len();
+        let start = "👯❤️❤️🙇‍♀️🙇‍♀️⏰⏰👩‍❤️‍💋‍👩".encode_utf16().count();
+        let end = start + "👩‍❤️‍💋‍👨".encode_utf16().count();
         txt.remove_range(start..end).unwrap();
         assert_eq!(txt.to_string(), "👯❤️❤️🙇‍♀️🙇‍♀️⏰⏰👩‍❤️‍💋‍👨");
 
