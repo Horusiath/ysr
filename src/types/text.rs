@@ -10,7 +10,7 @@ use crate::store::content_store::ContentStore;
 use crate::transaction::{TxMutScope, TxScope};
 use crate::types::Capability;
 use crate::{Block, BlockMut, Clock, In, Mounted, Out, Prepare, Transaction, lib0};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use smallvec::smallvec;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, Bound};
@@ -62,11 +62,18 @@ impl<'db, 'tx: 'db> TextRef<&'tx Transaction<'db>> {
     }
 }
 
+/// Individual chunk of data produced when calling [TextRef::chunks]/[TextRef::chunks_between] iterator.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Chunk {
     pub insert: Out,
     pub attributes: Option<Box<Attrs>>,
-    pub id: Option<ID>,
+    pub operation: Option<Op>,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub enum Op {
+    Insert(ID),
+    Delete(ID),
 }
 
 impl Chunk {
@@ -74,20 +81,20 @@ impl Chunk {
         Self {
             insert: insert.into(),
             attributes: None,
-            id: None,
+            operation: None,
         }
     }
 
     pub fn with_attrs(self, attrs: Attrs) -> Self {
         Self {
-            id: self.id,
+            operation: self.operation,
             insert: self.insert,
             attributes: Some(Box::new(attrs)),
         }
     }
 
-    pub fn with_id(mut self, id: ID) -> Self {
-        self.id = Some(id);
+    pub fn with_op(mut self, op: Op) -> Self {
+        self.operation = Some(op);
         self
     }
 }
@@ -539,6 +546,7 @@ pub struct Chunks<'a, 'tx> {
 
     buf: String,
     current_attrs: Option<Box<Attrs>>,
+    current_op: Option<Op>,
     pending: Option<Chunk>,
 }
 
@@ -556,6 +564,7 @@ impl<'a, 'tx> Chunks<'a, 'tx> {
             to,
             buf: String::new(),
             current_attrs: None,
+            current_op: None,
             pending: None,
         }
     }
@@ -571,7 +580,7 @@ impl<'a, 'tx> Chunks<'a, 'tx> {
             Some(Chunk {
                 insert: Out::Value(buf.into()),
                 attributes,
-                id: None,
+                operation: self.current_op.take(),
             })
         } else {
             None
@@ -606,14 +615,14 @@ impl<'a, 'tx> Chunks<'a, 'tx> {
             self.pending = Some(Chunk {
                 insert: out,
                 attributes,
-                id: None,
+                operation: None,
             });
             chunk
         } else {
             Chunk {
                 insert: out,
                 attributes,
-                id: None,
+                operation: None,
             }
         }
     }
@@ -630,14 +639,31 @@ impl<'a, 'tx> Chunks<'a, 'tx> {
             self.current = block.right().copied();
 
             // check if block is within the bounds we're looking after
-            if Self::seen(self.to, &block) && (self.from.is_none() || Self::seen(self.from, &block))
+            if Self::seen(self.to, &block) || (self.from.is_some() && Self::seen(self.from, &block))
             {
                 match block.content_type() {
                     ContentType::String => {
+                        let mut prev = None;
+                        if let Some(snapshot) = self.to {
+                            if !snapshot.is_visible(&id) {
+                                prev = self.pack_str();
+                                self.current_op = Some(Op::Delete(id));
+                            } else if let Some(snapshot) = self.from {
+                                if !snapshot.is_visible(&id) {
+                                    prev = self.pack_str();
+                                    self.current_op = Some(Op::Insert(id));
+                                } else if self.current_op.is_some() {
+                                    prev = self.pack_str();
+                                }
+                            };
+                        };
                         let contents = self.tx.db.contents();
                         let content = get_content(&block, &contents)?;
                         let str = content.as_str()?;
                         self.buf.push_str(str);
+                        if prev.is_some() {
+                            return Ok(prev);
+                        }
                     }
                     ContentType::Embed => {
                         let contents = self.tx.db.contents();
@@ -1011,7 +1037,7 @@ mod test {
     use crate::lib0::Value;
     use crate::read::{Decode, DecoderV1};
     use crate::test_util::{multi_doc, sync};
-    use crate::types::text::{Attrs, Chunk, Delta};
+    use crate::types::text::{Attrs, Chunk, Delta, Op};
     use crate::write::Encode;
     use crate::{ListPrelim, Map, MapPrelim, Out, StateVector, Text, Unmounted, lib0};
 
@@ -1999,7 +2025,7 @@ mod test {
             diff,
             vec![
                 Chunk::new("hello"),
-                Chunk::new(" world").with_id(ID::new(1.into(), 5.into()))
+                Chunk::new(" world").with_op(Op::Insert(ID::new(1.into(), 5.into())))
             ]
         );
         txn.commit(None).unwrap();
@@ -2167,8 +2193,8 @@ mod test {
             state2_diff,
             vec![
                 Chunk::new("a"),
-                Chunk::new("x").with_id(ID::new(1.into(), 4.into())),
-                Chunk::new("bcd").with_id(ID::new(1.into(), 1.into())),
+                Chunk::new("x").with_op(Op::Insert(ID::new(1.into(), 4.into()))),
+                Chunk::new("b").with_op(Op::Delete(ID::new(1.into(), 1.into()))),
                 Chunk::new("cd"),
             ]
         );
