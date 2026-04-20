@@ -67,6 +67,16 @@ impl TransactionState {
         }
     }
 
+    /// Checks if item with a given `id` has been added to a block store within this transaction.
+    pub fn has_added(&self, id: &ID) -> bool {
+        id.clock >= self.begin_state.get(&id.client)
+    }
+
+    /// Checks if item with a given `id` has been deleted within this transaction.
+    pub fn has_deleted(&self, id: &ID) -> bool {
+        self.delete_set.contains(id)
+    }
+
     fn precommit(
         &mut self,
         db: Database<'_>,

@@ -7,7 +7,7 @@ use crate::state_vector::Snapshot;
 use crate::store::Db;
 use crate::store::block_store::{BlockCursor, SplitResult};
 use crate::store::content_store::ContentStore;
-use crate::transaction::{TxMutScope, TxScope};
+use crate::transaction::{TransactionState, TxMutScope, TxScope};
 use crate::types::Capability;
 use crate::{Block, BlockMut, Clock, In, Mounted, Out, Prepare, Transaction, lib0};
 use serde::{Deserialize, Serialize};
@@ -36,8 +36,10 @@ impl<'db, 'tx: 'db> TextRef<&'tx Transaction<'db>> {
 
     /// Returns an iterator over uncommitted changes (deltas) made to this text type
     /// within its current transaction scope.
-    pub fn uncommitted(&self) -> Uncommitted<'db, 'tx> {
-        Uncommitted::new(self.block.as_block(), todo!())
+    pub fn uncommitted(&self) -> Uncommitted<'tx> {
+        let tx = self.tx.read_context().unwrap();
+        let state = self.tx.state.get();
+        Uncommitted::new(self.block.start().copied(), tx, state)
     }
 
     /// Returns an iterator over all text and embedded chunks grouped by their applied attributes.
@@ -517,24 +519,272 @@ impl<T> Delta<T> {
             Delta::Retain(len, attrs) => Delta::Retain(len, attrs),
         }
     }
-}
 
-pub struct Uncommitted<'a, 'tx> {
-    _a: PhantomData<&'a ()>,
-    _b: PhantomData<&'tx ()>,
-}
-
-impl<'a, 'tx> Uncommitted<'a, 'tx> {
-    fn new(block: Block<'tx>, tx: TxMutScope<'tx>) -> Self {
-        todo!()
+    pub fn with_attrs(self, attrs: Option<Box<Attrs>>) -> Self {
+        match self {
+            Delta::Insert(insert, _) => Delta::Insert(insert, attrs),
+            Delta::Retain(len, _) => Delta::Retain(len, attrs),
+            delete => delete,
+        }
     }
 }
 
-impl<'db, 'tx> Iterator for Uncommitted<'db, 'tx> {
+pub struct Uncommitted<'tx> {
+    tx: TxScope<'tx>,
+
+    /// Transaction state. If `None`, means that the transaction was readonly and has no uncommitted
+    /// changes.
+    tx_state: Option<&'tx TransactionState>,
+
+    /// The block head we're currently on.
+    current: Option<ID>,
+
+    /// The state of applicable attributes accumulated at up to the `current` block.
+    current_attrs: Attrs,
+    old_attrs: Attrs,
+
+    /// The delta that's under construction.
+    delta: Option<Delta<Out>>,
+    /// Attributes for the `delta` that's under construction.
+    attrs: Option<Box<Attrs>>,
+
+    pending_delta: Option<Delta<Out>>,
+}
+
+impl<'tx> Uncommitted<'tx> {
+    fn new(current: Option<ID>, tx: TxScope<'tx>, tx_state: Option<&'tx TransactionState>) -> Self {
+        Uncommitted {
+            tx,
+            tx_state,
+            current,
+            current_attrs: Attrs::default(),
+            old_attrs: Attrs::default(),
+            delta: None,
+            attrs: None,
+            pending_delta: None,
+        }
+    }
+
+    fn add_op(&mut self) -> Option<Delta<Out>> {
+        let delta = self.delta.take()?;
+        if !self.current_attrs.is_empty() {
+            Some(delta.with_attrs(Some(Box::new(self.current_attrs.clone()))))
+        } else {
+            Some(delta)
+        }
+    }
+
+    fn finish(&mut self) -> Option<Delta<Out>> {
+        match self.delta.take()? {
+            Delta::Retain(_, None) => None,
+            other => Some(other.with_attrs(self.attrs.take())),
+        }
+    }
+
+    fn update_attrs(&mut self, key: &str, value: lib0::Value) {
+        let attrs = self.attrs.get_or_insert_default();
+        if value.is_null() {
+            attrs.remove(key);
+        } else {
+            attrs.insert(key.to_string(), value);
+        }
+    }
+
+    fn move_next(&mut self) -> crate::Result<Option<Delta<Out>>> {
+        let state = match self.tx_state {
+            Some(state) => state,
+            None => return Ok(None),
+        };
+
+        if let Some(delta) = self.pending_delta.take() {
+            return Ok(Some(delta));
+        }
+
+        let contents = self.tx.db.contents();
+        while let Some(id) = self.current.take() {
+            let block = self.tx.cursor.seek(id)?;
+            self.current = block.right().copied();
+
+            let mut delta = None;
+            match block.content_type() {
+                ContentType::String => {
+                    if state.has_added(&id) {
+                        if !state.has_deleted(&id) {
+                            let content = get_content(&block, &contents)?;
+                            let str = content.as_str()?;
+
+                            if !matches!(self.delta, Some(Delta::Insert(_, _))) {
+                                delta = self.add_op();
+                                self.delta = Some(Delta::Insert(Out::Value(str.into()), None));
+                            } else if let Some(Delta::Insert(Out::Value(Value::String(buf)), _)) =
+                                &mut self.delta
+                            {
+                                buf.push_str(str);
+                            } else {
+                                unreachable!()
+                            }
+                        }
+                    } else if state.has_deleted(&id) {
+                        let block_len = block.clock_len().get() as usize;
+                        if !matches!(self.delta, Some(Delta::Delete(_))) {
+                            delta = self.add_op();
+                            self.delta = Some(Delta::Delete(block_len));
+                        } else if let Some(Delta::Delete(len)) = &mut self.delta {
+                            *len += block_len;
+                        } else {
+                            unreachable!()
+                        }
+                    } else if !block.is_deleted() {
+                        let block_len = block.clock_len().get() as usize;
+                        if !matches!(self.delta, Some(Delta::Retain(_, _))) {
+                            delta = self.add_op();
+                            self.delta = Some(Delta::Retain(block_len, None));
+                        } else if let Some(Delta::Retain(len, _)) = &mut self.delta {
+                            *len += block_len;
+                        } else {
+                            unreachable!()
+                        }
+                    }
+                }
+                ContentType::Format => {
+                    let content = get_content(&block, &contents)?;
+                    let fmt = content.as_format()?;
+                    let key = fmt.key();
+                    let value = fmt.value()?;
+
+                    if state.has_added(&id) {
+                        if !state.has_deleted(&id) {
+                            let current_value = self.current_attrs.get(key);
+                            if current_value != Some(&value) {
+                                if !matches!(self.delta, Some(Delta::Retain(_, _))) {
+                                    delta = self.add_op();
+                                }
+                                match self.old_attrs.get(key) {
+                                    None if value == Value::Null => {
+                                        if let Some(attrs) = &mut self.attrs {
+                                            attrs.remove(key);
+                                        }
+                                    }
+                                    Some(old_value) if &value == old_value => {
+                                        if let Some(attrs) = &mut self.attrs {
+                                            attrs.remove(key);
+                                        }
+                                    }
+                                    _ => {
+                                        let attrs = self.attrs.get_or_insert_default();
+                                        attrs.insert(key.into(), value);
+                                    }
+                                }
+                            } else {
+                                // ??
+                            }
+                        }
+                    } else if state.has_deleted(&id) {
+                        self.old_attrs.insert(key.into(), value.clone());
+                        let current_value = self.current_attrs.get(key).unwrap_or(&Value::Null);
+                        if current_value != &value {
+                            let current_value = current_value.clone();
+                            if matches!(self.delta, Some(Delta::Retain(_, _))) {
+                                delta = self.add_op();
+                            }
+                            let attrs = self.attrs.get_or_insert_default();
+                            attrs.insert(key.into(), current_value);
+                        }
+                    } else if !block.is_deleted() {
+                        self.old_attrs.insert(key.into(), value.clone());
+                        if let Some(attrs) = &mut self.attrs {
+                            if let Some(attr) = attrs.get(key) {
+                                if attr != &value {
+                                    if matches!(self.delta, Some(Delta::Retain(_, _))) {
+                                        // same as self.add_op() but without encapsulation that breaks borrow checker
+                                        delta = match self.delta.take() {
+                                            Some(delta) if !self.current_attrs.is_empty() => {
+                                                Some(delta.with_attrs(Some(Box::new(
+                                                    self.current_attrs.clone(),
+                                                ))))
+                                            }
+                                            delta => delta,
+                                        };
+                                    }
+                                    if value == Value::Null {
+                                        attrs.remove(key);
+                                    } else {
+                                        attrs.insert(key.into(), value);
+                                    }
+                                } else {
+                                    // ??
+                                }
+                            }
+                        }
+                    }
+
+                    if !block.is_deleted() {
+                        let delta = if matches!(self.delta, Some(Delta::Insert(_, _))) {
+                            self.add_op()
+                        } else {
+                            None
+                        };
+
+                        self.update_attrs(fmt.key(), fmt.value()?);
+                        if delta.is_some() {
+                            return Ok(delta);
+                        }
+                    }
+                }
+                ContentType::Embed | ContentType::Node => {
+                    if state.has_added(&id) {
+                        if !state.has_deleted(&id) {
+                            delta = self.add_op();
+                            let out = match block.content_type() {
+                                ContentType::Embed => {
+                                    let content = get_content(&block, &contents)?;
+                                    Out::Value(content.as_embed()?)
+                                }
+                                ContentType::Node => Out::Node(*block.id()),
+                                _ => unreachable!(),
+                            };
+                            self.pending_delta = Some(Delta::Insert(out, None));
+                        }
+                    } else if state.has_deleted(&id) {
+                        if !matches!(self.delta, Some(Delta::Delete(_))) {
+                            delta = self.add_op();
+                            self.delta = Some(Delta::Delete(1));
+                        } else if let Some(Delta::Delete(len)) = &mut self.delta {
+                            *len += 1;
+                        } else {
+                            unreachable!()
+                        }
+                    } else if !block.is_deleted() {
+                        if !matches!(self.delta, Some(Delta::Retain(_, _))) {
+                            delta = self.add_op();
+                            self.delta = Some(Delta::Retain(1, None));
+                        } else if let Some(Delta::Retain(len, _)) = &mut self.delta {
+                            *len += 1;
+                        } else {
+                            unreachable!()
+                        }
+                    }
+                }
+                _ => { /* ignore */ }
+            }
+
+            if delta.is_some() {
+                return Ok(delta);
+            }
+        }
+        Ok(self.finish())
+    }
+}
+
+impl<'tx> Iterator for Uncommitted<'tx> {
     type Item = crate::Result<Delta<Out>>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        todo!()
+        match self.move_next() {
+            Ok(Some(delta)) => Some(Ok(delta)),
+            Ok(None) => None,
+            Err(err) => Some(Err(err)),
+        }
     }
 }
 
