@@ -128,7 +128,8 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
     where
         P: Prelim,
     {
-        let negated = if let Some(attrs) = attrs {
+        let negated = if let Some(mut attrs) = attrs {
+            pos.unset_missing(&mut attrs);
             pos.minimize(&attrs, &mut tx.cursor)?;
             pos.insert_attributes(tx, attrs)?
         } else {
@@ -536,7 +537,10 @@ impl<'a, 'tx> Chunks<'a, 'tx> {
 
     fn pack_str(&mut self) -> Option<Chunk> {
         if !self.buf.is_empty() {
-            let attributes = self.current_attrs.take();
+            let attributes = match self.current_attrs.take() {
+                Some(attrs) if attrs.is_empty() => None,
+                other => other,
+            };
             let mut buf = std::mem::replace(&mut self.buf, String::new());
             buf.shrink_to_fit();
             Some(Chunk {
@@ -567,19 +571,23 @@ impl<'a, 'tx> Chunks<'a, 'tx> {
     }
 
     fn stash_or_return(&mut self, out: Out) -> Chunk {
+        let attributes = match &self.current_attrs {
+            Some(attrs) if attrs.is_empty() => None,
+            attrs => attrs.clone(),
+        };
         if let Some(chunk) = self.pack_str() {
             // There was already a string chunk that we were collecting, we need to
             // emit it first. Therefore, we store this chunk for the next method call
             self.pending = Some(Chunk {
                 insert: out,
-                attributes: self.current_attrs.clone(),
+                attributes,
                 id: None,
             });
             chunk
         } else {
             Chunk {
                 insert: out,
-                attributes: self.current_attrs.clone(),
+                attributes,
                 id: None,
             }
         }
@@ -813,17 +821,13 @@ impl<'a> BlockPosition<'a> {
     ) -> crate::Result<Attrs> {
         let mut negated = Attrs::new();
         for (name, value) in attrs.into_iter() {
-            if let Some(curr_value) = self.attrs.get(&name)
-                && curr_value == &value
-            {
-                continue; // skip over
+            let current_value = self.attrs.get(&name).unwrap_or(&Value::Null);
+            if current_value != &value {
+                // insert attribute
+                let negated_value = current_value.clone();
+                self.insert_internal(tx, FormatPrelim::new(&name, value))?;
+                negated.insert(name, negated_value);
             }
-
-            let fmt = FormatAttribute::compose(&name, &value)?;
-            negated.insert(name, value);
-
-            // insert attribute
-            self.insert_internal(tx, fmt)?;
         }
 
         Ok(negated)
