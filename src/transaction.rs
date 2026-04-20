@@ -1,6 +1,6 @@
 use crate::block::{Block, BlockMut, ID};
 use crate::block_reader::{Carrier, Update};
-use crate::content::ContentType;
+use crate::content::{ContentType, FormatAttribute};
 use crate::id_set::IDSet;
 use crate::lmdb::{Database, Dbi, RwTxn};
 use crate::node::{Node, NodeID};
@@ -12,7 +12,7 @@ use crate::store::intern_strings::InternStringsStore;
 use crate::store::meta_store::MetaStore;
 use crate::store::{Db, MapEntriesStore};
 use crate::write::{Encode, Encoder, EncoderV1, WriteExt};
-use crate::{ClientID, Clock, Optional, StateVector, U32};
+use crate::{ClientID, Clock, Error, Optional, StateVector, U32, lib0};
 use bitflags::bitflags;
 use bytes::{BufMut, Bytes, BytesMut};
 use std::collections::btree_map::Entry;
@@ -173,9 +173,16 @@ impl TransactionState {
         let map_entries = db.map_entries();
         let mut cursor = blocks.cursor()?;
 
-        writer.write_var(current_state.len())?;
+        let changed_state = current_state
+            .iter()
+            .filter(|(client_id, end_clock)| {
+                let start_clock = begin_state.get(client_id);
+                end_clock > &&start_clock
+            })
+            .collect::<Vec<_>>();
+        writer.write_var(changed_state.len())?;
         let mut block_buf = Vec::new();
-        for (&client_id, &end_clock) in current_state.iter() {
+        for (&client_id, &end_clock) in changed_state {
             block_buf.clear();
             let start_clock = begin_state.get(&client_id);
 
@@ -571,7 +578,10 @@ impl<'db> Transaction<'db> {
                     Some(data) => data,
                     None => content_store.get(*block.id())?,
                 };
-                writer.write_all(content)?; // format is stored in the same shape
+                let fmt =
+                    FormatAttribute::new(content).ok_or_else(|| Error::InvalidMapping("format"))?;
+                writer.write_key(fmt.key())?;
+                writer.write_json(&fmt.value::<lib0::Value>()?)?;
             }
             ContentType::Node => {
                 writer.write_type_ref(*block.node_type().unwrap() as u8)?;
@@ -1063,8 +1073,11 @@ impl<'tx> TxMutScope<'tx> {
                     }
 
                     // We can ignore the case of GC and Delete structs, because we are going to skip them
-                    self.cursor.start_from(ID::new(client, clock_start))?;
-                    if let Some(mut block) = self.cursor.current().optional()? {
+                    if let Some(mut block) = self
+                        .cursor
+                        .seek_containing(ID::new(client, clock_start))
+                        .optional()?
+                    {
                         if block.id().client != client {
                             continue; // we shoot over the current client range
                         }

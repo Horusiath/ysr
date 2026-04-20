@@ -567,11 +567,21 @@ impl<'tx> Uncommitted<'tx> {
 
     fn add_op(&mut self) -> Option<Delta<Out>> {
         let delta = self.delta.take()?;
-        if !self.current_attrs.is_empty() {
-            Some(delta.with_attrs(Some(Box::new(self.current_attrs.clone()))))
-        } else {
-            Some(delta)
-        }
+        Some(match &delta {
+            Delta::Insert(_, _) if !self.current_attrs.is_empty() => {
+                delta.with_attrs(Some(Box::new(self.current_attrs.clone())))
+            }
+            Delta::Retain(_, _) => {
+                if let Some(attrs) = &self.attrs
+                    && !attrs.is_empty()
+                {
+                    delta.with_attrs(Some(attrs.clone()))
+                } else {
+                    delta
+                }
+            }
+            _ => delta,
+        })
     }
 
     fn finish(&mut self) -> Option<Delta<Out>> {
@@ -582,11 +592,10 @@ impl<'tx> Uncommitted<'tx> {
     }
 
     fn update_attrs(&mut self, key: &str, value: lib0::Value) {
-        let attrs = self.attrs.get_or_insert_default();
         if value.is_null() {
-            attrs.remove(key);
+            self.current_attrs.remove(key);
         } else {
-            attrs.insert(key.to_string(), value);
+            self.current_attrs.insert(key.to_string(), value);
         }
     }
 

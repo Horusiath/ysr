@@ -1,12 +1,12 @@
 use crate::block_reader::BlockRange;
-use crate::content::{Content, ContentType, utf16_to_utf8};
+use crate::content::{Content, ContentType, FormatAttribute, utf16_to_utf8};
 use crate::integrate::IntegrationContext;
 use crate::node::{Named, Node, NodeID, NodeType};
 use crate::prelim::Prelim;
 use crate::store::Db;
 use crate::transaction::TxMutScope;
 use crate::write::{Encoder, WriteExt};
-use crate::{ClientID, Clock, Optional, Prepare, U32};
+use crate::{ClientID, Clock, Optional, Prepare, U32, lib0};
 use crate::{Error, Result};
 use bitflags::bitflags;
 use bytes::Bytes;
@@ -1178,7 +1178,10 @@ impl InsertBlockData {
                     Some(data) => data,
                     None => &*self.content[0].data,
                 };
-                writer.write_all(content)?; // format is stored in the same shape
+                let fmt =
+                    FormatAttribute::new(content).ok_or_else(|| Error::InvalidMapping("format"))?;
+                writer.write_key(fmt.key())?;
+                writer.write_json(&fmt.value::<lib0::Value>()?)?;
             }
             ContentType::Node => {
                 writer.write_type_ref(*block.node_type().unwrap() as u8)?;

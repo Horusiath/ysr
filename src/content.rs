@@ -496,30 +496,15 @@ pub struct FormatAttribute<'a> {
 
 impl FormatAttribute<'static> {
     pub fn decode<D: Decoder>(decoder: &mut D) -> crate::Result<Vec<u8>> {
-        let key_len: u64 = decoder.read_var()?;
-        if key_len >= u8::MAX as u64 {
+        let mut buf = vec![0u8];
+        decoder.read_key(&mut buf)?;
+        if buf.len() >= u8::MAX as usize {
             return Err(crate::Error::KeyTooLong);
         }
-
-        let mut buf = Vec::with_capacity(key_len as usize + 10);
-        buf.write_var(key_len)?;
-        let buf_len = buf.len();
-        unsafe { buf.set_len(buf_len + key_len as usize) };
-        decoder.read_exact(&mut buf[buf_len..])?;
-
-        let value_len: u64 = decoder.read_var()?;
-        buf.write_var(value_len)?;
-        let buf_len = buf.len();
-        buf.reserve(value_len as usize);
-        unsafe { buf.set_len(buf_len + value_len as usize) };
-        decoder.read_exact(&mut buf[buf_len..])?;
+        buf[0] = (buf.len() - 1) as u8;
+        let value: lib0::Value = decoder.read_json()?;
+        lib0::to_writer(&mut buf, &value)?;
         Ok(buf)
-    }
-
-    pub fn encode(&self, encoder: &mut impl Encoder) -> crate::Result<()> {
-        // data is already in correct format
-        encoder.write_all(&self.data)?;
-        Ok(())
     }
 
     pub fn compose<T: Serialize>(key: &str, value: &T) -> crate::Result<Vec<u8>> {
