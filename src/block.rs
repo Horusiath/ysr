@@ -454,12 +454,8 @@ impl BlockHeader {
     }
 
     pub fn try_inline_content(&self) -> Option<Content<'_>> {
-        if self.is_deleted() {
-            Some(Content::DELETED)
-        } else {
-            self.try_inline_data()
-                .map(|bytes| Content::new(self.content_type(), Cow::Borrowed(bytes)))
-        }
+        self.try_inline_data()
+            .map(|bytes| Content::new(self.content_type(), Cow::Borrowed(bytes)))
     }
 }
 

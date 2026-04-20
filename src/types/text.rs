@@ -1991,7 +1991,7 @@ mod test {
         let next = txn.snapshot_uncommitted().unwrap();
         let text = txt.mount(&txn).unwrap();
         let diff: Vec<_> = text
-            .chunks_between(Some(&next), Some(&prev))
+            .chunks_between(Some(&prev), Some(&next))
             .map(Result::unwrap)
             .collect();
 
@@ -2150,17 +2150,17 @@ mod test {
         ])
         .unwrap();
         let state1: Vec<_> = txt
-            .chunks_between(Some(&snapshot1), None)
+            .chunks_between(None, Some(&snapshot1))
             .map(Result::unwrap)
             .collect();
         assert_eq!(state1, vec![Chunk::new("abcd")]);
         let state2: Vec<_> = txt
-            .chunks_between(Some(&snapshot2), None)
+            .chunks_between(None, Some(&snapshot2))
             .map(Result::unwrap)
             .collect();
         assert_eq!(state2, vec![Chunk::new("axcd")]);
         let state2_diff: Vec<_> = txt
-            .chunks_between(Some(&snapshot2), Some(&snapshot1))
+            .chunks_between(Some(&snapshot1), Some(&snapshot2))
             .map(Result::unwrap)
             .collect();
         assert_eq!(
@@ -2188,7 +2188,7 @@ mod test {
         txt.apply_delta([Delta::retain(4), Delta::insert("e")])
             .unwrap();
         let state1: Vec<_> = txt
-            .chunks_between(Some(&snapshot1), None)
+            .chunks_between(None, Some(&snapshot1))
             .map(Result::unwrap)
             .collect();
         assert_eq!(state1, vec![Chunk::new("abcd")]);
