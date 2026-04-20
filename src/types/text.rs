@@ -1,5 +1,5 @@
 use crate::block::{ID, InsertBlockData};
-use crate::content::{Content, ContentType, FormatAttribute};
+use crate::content::{Content, ContentType};
 use crate::lib0::Value;
 use crate::node::NodeType;
 use crate::prelim::{DeltaPrelim, Prelim, StringPrelim};
@@ -281,7 +281,7 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
     {
         let mut tx = self.tx.write_context()?;
         let mut pos = BlockPosition::seek(&mut tx.cursor, &mut self.block, utf16_index)?;
-        Self::insert_at(&mut tx, &mut pos, value, None)
+        Self::insert_at(&mut tx, &mut pos, EmbedPrelim(value), None)
     }
 
     pub fn insert_embed_with<S, A, P, V2>(
@@ -302,7 +302,7 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
             .collect();
         let mut tx = self.tx.write_context()?;
         let mut pos = BlockPosition::seek(&mut tx.cursor, &mut self.block, utf16_index)?;
-        Self::insert_at(&mut tx, &mut pos, value, Some(Box::new(attrs)))
+        Self::insert_at(&mut tx, &mut pos, EmbedPrelim(value), Some(Box::new(attrs)))
     }
 
     pub fn push<S>(&mut self, chunk: S) -> crate::Result<()>
@@ -407,10 +407,42 @@ impl<'tx, 'db> Deref for TextRef<&'tx mut Transaction<'db>> {
     }
 }
 
+struct EmbedPrelim<T>(T);
+impl<T: Prelim> Prelim for EmbedPrelim<T> {
+    type Return = T::Return;
+
+    fn clock_len(&self) -> Clock {
+        self.0.clock_len()
+    }
+
+    fn prepare(&self) -> crate::Result<Prepare> {
+        let prepared = self.0.prepare()?;
+        match prepared {
+            Prepare::Values(mut values)
+                if values.len() == 1 && values[0].content_type() == ContentType::Atom =>
+            {
+                let value = values.pop().unwrap();
+                Ok(Prepare::Values(smallvec![Content::new(
+                    ContentType::Embed,
+                    value.data
+                )]))
+            }
+            other => Ok(other),
+        }
+    }
+
+    fn integrate<'tx>(
+        self,
+        parent: &mut BlockMut,
+        tx: &mut TxMutScope<'tx>,
+    ) -> crate::Result<Self::Return> {
+        self.0.integrate(parent, tx)
+    }
+}
+
 pub struct FormatPrelim<'t, T> {
     key: &'t str,
     value: Option<T>,
-    buf: Option<Vec<u8>>,
 }
 
 impl<'t, T> FormatPrelim<'t, T> {
@@ -418,15 +450,6 @@ impl<'t, T> FormatPrelim<'t, T> {
         FormatPrelim {
             key,
             value: Some(value),
-            buf: None,
-        }
-    }
-
-    pub fn negated(key: &'t str) -> Self {
-        FormatPrelim {
-            key,
-            value: None,
-            buf: None,
         }
     }
 }
