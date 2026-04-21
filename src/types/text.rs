@@ -642,9 +642,15 @@ impl<'tx> Uncommitted<'tx> {
     }
 
     fn finish(&mut self) -> Option<Delta<Out>> {
-        match self.delta.take()? {
-            Delta::Retain(_, None) => None,
-            other => Some(other.with_attrs(self.attrs.take())),
+        let delta = self.delta.take()?;
+        let attrs = self.attrs.take();
+        match (&delta, &attrs) {
+            (Delta::Retain(_, None), None) => None,
+            (Delta::Retain(_, None), Some(a)) if a.is_empty() => None,
+            (Delta::Insert(_, _), _) if !self.current_attrs.is_empty() => {
+                Some(delta.with_attrs(Some(Box::new(self.current_attrs.clone()))))
+            }
+            _ => Some(delta.with_attrs(attrs)),
         }
     }
 
@@ -722,7 +728,7 @@ impl<'tx> Uncommitted<'tx> {
                         if !state.has_deleted(&id) {
                             let current_value = self.current_attrs.get(key);
                             if current_value != Some(&value) {
-                                if !matches!(self.delta, Some(Delta::Retain(_, _))) {
+                                if matches!(self.delta, Some(Delta::Retain(_, _))) {
                                     delta = self.add_op();
                                 }
                                 match self.old_attrs.get(key) {
@@ -764,6 +770,9 @@ impl<'tx> Uncommitted<'tx> {
                                     if matches!(self.delta, Some(Delta::Retain(_, _))) {
                                         // same as self.add_op() but without encapsulation that breaks borrow checker
                                         delta = match self.delta.take() {
+                                            Some(Delta::Retain(retain, _)) if !attrs.is_empty() => {
+                                                Some(Delta::Retain(retain, Some(attrs.clone())))
+                                            }
                                             Some(delta) if !self.current_attrs.is_empty() => {
                                                 Some(delta.with_attrs(Some(Box::new(
                                                     self.current_attrs.clone(),
