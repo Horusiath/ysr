@@ -236,53 +236,56 @@ impl VarInt for i8 {
 }
 
 fn write_var_u32<W: Write>(mut value: u32, w: &mut W) -> std::io::Result<usize> {
-    let mut n = 1;
+    let mut buf = [0u8; 5];
+    let mut n = 0;
     while value >= 0b10000000 {
-        let b = ((value & 0b01111111) as u8) | 0b10000000;
-        w.write_u8(b)?;
+        buf[n] = ((value & 0b01111111) as u8) | 0b10000000;
         n += 1;
         value >>= 7;
     }
-    w.write_u8((value & 0b01111111) as u8)?;
+    buf[n] = (value & 0b01111111) as u8;
+    n += 1;
+    w.write_all(&buf[..n])?;
     Ok(n)
 }
 
 fn write_var_u64<W: Write>(mut value: u64, w: &mut W) -> std::io::Result<usize> {
-    let mut n = 1;
+    let mut buf = [0u8; 10];
+    let mut n = 0;
     while value >= 0b10000000 {
-        let b = ((value & 0b01111111) as u8) | 0b10000000;
-        w.write_u8(b)?;
+        buf[n] = ((value & 0b01111111) as u8) | 0b10000000;
         n += 1;
         value >>= 7;
     }
-    w.write_u8((value & 0b01111111) as u8)?;
+    buf[n] = (value & 0b01111111) as u8;
+    n += 1;
+    w.write_all(&buf[..n])?;
     Ok(n)
 }
 
 fn write_var_i64<W: Write>(mut value: i64, w: &mut W) -> std::io::Result<usize> {
-    let mut n = 1;
+    let mut buf = [0u8; 10];
     let is_negative = value < 0;
     value = if is_negative { -value } else { value };
-    w.write_u8(
+    buf[0] =
         // whether to continue reading
         (if value > 0b00111111i64 { 0b10000000u8 } else { 0 })
-            // whether number is negative
-            | (if is_negative { 0b01000000u8 } else { 0 })
-            // number
-            | (0b00111111i64 & value) as u8,
-    )?;
+        // whether number is negative
+        | (if is_negative { 0b01000000u8 } else { 0 })
+        // number
+        | (0b00111111i64 & value) as u8;
+    let mut n = 1;
     value >>= 6;
     while value > 0 {
-        w.write_u8(
-            if value > 0b01111111i64 {
-                0b10000000u8
-            } else {
-                0
-            } | (0b01111111i64 & value) as u8,
-        )?;
+        buf[n] = if value > 0b01111111i64 {
+            0b10000000u8
+        } else {
+            0
+        } | (0b01111111i64 & value) as u8;
         n += 1;
         value >>= 7;
     }
+    w.write_all(&buf[..n])?;
     Ok(n)
 }
 

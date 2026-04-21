@@ -117,41 +117,35 @@ impl<'tx> BlockCursor<'tx> {
     /// a database before.
     pub fn update(&mut self, block: Block<'_>) -> crate::Result<()> {
         let key = BlockKey::new(*block.id());
-        // cursor may be at invalid position
-        if self.current_id().ok().flatten() != Some(block.id()) {
-            self.cursor.set_key(key.as_bytes())?;
+        let key_bytes = key.as_bytes();
+        let already_here = self
+            .cursor
+            .key_value()
+            .ok()
+            .is_some_and(|(k, _)| k == key_bytes);
+        if !already_here {
+            self.cursor.set_key(key_bytes)?;
         }
-        self.cursor.put_current(block.header().as_bytes())?;
+        self.cursor
+            .put_current(key_bytes, block.header().as_bytes())?;
         Ok(())
     }
 
-    /// Returns an [ID] of the block at the current position.
-    /// Returns `None` if current cursor position is outside the block boundaries.
-    pub fn current_id(&mut self) -> crate::Result<Option<&ID>> {
-        let key: &'tx [u8] = match self.cursor.key() {
-            Ok(key) => key,
-            // we reached the boundary of the database or cursor was not set yet
-            Err(LmdbError::NOT_FOUND) => return Ok(None),
-            Err(e) => return Err(e.into()),
-        };
-        if key[0] == Self::PREFIX {
-            let id = ID::parse(&key[1..])?;
-            Ok(Some(id))
+    /// Try to interpret a raw LMDB key+value pair as a Block.
+    /// Returns `None` if the key prefix doesn't match the block key-space.
+    fn try_parse_block(key: &[u8], value: &'tx [u8]) -> crate::Result<Option<Block<'tx>>> {
+        if key.first() == Some(&Self::PREFIX) {
+            let &id = ID::parse(&key[1..])?;
+            Ok(Some(Block::new(id, value)?))
         } else {
-            Ok(None) // we run outside the block key-space
+            Ok(None)
         }
     }
 
     /// Returns a [Block] at the current cursor position.
-    /// Returns `None` if current cursor position is outside the block boundaries.
     pub fn current(&mut self) -> crate::Result<Block<'tx>> {
-        match self.current_id()? {
-            None => Err(crate::Error::NotFound),
-            Some(&id) => {
-                let value: &'tx [u8] = self.cursor.value()?;
-                Ok(Block::new(id, value)?)
-            }
-        }
+        let (key, value) = self.cursor.key_value()?;
+        Self::try_parse_block(key, value)?.ok_or(crate::Error::NotFound)
     }
 
     /// Move cursor to the beginning of the block store space.
@@ -165,42 +159,40 @@ impl<'tx> BlockCursor<'tx> {
     }
 
     /// Moves current cursor position to a block starting with a given [ID].
-    /// Returns true if block has been found.
     pub fn seek(&mut self, id: ID) -> crate::Result<Block<'tx>> {
-        if let Ok(Some(current_id)) = self.current_id()
-            && current_id == &id
-        {
-            return self.current();
+        // fast path: check if we're already at the right position
+        if let Ok((key, value)) = self.cursor.key_value() {
+            if let Some(block) = Self::try_parse_block(key, value)? {
+                if block.id() == &id {
+                    return Ok(block);
+                }
+            }
         }
 
         let key = BlockKey::new(id);
         match self.cursor.set_key(key.as_bytes()) {
-            Ok(_) => self.current(),
+            Ok((_, value)) => Ok(Block::new(id, value)?),
             Err(LmdbError::NOT_FOUND) => Err(crate::Error::NotFound),
             Err(e) => Err(e.into()),
         }
     }
 
     /// Moves current cursor position to a block containing an element with a given [ID].
-    /// Returns true if block has been found.
     pub fn seek_containing(&mut self, id: ID) -> crate::Result<Block<'tx>> {
         let key = BlockKey::new(id);
-        // try to seek to the exact key first
         match self.cursor.set_range(key.as_bytes()) {
-            Ok(()) => {
-                if let Some(block) = self.current().optional()?
-                    && block.id() == &id
-                {
-                    // the nearest >= key is a block, check if it's the one we're looking for
-                    return Ok(block);
+            Ok((found_key, value)) => {
+                if let Some(block) = Self::try_parse_block(found_key, value)? {
+                    if block.id() == &id {
+                        return Ok(block);
+                    }
                 }
             }
             Err(LmdbError::NOT_FOUND) => { /* no >= key found */ }
             Err(e) => return Err(Error::Lmdb(e)),
         }
 
-        // at this point we either didn't find the block directly, and we're looking for indirect match
-        // we need to move left to find the block that might contain the ID
+        // move left to find the block that might contain the ID
         self.seek_prev_indirect(&id)
     }
 
@@ -218,7 +210,7 @@ impl<'tx> BlockCursor<'tx> {
     /// Returns `None` if current cursor position is outside the block boundaries.
     pub fn next(&mut self) -> crate::Result<Option<Block<'tx>>> {
         match self.cursor.next() {
-            Ok(_) => self.current().optional(),
+            Ok((key, value)) => Self::try_parse_block(key, value),
             Err(LmdbError::NOT_FOUND) => Ok(None),
             Err(e) => Err(e.into()),
         }
@@ -228,7 +220,7 @@ impl<'tx> BlockCursor<'tx> {
     /// Returns `None` if current cursor position is outside the block boundaries.
     pub fn prev(&mut self) -> crate::Result<Option<Block<'tx>>> {
         match self.cursor.prev() {
-            Ok(_) => self.current().optional(),
+            Ok((key, value)) => Self::try_parse_block(key, value),
             Err(LmdbError::NOT_FOUND) => Ok(None),
             Err(e) => Err(e.into()),
         }
@@ -265,8 +257,10 @@ impl<'tx> BlockCursor<'tx> {
     }
 
     #[inline]
-    pub fn update_current(&mut self, header: &BlockHeader) -> crate::Result<()> {
-        self.cursor.put_current(header.as_bytes())?;
+    pub fn update_current(&mut self, id: ID, header: &BlockHeader) -> crate::Result<()> {
+        let key = BlockKey::new(id);
+        self.cursor
+            .put_current(key.as_bytes(), header.as_bytes())?;
         Ok(())
     }
 
@@ -279,7 +273,7 @@ impl<'tx> BlockCursor<'tx> {
         match left.split(offset) {
             None => Ok(SplitResult::Unchanged(left)),
             Some(right) => {
-                self.update_current(left.header())?;
+                self.update_current(*left.id(), left.header())?;
                 let key = BlockKey::new(*right.id());
                 self.cursor
                     .put(key.as_bytes(), right.as_block().header().as_bytes(), 0)?;
@@ -302,7 +296,7 @@ impl<'tx> BlockCursor<'tx> {
         match left.split(offset) {
             None => Ok(SplitResult::Unchanged(left)),
             Some(right) => {
-                self.update_current(left.header())?;
+                self.update_current(*left.id(), left.header())?;
                 let key = BlockKey::new(*right.id());
                 self.cursor
                     .put(key.as_bytes(), right.as_block().header().as_bytes(), 0)?;
@@ -323,20 +317,28 @@ impl<'tx> BlockCursor<'tx> {
         let start = BlockKey::new(ID::new(unsafe { ClientID::new_unchecked(1) }, 0.into()));
 
         let mut ds = IDSet::default();
-        match self.cursor.set_range(start.as_bytes()) {
-            Ok(_) => {}
+        let (mut key, mut value) = match self.cursor.set_range(start.as_bytes()) {
+            Ok(kv) => kv,
             Err(lmdb::Error::NOT_FOUND) => return Ok(ds),
             Err(e) => return Err(e.into()),
         };
 
-        if let Some(block) = self.current().optional()?
-            && block.is_deleted()
-        {
-            ds.insert(*block.id(), block.clock_len());
-        }
-        while let Some(block) = self.next()? {
-            if block.is_deleted() {
-                ds.insert(*block.id(), block.clock_len());
+        loop {
+            match Self::try_parse_block(key, value)? {
+                Some(block) => {
+                    if block.is_deleted() {
+                        ds.insert(*block.id(), block.clock_len());
+                    }
+                }
+                None => break,
+            }
+            match self.cursor.next() {
+                Ok(kv) => {
+                    key = kv.0;
+                    value = kv.1;
+                }
+                Err(lmdb::Error::NOT_FOUND) => break,
+                Err(e) => return Err(e.into()),
             }
         }
         ds.squash();

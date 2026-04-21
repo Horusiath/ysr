@@ -71,8 +71,8 @@ impl<'a> ContentStore<'a> {
         if is_multipart {
             let end = ID::new(curr.client, range.end());
             while curr != end {
-                cursor.next()?;
-                curr = match parse_id(cursor.key()?)? {
+                let (next_key, _) = cursor.next()?;
+                curr = match parse_id(next_key)? {
                     Some(id) => *id,
                     None => break,
                 };
@@ -127,17 +127,24 @@ impl<'tx> Debug for Inspect<'tx> {
         let mut s = f.debug_map();
 
         let mut cursor = self.db.cursor().map_err(|_| std::fmt::Error)?;
-        cursor
+        let (mut key, mut value) = cursor
             .set_range(&[ContentStore::PREFIX])
             .map_err(|_| std::fmt::Error)?;
-        while let Some(id) =
-            parse_id(cursor.key().map_err(|_| std::fmt::Error)?).map_err(|_| std::fmt::Error)?
-        {
-            s.key(id);
-            s.value(&ReadableBytes::new(
-                cursor.value().map_err(|_| std::fmt::Error)?,
-            ));
-            cursor.next().map_err(|_| std::fmt::Error)?;
+        loop {
+            match parse_id(key).map_err(|_| std::fmt::Error)? {
+                Some(id) => {
+                    s.key(id);
+                    s.value(&ReadableBytes::new(value));
+                }
+                None => break,
+            }
+            match cursor.next() {
+                Ok(kv) => {
+                    key = kv.0;
+                    value = kv.1;
+                }
+                Err(_) => break,
+            }
         }
         s.finish()
     }
@@ -168,12 +175,12 @@ impl<'a> ReadRange<'a> {
         match &mut self.state {
             ReadRangeState::Finished => Ok(None),
             ReadRangeState::Init(cursor) => match cursor.next().optional()? {
-                Some(_) => {
+                Some((key, value)) => {
                     let end = ID::new(self.range.head().client, self.range.end());
-                    match parse_id(cursor.key()?)? {
+                    match parse_id(key)? {
                         Some(&id) if id <= end => {
                             let content =
-                                Content::new(self.content_type, Cow::Borrowed(cursor.value()?));
+                                Content::new(self.content_type, Cow::Borrowed(value));
                             Ok(Some(content))
                         }
                         _ => {
@@ -191,7 +198,7 @@ impl<'a> ReadRange<'a> {
                 let mut cursor = db.cursor()?;
                 let key = BlockContentKey::new(*self.range.head());
                 let value = match cursor.set_key(key.as_bytes()) {
-                    Ok(_) => Content::new(self.content_type, Cow::Borrowed(cursor.value()?)),
+                    Ok((_, value)) => Content::new(self.content_type, Cow::Borrowed(value)),
                     Err(LmdbError::NOT_FOUND) => {
                         self.state = ReadRangeState::Finished;
                         return Ok(None);

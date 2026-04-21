@@ -113,36 +113,30 @@ impl<'tx> Iter<'tx> {
     }
 
     pub fn next(&mut self) -> crate::Result<Option<(ClientID, Ranges<'tx>)>> {
-        match &mut self.state {
+        let (k, v) = match &mut self.state {
             IterState::Uninit(db) => {
                 let mut cursor = db.cursor()?;
-                match cursor.set_range(&[DeleteSetStore::PREFIX]) {
-                    Ok(_) => {
-                        let key = match DeleteSetKey::parse(cursor.key()?) {
-                            Some(key) => key,
-                            None => return self.finish(),
-                        };
-                        let ranges = Ranges::new(cursor.value()?);
-                        self.state = IterState::Init(cursor);
-                        Ok(Some((key.client, ranges)))
-                    }
-                    Err(LmdbError::NOT_FOUND) => self.finish(),
-                    Err(e) => Err(e.into()),
-                }
+                let kv = match cursor.set_range(&[DeleteSetStore::PREFIX]) {
+                    Ok(kv) => kv,
+                    Err(LmdbError::NOT_FOUND) => return self.finish(),
+                    Err(e) => return Err(e.into()),
+                };
+                self.state = IterState::Init(cursor);
+                kv
             }
             IterState::Init(cursor) => match cursor.next() {
-                Ok(_) => {
-                    let key = match DeleteSetKey::parse(cursor.key()?) {
-                        Some(key) => key,
-                        None => return self.finish(),
-                    };
-                    let ranges = Ranges::new(cursor.value()?);
-                    Ok(Some((key.client, ranges)))
-                }
-                Err(LmdbError::NOT_FOUND) => self.finish(),
-                Err(e) => Err(e.into()),
+                Ok(kv) => kv,
+                Err(LmdbError::NOT_FOUND) => return self.finish(),
+                Err(e) => return Err(e.into()),
             },
-            IterState::Finished => Ok(None),
+            IterState::Finished => return Ok(None),
+        };
+        match DeleteSetKey::parse(k) {
+            Some(key) => {
+                let ranges = Ranges::new(v);
+                Ok(Some((key.client, ranges)))
+            }
+            None => self.finish(),
         }
     }
 

@@ -267,7 +267,7 @@ impl<'tx, 'db> ListRef<&'tx mut Transaction<'db>> {
 
         // update current parent node length
         tx.cursor.seek(*self.block.id())?;
-        tx.cursor.update_current(self.block.header())?;
+        tx.cursor.update_current(*self.block.id(), self.block.header())?;
 
         Ok(())
     }

@@ -119,38 +119,28 @@ pub enum Iter<'a> {
 impl<'a> Iter<'a> {
     #[allow(unused)]
     pub fn next(&mut self) -> crate::Result<Option<(&'a str, &'a [u8])>> {
-        match self {
+        let (key, value) = match self {
             Iter::UnInit(db) => {
                 let mut cursor = db.cursor()?;
-                match cursor.set_range(&[KEY_PREFIX_META]) {
-                    Ok(_) => {
-                        let key: &'a [u8] = cursor.key()?;
-                        if key[0] != KEY_PREFIX_META {
-                            return Ok(None);
-                        }
-                        let key: &'a str = unsafe { std::str::from_utf8_unchecked(&key[1..]) };
-                        let value: &'a [u8] = cursor.value()?;
-                        *self = Iter::Init(cursor);
-                        Ok(Some((key, value)))
-                    }
-                    Err(LmdbError::NOT_FOUND) => Ok(None),
-                    Err(e) => Err(e.into()),
-                }
+                let kv = match cursor.set_range(&[KEY_PREFIX_META]) {
+                    Ok(kv) => kv,
+                    Err(LmdbError::NOT_FOUND) => return Ok(None),
+                    Err(e) => return Err(e.into()),
+                };
+                *self = Iter::Init(cursor);
+                kv
             }
             Iter::Init(cursor) => match cursor.next() {
-                Ok(_) => {
-                    let key: &'a [u8] = cursor.key()?;
-                    if key[0] != KEY_PREFIX_META {
-                        return Ok(None);
-                    }
-                    let key: &'a str = unsafe { std::str::from_utf8_unchecked(&key[1..]) };
-                    let value: &'a [u8] = cursor.value()?;
-                    Ok(Some((key, value)))
-                }
-                Err(LmdbError::NOT_FOUND) => Ok(None),
-                Err(e) => Err(e.into()),
+                Ok(kv) => kv,
+                Err(LmdbError::NOT_FOUND) => return Ok(None),
+                Err(e) => return Err(e.into()),
             },
+        };
+        if key[0] != KEY_PREFIX_META {
+            return Ok(None);
         }
+        let key: &'a str = unsafe { std::str::from_utf8_unchecked(&key[1..]) };
+        Ok(Some((key, value)))
     }
 }
 

@@ -1083,7 +1083,7 @@ impl<'tx> TxMutScope<'tx> {
                                 }
                                 let mut block: BlockMut = block.into();
                                 block.set_deleted();
-                                self.cursor.update_current(block.header())?;
+                                self.cursor.update_current(*block.id(), block.header())?;
                                 self.state.delete_set.insert(*block.id(), block.clock_len());
                             }
                             block = match self.cursor.next()? {

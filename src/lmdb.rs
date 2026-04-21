@@ -301,55 +301,66 @@ pub struct Cursor<'txn> {
 
 impl<'txn> Cursor<'txn> {
     /// Position the cursor at the exact key (`MDB_SET`).
-    pub fn set_key(&mut self, key: &[u8]) -> Result<(), Error> {
+    /// Returns the key and value at the matched position.
+    pub fn set_key(&mut self, key: &[u8]) -> Result<(&'txn [u8], &'txn [u8]), Error> {
         let mut key_val = to_mdb_val(key);
         let mut data_val = empty_mdb_val();
         let rc = unsafe { mdb_cursor_get(self.cursor, &mut key_val, &mut data_val, MDB_SET) };
-        lmdb_result(rc)
+        lmdb_result(rc)?;
+        Ok(unsafe { (from_mdb_val(&key_val), from_mdb_val(&data_val)) })
     }
 
-    /// Position the cursor at the first key ≥ `key` (`MDB_SET_RANGE`).
-    pub fn set_range(&mut self, key: &[u8]) -> Result<(), Error> {
+    /// Position the cursor at the first key >= `key` (`MDB_SET_RANGE`).
+    /// Returns the key and value at the matched position.
+    pub fn set_range(&mut self, key: &[u8]) -> Result<(&'txn [u8], &'txn [u8]), Error> {
         let mut key_val = to_mdb_val(key);
         let mut data_val = empty_mdb_val();
         let rc = unsafe { mdb_cursor_get(self.cursor, &mut key_val, &mut data_val, MDB_SET_RANGE) };
-        lmdb_result(rc)
+        lmdb_result(rc)?;
+        Ok(unsafe { (from_mdb_val(&key_val), from_mdb_val(&data_val)) })
     }
 
     /// Advance the cursor to the next entry (`MDB_NEXT`).
-    pub fn next(&mut self) -> Result<(), Error> {
+    /// Returns the key and value at the new position.
+    pub fn next(&mut self) -> Result<(&'txn [u8], &'txn [u8]), Error> {
         let mut key_val = empty_mdb_val();
         let mut data_val = empty_mdb_val();
         let rc = unsafe { mdb_cursor_get(self.cursor, &mut key_val, &mut data_val, MDB_NEXT) };
-        lmdb_result(rc)
+        lmdb_result(rc)?;
+        Ok(unsafe { (from_mdb_val(&key_val), from_mdb_val(&data_val)) })
     }
 
     /// Move the cursor to the previous entry (`MDB_PREV`).
-    pub fn prev(&mut self) -> Result<(), Error> {
+    /// Returns the key and value at the new position.
+    pub fn prev(&mut self) -> Result<(&'txn [u8], &'txn [u8]), Error> {
         let mut key_val = empty_mdb_val();
         let mut data_val = empty_mdb_val();
         let rc = unsafe { mdb_cursor_get(self.cursor, &mut key_val, &mut data_val, MDB_PREV) };
-        lmdb_result(rc)
+        lmdb_result(rc)?;
+        Ok(unsafe { (from_mdb_val(&key_val), from_mdb_val(&data_val)) })
     }
 
-    /// Return the key at the current cursor position (`MDB_GET_CURRENT`).
+    /// Return both key and value at the current cursor position in a single
+    /// FFI call (`MDB_GET_CURRENT`).
+    pub fn key_value(&self) -> Result<(&'txn [u8], &'txn [u8]), Error> {
+        let mut key_val = empty_mdb_val();
+        let mut data_val = empty_mdb_val();
+        let rc =
+            unsafe { mdb_cursor_get(self.cursor, &mut key_val, &mut data_val, MDB_GET_CURRENT) };
+        lmdb_result(rc)?;
+        Ok(unsafe { (from_mdb_val(&key_val), from_mdb_val(&data_val)) })
+    }
+
+    /// Return the key at the current cursor position.
+    #[inline]
     pub fn key(&self) -> Result<&'txn [u8], Error> {
-        let mut key_val = empty_mdb_val();
-        let mut data_val = empty_mdb_val();
-        let rc =
-            unsafe { mdb_cursor_get(self.cursor, &mut key_val, &mut data_val, MDB_GET_CURRENT) };
-        lmdb_result(rc)?;
-        Ok(unsafe { from_mdb_val(&key_val) })
+        self.key_value().map(|(k, _)| k)
     }
 
-    /// Return the value at the current cursor position (`MDB_GET_CURRENT`).
+    /// Return the value at the current cursor position.
+    #[inline]
     pub fn value(&self) -> Result<&'txn [u8], Error> {
-        let mut key_val = empty_mdb_val();
-        let mut data_val = empty_mdb_val();
-        let rc =
-            unsafe { mdb_cursor_get(self.cursor, &mut key_val, &mut data_val, MDB_GET_CURRENT) };
-        lmdb_result(rc)?;
-        Ok(unsafe { from_mdb_val(&data_val) })
+        self.key_value().map(|(_, v)| v)
     }
 
     /// Write a key-value pair via the cursor (`mdb_cursor_put`).
@@ -361,18 +372,11 @@ impl<'txn> Cursor<'txn> {
     }
 
     /// Replace the value at the current cursor position (`MDB_CURRENT`).
-    ///
-    /// Reads the current key internally, then overwrites the value.
-    pub fn put_current(&mut self, value: &[u8]) -> Result<(), Error> {
-        // Read current key (required by MDB_CURRENT).
-        let mut key_val = empty_mdb_val();
-        let mut old_data = empty_mdb_val();
-        let rc =
-            unsafe { mdb_cursor_get(self.cursor, &mut key_val, &mut old_data, MDB_GET_CURRENT) };
-        lmdb_result(rc)?;
-        // Overwrite value in place.
-        let mut new_data = to_mdb_val(value);
-        let rc = unsafe { mdb_cursor_put(self.cursor, &mut key_val, &mut new_data, MDB_CURRENT) };
+    /// The caller must provide the key that matches the current position.
+    pub fn put_current(&mut self, key: &[u8], value: &[u8]) -> Result<(), Error> {
+        let mut key_val = to_mdb_val(key);
+        let mut data_val = to_mdb_val(value);
+        let rc = unsafe { mdb_cursor_put(self.cursor, &mut key_val, &mut data_val, MDB_CURRENT) };
         lmdb_result(rc)
     }
 
