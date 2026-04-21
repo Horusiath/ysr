@@ -1134,7 +1134,7 @@ impl InsertBlockData {
                 }
                 Some(Node::Nested(parent_id)) => {
                     writer.write_parent_info(false)?;
-                    writer.write_left_id(&parent_id)?;
+                    writer.write_left_id(parent_id)?;
                 }
                 _ => return Err(crate::Error::BlockNotFound(block.parent)),
             }
@@ -1148,7 +1148,7 @@ impl InsertBlockData {
         let data = block.try_inline_data();
         match content_type {
             ContentType::Deleted => {
-                writer.write_len(block.clock_len().into())?;
+                writer.write_len(block.clock_len())?;
             }
             ContentType::Binary => {
                 let content = match data {
@@ -1193,8 +1193,8 @@ impl InsertBlockData {
                 }
                 None => {
                     let mut i = self.content.iter();
-                    writer.write_len(block.clock_len().into())?;
-                    while let Some(content) = i.next() {
+                    writer.write_len(block.clock_len())?;
+                    for content in i {
                         writer.write_all(content.bytes())?;
                     }
                 }

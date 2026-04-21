@@ -206,7 +206,7 @@ impl TransactionState {
             writer.write_var(start_clock)?;
             // write first block - it may start at offset inside the block
             Transaction::write_block(
-                &block,
+                block,
                 start_clock - block.id().clock,
                 &contents,
                 &map_entries,
@@ -548,7 +548,7 @@ impl<'db> Transaction<'db> {
         let data = block.try_inline_data();
         match content_type {
             ContentType::Deleted => {
-                writer.write_len(block.clock_len().into())?;
+                writer.write_len(block.clock_len())?;
             }
             ContentType::Binary => {
                 let content = match data {
@@ -593,7 +593,7 @@ impl<'db> Transaction<'db> {
                 }
                 None => {
                     let mut i = content_store.read_range(content_type, block.range());
-                    writer.write_len(block.clock_len().into())?;
+                    writer.write_len(block.clock_len())?;
                     while let Some(content) = i.next()? {
                         writer.write_all(content.bytes())?;
                     }
@@ -697,7 +697,7 @@ impl<'db> Transaction<'db> {
             Update::decode(pending.update)?
         };
         if !pending.delete_set.is_empty() {
-            pending_update.delete_set = IDSet::decode(&pending.delete_set)?;
+            pending_update.delete_set = IDSet::decode(pending.delete_set)?;
         }
 
         let missing_sv = pending.missing_sv;

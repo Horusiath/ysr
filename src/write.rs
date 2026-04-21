@@ -1,6 +1,6 @@
 use crate::block::ID;
 use crate::varint::{Signed, SignedVarInt, VarInt};
-use crate::{ClientID, Clock, U64, lib0};
+use crate::{ClientID, Clock, lib0};
 use serde::Serialize;
 use std::io::Write;
 use std::ops::Range;

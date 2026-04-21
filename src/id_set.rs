@@ -175,7 +175,7 @@ impl IDRange {
     fn squash(&mut self) {
         let ranges = &mut self.0;
         if !ranges.is_empty() {
-            ranges.sort_by(|a, b| a.start.cmp(&b.start));
+            ranges.sort_by_key(|a| a.start);
             let mut new_len = 1;
 
             let len = ranges.len() as isize;

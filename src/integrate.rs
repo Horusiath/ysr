@@ -1,9 +1,8 @@
 use crate::Clock;
 use crate::block::{BlockMut, InsertBlockData};
-use crate::lmdb::Database;
 use crate::node::NodeType;
 use crate::store::Db;
-use crate::store::block_store::{BlockCursor, BlockStore, SplitResult};
+use crate::store::block_store::{BlockCursor, SplitResult};
 use std::collections::HashSet;
 use std::ops::Deref;
 

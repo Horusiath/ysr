@@ -712,7 +712,7 @@ impl Number {
     pub fn as_f64(self) -> Option<f64> {
         match self {
             Number::Int(value) => {
-                if value >= Self::I64_MIN_SAFE_INTEGER && value <= Self::I64_MAX_SAFE_INTEGER {
+                if (Self::I64_MIN_SAFE_INTEGER..=Self::I64_MAX_SAFE_INTEGER).contains(&value) {
                     Some(value as f64)
                 } else {
                     None

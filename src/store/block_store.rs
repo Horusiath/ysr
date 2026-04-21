@@ -1,5 +1,5 @@
 use crate::block::BlockFlags;
-use crate::content::{ContentType, utf16_to_utf8};
+use crate::content::ContentType;
 use crate::id_set::IDSet;
 use crate::lmdb::{Cursor, Database, Error as LmdbError};
 use crate::node::{Named, Node, NodeType};

@@ -4,11 +4,9 @@ use crate::block::{
 use crate::content::{Content, ContentType, FormatAttribute};
 use crate::id_set::IDSet;
 use crate::integrate::IntegrationContext;
-use crate::lmdb::Database;
 use crate::node::{Node, NodeID, NodeType};
 use crate::read::{Decode, Decoder, ReadExt};
-use crate::store::Db;
-use crate::transaction::{TransactionState, TxMutScope};
+use crate::transaction::TxMutScope;
 use crate::write::Encoder;
 use crate::{ClientID, Clock, U32};
 use bytes::{BufMut, BytesMut};
@@ -348,11 +346,11 @@ impl Update {
                 result.push_back(old_last);
 
                 // Check if old entry also has a suffix beyond carrier
-                if old_end > curr_end {
-                    if let Some(mut rem) = remainder {
-                        let skip = curr_end + 1 - rem.id().clock;
-                        suffix = rem.split(skip).or(suffix);
-                    }
+                if old_end > curr_end
+                    && let Some(mut rem) = remainder
+                {
+                    let skip = curr_end + 1 - rem.id().clock;
+                    suffix = rem.split(skip).or(suffix);
                 }
                 // Prefix is adjacent to carrier — try merge or push
                 if result.back().unwrap().can_merge(&carrier) {

@@ -5,8 +5,8 @@ use crate::block::{
 };
 use crate::lib0::Value;
 use crate::node::{Named, Node, NodeID};
-use crate::read::{Decoder, ReadExt};
-use crate::write::{Encoder, WriteExt};
+use crate::read::Decoder;
+use crate::write::WriteExt;
 use crate::{Out, Unmounted, lib0};
 use bytes::Bytes;
 use serde::Serialize;

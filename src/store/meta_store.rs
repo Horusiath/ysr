@@ -63,7 +63,7 @@ impl<'tx> MetaStore<'tx> {
     }
 
     pub fn clear_pending(&self) -> crate::Result<()> {
-        self.remove(&Self::KEY_MISSING_SV)?;
+        self.remove(Self::KEY_MISSING_SV)?;
         self.remove(Self::KEY_PENDING)?;
         self.remove(Self::KEY_PENDING_DS)?;
         Ok(())

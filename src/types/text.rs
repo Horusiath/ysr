@@ -15,7 +15,6 @@ use smallvec::smallvec;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, Bound};
 use std::fmt::{Display, Formatter};
-use std::marker::PhantomData;
 use std::ops::{Deref, RangeBounds};
 
 pub type TextRef<Txn> = Mounted<Text, Txn>;
@@ -336,7 +335,7 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
         Self::insert_at(
             &mut tx,
             &mut pos,
-            StringPrelim::new(chunk.as_ref()),
+            StringPrelim::new(chunk),
             Some(Box::new(attrs)),
         )
     }
@@ -540,8 +539,8 @@ where
 
     fn integrate<'tx>(
         self,
-        parent: &mut BlockMut,
-        tx: &mut TxMutScope<'tx>,
+        _parent: &mut BlockMut,
+        _tx: &mut TxMutScope<'tx>,
     ) -> crate::Result<Self::Return> {
         Ok(())
     }
@@ -764,8 +763,8 @@ impl<'tx> Uncommitted<'tx> {
                         }
                     } else if !block.is_deleted() {
                         self.old_attrs.insert(key.into(), value.clone());
-                        if let Some(attrs) = &mut self.attrs {
-                            if let Some(attr) = attrs.get(key) {
+                        if let Some(attrs) = &mut self.attrs
+                            && let Some(attr) = attrs.get(key) {
                                 if attr != &value {
                                     if matches!(self.delta, Some(Delta::Retain(_, _))) {
                                         // same as self.add_op() but without encapsulation that breaks borrow checker
@@ -790,7 +789,6 @@ impl<'tx> Uncommitted<'tx> {
                                     // ??
                                 }
                             }
-                        }
                     }
 
                     if !block.is_deleted() {
@@ -910,7 +908,7 @@ impl<'a, 'tx> Chunks<'a, 'tx> {
                 Some(attrs) if attrs.is_empty() => None,
                 other => other.clone(),
             };
-            let mut buf = std::mem::replace(&mut self.buf, String::new());
+            let mut buf = std::mem::take(&mut self.buf);
             buf.shrink_to_fit();
             Some(Chunk {
                 insert: Out::Value(buf.into()),
@@ -1010,8 +1008,8 @@ impl<'a, 'tx> Chunks<'a, 'tx> {
                         let out: Out = Out::Node(*block.id());
                         return Ok(Some(self.stash_or_return(out)));
                     }
-                    ContentType::Format => {
-                        if Self::seen(self.to, &block) {
+                    ContentType::Format
+                        if Self::seen(self.to, &block) => {
                             let chunk = self.pack_str();
                             let contents = self.tx.db.contents();
                             let content = get_content(&block, &contents)?;
@@ -1022,7 +1020,6 @@ impl<'a, 'tx> Chunks<'a, 'tx> {
                                 return Ok(Some(chunk));
                             }
                         }
-                    }
                     _ => { /* ignore */ }
                 }
             }
@@ -1171,7 +1168,7 @@ impl<'a> BlockPosition<'a> {
         let right = self.right.as_ref();
 
         let (block, result) =
-            InsertBlockData::insert_block(tx, &mut self.parent, left, right, None, value)?;
+            InsertBlockData::insert_block(tx, self.parent, left, right, None, value)?;
         self.left = Some(block.last_id());
         Ok(result)
     }
@@ -1187,12 +1184,11 @@ impl<'a> BlockPosition<'a> {
                     let contents = cursor.content_store();
                     let content = get_content(&right, &contents)?;
                     let fmt = content.as_format()?;
-                    if let Some(attr_value) = attrs.get(fmt.key()) {
-                        if attr_value == &fmt.value()? {
+                    if let Some(attr_value) = attrs.get(fmt.key())
+                        && attr_value == &fmt.value()? {
                             forward(self, cursor)?;
                             continue;
                         }
-                    }
                 }
                 break;
             }
@@ -1254,7 +1250,7 @@ impl<'a> BlockPosition<'a> {
             let fmt = FormatPrelim::new(key, value);
             let (block, _) = InsertBlockData::insert_block(
                 tx,
-                &mut self.parent,
+                self.parent,
                 self.left.as_ref(),
                 self.right.as_ref(),
                 None,
@@ -1333,8 +1329,8 @@ fn clean_format_gap<'tx>(
         && end != current
     {
         let block = tx.cursor.seek(current_id)?;
-        if !block.is_deleted() {
-            if block.content_type() == ContentType::Format {
+        if !block.is_deleted()
+            && block.content_type() == ContentType::Format {
                 let contents = tx.db.contents();
                 let content = get_content(&block, &contents)?;
                 let fmt = content.as_format()?;
@@ -1347,7 +1343,6 @@ fn clean_format_gap<'tx>(
                     cleanups += 1;
                 }
             }
-        }
         current = block.right().copied();
     }
     Ok(cleanups)
