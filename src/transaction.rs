@@ -570,8 +570,8 @@ impl<'db> Transaction<'db> {
                     Some(data) => data,
                     None => content_store.get(*block.id())?,
                 };
-                let json: serde_json::Value = serde_json::from_slice(content)?;
-                writer.write_json(&json)?;
+                let value: lib0::Value = lib0::from_slice(content)?;
+                writer.write_json(&value)?;
             }
             ContentType::Format => {
                 let content = match data {

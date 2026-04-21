@@ -177,7 +177,7 @@ impl<'de> Deserialize<'de> for Value {
             where
                 E: Error,
             {
-                Ok(Value::Undefined)
+                Ok(Value::Null)
             }
 
             #[inline]

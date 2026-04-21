@@ -57,7 +57,6 @@ fn serialize_adt() {
 
 #[test]
 fn serialize_value() {
-    roundtrip(&Value::Undefined);
     roundtrip(&Value::Null);
     roundtrip(&Value::Bool(true));
     roundtrip(&Value::Bool(false));

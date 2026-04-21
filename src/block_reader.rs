@@ -178,7 +178,7 @@ impl Update {
 
                 block.set_clock_len(1.into());
                 let json = decoder.read_json::<serde_json::Value>()?;
-                serde_json::to_writer(&mut w, &json)?;
+                crate::lib0::to_writer(&mut w, &json)?;
 
                 result.push(Content::new(ContentType::Embed, Cow::Owned(w)));
             }

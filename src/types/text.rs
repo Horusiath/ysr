@@ -818,7 +818,17 @@ impl<'tx> Uncommitted<'tx> {
                                 ContentType::Node => Out::Node(*block.id()),
                                 _ => unreachable!(),
                             };
-                            self.pending_delta = Some(Delta::Insert(out, None));
+                            let pending_attrs = if self.current_attrs.is_empty() {
+                                None
+                            } else {
+                                Some(Box::new(self.current_attrs.clone()))
+                            };
+                            let pending_delta = Some(Delta::Insert(out, pending_attrs));
+                            if delta.is_some() {
+                                self.pending_delta = pending_delta;
+                            } else {
+                                delta = pending_delta;
+                            }
                         }
                     } else if state.has_deleted(&id) {
                         if !matches!(self.delta, Some(Delta::Delete(_))) {
