@@ -22,3 +22,4 @@ genawaiter2 = "0.100.1"
 
 [dev-dependencies]
 tempfile = "3.19"
+flate2 = "1.1.9"

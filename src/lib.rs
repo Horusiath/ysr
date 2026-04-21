@@ -11,7 +11,7 @@ mod multi_doc;
 mod node;
 mod output;
 mod prelim;
-mod read;
+pub mod read;
 mod state_vector;
 mod store;
 #[cfg(test)]
