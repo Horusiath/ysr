@@ -5,6 +5,7 @@ use crate::content::{Content, ContentType, FormatAttribute};
 use crate::id_set::IDSet;
 use crate::integrate::IntegrationContext;
 use crate::lib0::v1::DecoderV1;
+use crate::lib0::v2::DecoderV2;
 use crate::lib0::{Decode, Decoder, Encoder, ReadExt, Version};
 use crate::node::{Node, NodeID, NodeType};
 use crate::transaction::TxMutScope;
@@ -30,7 +31,10 @@ impl Update {
                 let mut decoder = DecoderV1::from_slice(bytes);
                 Self::decode_with(&mut decoder)
             }
-            Version::V2 => todo!(),
+            Version::V2 => {
+                let mut decoder = DecoderV2::from_slice(bytes)?;
+                Self::decode_with(&mut decoder)
+            }
         }
     }
 

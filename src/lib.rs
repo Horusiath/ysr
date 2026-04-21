@@ -74,7 +74,7 @@ pub enum Error {
     Custom(DynError),
     #[error("block not found: {0}")]
     BlockNotFound(ID),
-    #[error("Client ID is not valid 53-bit integer")]
+    #[error("Client ID must be between 1 and 2^32")]
     ClientIDOutOfRange,
     #[error("LMDB error: {0}")]
     Lmdb(#[from] crate::lmdb::Error),
@@ -156,6 +156,7 @@ impl<T> Optional for Result<T, crate::lmdb::Error> {
 pub struct ClientID(U32);
 
 impl ClientID {
+    const MAX: Self = ClientID(U32::new(u32::MAX));
     const ROOT: Self = ClientID(U32::new(0));
 
     pub fn new_random() -> Self {

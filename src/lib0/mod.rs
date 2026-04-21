@@ -70,6 +70,7 @@ impl TryFrom<u8> for Tag {
 }
 
 use crate::lib0::v1::{DecoderV1, EncoderV1};
+use crate::lib0::v2::{DecoderV2, EncoderV2};
 use crate::lib0::varint::{Signed, SignedVarInt, VarInt};
 use crate::{ClientID, Clock, ID};
 pub use copy::copy;
@@ -229,7 +230,11 @@ pub trait Encode {
                 self.encode_with(&mut encoder)?;
                 Ok(encoder.into_inner())
             }
-            Version::V2 => todo!(),
+            Version::V2 => {
+                let mut encoder = EncoderV2::new(Vec::new());
+                self.encode_with(&mut encoder)?;
+                Ok(encoder.into_inner()?)
+            }
         }
     }
 
@@ -405,7 +410,10 @@ pub trait Decode: Sized {
                 let mut decoder = DecoderV1::from_slice(data);
                 Self::decode_with(&mut decoder)
             }
-            Version::V2 => todo!(),
+            Version::V2 => {
+                let mut decoder = DecoderV2::from_slice(data)?;
+                Self::decode_with(&mut decoder)
+            }
         }
     }
 }

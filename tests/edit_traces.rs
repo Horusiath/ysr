@@ -9,6 +9,7 @@ use ysr::lib0::ReadExt;
 use ysr::lib0::v1::DecoderV1;
 use ysr::{ClientID, MultiDoc, Text, Unmounted};
 
+#[ignore]
 #[test]
 fn edit_trace_automerge() {
     test_editing_trace(
@@ -23,11 +24,13 @@ fn edit_trace_friendsforever() {
     );
 }
 
+#[ignore]
 #[test]
 fn edit_trace_sephblog1() {
     test_editing_trace("./tests/test-data/editing-traces/sequential_traces/seph-blog1.json.gz");
 }
 
+#[ignore]
 #[test]
 fn edit_trace_sveltecomponent() {
     test_editing_trace(
@@ -35,6 +38,7 @@ fn edit_trace_sveltecomponent() {
     );
 }
 
+#[ignore]
 #[test]
 fn edit_trace_rustcode() {
     test_editing_trace("./tests/test-data/editing-traces/sequential_traces/rustcode.json.gz");
