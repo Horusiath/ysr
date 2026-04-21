@@ -2,7 +2,7 @@ use crate::lmdb::{Cursor, Database, Error as LmdbError};
 use crate::node::NodeID;
 use crate::store::KEY_PREFIX_MAP;
 use crate::{ID, U32};
-use smallvec::{ExtendFromSlice, SmallVec};
+use smallvec::SmallVec;
 use std::fmt::{Debug, Formatter};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
@@ -53,6 +53,7 @@ impl<'tx> MapEntriesStore<'tx> {
         MapEntries::new(self.db, *node_id)
     }
 
+    #[allow(unused)]
     pub fn remove_all(&self, node_id: &NodeID) -> crate::Result<usize> {
         let key = MapEntriesKey::new(*node_id);
         let mut cursor = self.db.cursor()?;
@@ -79,10 +80,12 @@ impl<'tx> MapEntriesStore<'tx> {
         Ok(deleted_entries)
     }
 
+    #[allow(unused)]
     pub fn iter(&self) -> Iter<'tx> {
         Iter::new(self.db)
     }
 
+    #[allow(unused)]
     pub fn inspect(&self) -> Inspector<'tx> {
         Inspector { db: self.db }
     }
@@ -311,6 +314,7 @@ impl MapEntriesKey {
     }
 }
 
+#[allow(unused)]
 pub struct Iter<'tx> {
     state: IterState<'tx>,
 }
@@ -327,6 +331,8 @@ impl<'tx> Iter<'tx> {
             state: IterState::Uninit(db),
         }
     }
+
+    #[allow(unused)]
     pub fn next(&mut self) -> crate::Result<Option<(MapKey<'tx>, &'tx ID)>> {
         match &mut self.state {
             IterState::Uninit(db) => {
@@ -372,6 +378,7 @@ impl<'tx> Iter<'tx> {
     }
 }
 
+#[allow(unused)]
 pub struct Inspector<'tx> {
     db: Database<'tx>,
 }

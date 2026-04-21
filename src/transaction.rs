@@ -91,12 +91,12 @@ impl TransactionState {
         if let Some(summary) = summary.as_deref_mut()
             && summary.flags.contains(CommitFlags::OBSERVE_NODES)
         {
-            // gather info about which nodes have changed
-            todo!();
-            if summary.flags.contains(CommitFlags::OBSERVE_NODES_DEEP) {
-                // bubble up changes to parent nodes and gather them as well
-                todo!();
-            }
+            // // gather info about which nodes have changed
+            // todo!();
+            // if summary.flags.contains(CommitFlags::OBSERVE_NODES_DEEP) {
+            //     // bubble up changes to parent nodes and gather them as well
+            //     todo!();
+            // }
         }
 
         //if (doc.gc) {
@@ -295,15 +295,11 @@ impl LazyState {
         }
     }
 
-    pub fn get(&self) -> Option<&TransactionState> {
+    pub(crate) fn get(&self) -> Option<&TransactionState> {
         self.inner.as_deref()
     }
 
-    pub fn get_mut(&mut self) -> Option<&mut TransactionState> {
-        self.inner.as_deref_mut()
-    }
-
-    pub fn get_or_init(&mut self, db: Database<'_>) -> &mut TransactionState {
+    pub(crate) fn get_or_init(&mut self, db: Database<'_>) -> &mut TransactionState {
         self.inner.get_or_insert_with(|| {
             let client_id = db.meta().client_id().unwrap();
             let begin_state = db.state_vector().state_vector().unwrap();
@@ -311,7 +307,7 @@ impl LazyState {
         })
     }
 
-    pub fn take(&mut self) -> Option<Box<TransactionState>> {
+    pub(crate) fn take(&mut self) -> Option<Box<TransactionState>> {
         self.inner.take()
     }
 
@@ -624,19 +620,6 @@ impl<'db> Transaction<'db> {
         found.ok_or_else(|| crate::Error::NotFound)
     }
 
-    fn write_updates(
-        cursor: &mut impl Iterator<Item = crate::Result<crate::block::InsertBlockData>>,
-        buf: &mut BytesMut,
-    ) -> crate::Result<usize> {
-        let mut blocks_count = 0;
-        for result in cursor {
-            let insert = result?;
-            blocks_count += 1;
-            buf.extend_from_slice(insert.block.as_bytes());
-        }
-        Ok(blocks_count)
-    }
-
     pub fn apply_update<D: Decoder>(&mut self, decoder: &mut D) -> crate::Result<()> {
         let mut current = Some(Update::decode_with(decoder)?);
         while let Some(update) = current.take() {
@@ -879,6 +862,7 @@ impl<'tx> PendingUpdate<'tx> {
         }
     }
 
+    #[allow(unused)]
     pub fn is_empty(&self) -> bool {
         self.update.is_empty() && self.delete_set.is_empty() && self.missing_sv.is_empty()
     }

@@ -190,7 +190,6 @@ struct InitIterState<'a> {
     // all fields bellow are referencing the database above which is provided by its pinned address
     // they won't outlive it
     node_entries: MapEntries<'static>,
-    map_entries: MapEntriesStore<'static>,
 }
 
 impl<'a> InitIterState<'a> {
@@ -200,11 +199,7 @@ impl<'a> InitIterState<'a> {
         let map_entries: MapEntriesStore<'static> =
             unsafe { std::mem::transmute(db.map_entries()) };
         let node_entries: MapEntries<'static> = map_entries.entries(&node_id);
-        Ok(InitIterState {
-            db,
-            node_entries,
-            map_entries,
-        })
+        Ok(InitIterState { db, node_entries })
     }
 }
 

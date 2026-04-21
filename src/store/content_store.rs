@@ -9,7 +9,7 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 #[repr(transparent)]
 #[derive(Clone, Copy)]
-pub(crate) struct ContentStore<'a> {
+pub struct ContentStore<'a> {
     db: Database<'a>,
 }
 

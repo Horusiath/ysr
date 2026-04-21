@@ -43,6 +43,7 @@ pub trait Encoder: Write {
 
     /// Encode JSON-like data type. This is a complex structure which is an extension to JavaScript
     /// Object Notation with some extra cases.
+    #[allow(unused)]
     fn write_any<S: Serialize>(&mut self, any: &S) -> crate::Result<()>;
 
     /// Encode JSON-like data type as nested JSON string. This is a complex structure which is an
@@ -75,11 +76,13 @@ pub trait WriteExt: Write + Sized {
     }
 
     /// Write an unsigned integer (16bit)
+    #[allow(unused)]
     fn write_u16(&mut self, num: u16) -> std::io::Result<()> {
         self.write_all(&[num as u8, (num >> 8) as u8])
     }
 
     /// Write an unsigned integer (32bit)
+    #[allow(unused)]
     fn write_u32(&mut self, num: u32) -> std::io::Result<()> {
         self.write_all(&[
             num as u8,
@@ -90,6 +93,7 @@ pub trait WriteExt: Write + Sized {
     }
 
     /// Write an unsigned integer (32bit) in big endian order (most significant byte first)
+    #[allow(unused)]
     fn write_u32_be(&mut self, num: u32) -> std::io::Result<()> {
         self.write_all(&[
             (num >> 24) as u8,
@@ -116,6 +120,7 @@ pub trait WriteExt: Write + Sized {
     /// to use the same function for BigInt and 53bit integers.
     ///
     /// We use the 7th bit instead for signaling that this is a negative number.
+    #[allow(unused)]
     #[inline]
     fn write_var_signed<T: SignedVarInt>(&mut self, num: &Signed<T>) -> std::io::Result<()> {
         T::write_signed(num, self)
@@ -154,6 +159,7 @@ pub trait WriteExt: Write + Sized {
     }
 
     /// Write BigUInt in 8 bytes in big endian order.
+    #[allow(unused)]
     #[inline]
     fn write_u64(&mut self, num: u64) -> std::io::Result<()> {
         self.write_all(&num.to_be_bytes())

@@ -66,6 +66,7 @@ impl<'tx> Db<'tx> for Database<'tx> {
         DeleteSetStore::new(*self)
     }
 
+    #[allow(unused)]
     fn inspect(&self) -> DbInspector<'tx> {
         DbInspector::new(*self)
     }

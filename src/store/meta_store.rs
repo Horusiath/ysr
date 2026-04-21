@@ -90,10 +90,12 @@ impl<'tx> MetaStore<'tx> {
         Ok(())
     }
 
+    #[allow(unused)]
     pub fn iter(&self) -> Iter<'_> {
         Iter::UnInit(self.db)
     }
 
+    #[allow(unused)]
     pub fn inspect(&self) -> Inspector<'_> {
         Inspector { store: *self }
     }
@@ -106,12 +108,14 @@ fn meta_key(key: &str) -> SmallVec<[u8; 24]> {
     buf
 }
 
+#[allow(unused)]
 pub enum Iter<'a> {
     UnInit(Database<'a>),
     Init(Cursor<'a>),
 }
 
 impl<'a> Iter<'a> {
+    #[allow(unused)]
     pub fn next(&mut self) -> crate::Result<Option<(&'a str, &'a [u8])>> {
         match self {
             Iter::UnInit(db) => {
@@ -148,6 +152,7 @@ impl<'a> Iter<'a> {
     }
 }
 
+#[allow(unused)]
 pub struct Inspector<'a> {
     store: MetaStore<'a>,
 }

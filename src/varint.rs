@@ -14,9 +14,7 @@ impl Display for VarIntOutOfRangeError {
 }
 
 fn out_of_range<T>() -> std::io::Result<T> {
-    Err(std::io::Error::other(
-        Box::new(VarIntOutOfRangeError),
-    ))
+    Err(std::io::Error::other(Box::new(VarIntOutOfRangeError)))
 }
 
 pub trait VarInt: Sized + Copy {
@@ -305,22 +303,6 @@ fn read_var_u64<R: Read>(r: &mut R) -> std::io::Result<u64> {
     }
 }
 
-pub(crate) fn var_u64_from_slice(r: &[u8]) -> (u64, usize) {
-    let mut num = 0;
-    let mut len = 0;
-    for &r in r {
-        num |= u64::wrapping_shl((r & 0b01111111) as u64, len as u32);
-        len += 7;
-        if r < 0b10000000 {
-            return (num, len / 7);
-        }
-        if len > 70 {
-            break;
-        }
-    }
-    (0, 0)
-}
-
 fn read_var_u32<R: Read>(r: &mut R) -> std::io::Result<u32> {
     let mut num = 0;
     let mut len: usize = 0;
@@ -360,6 +342,7 @@ fn read_var_i64<R: Read>(reader: &mut R) -> std::io::Result<i64> {
     }
 }
 
+#[allow(unused)]
 pub trait SignedVarInt: Sized + Copy {
     fn write_signed<W: Write>(value: &Signed<Self>, w: &mut W) -> std::io::Result<()>;
     fn read_signed<R: Read>(r: &mut R) -> std::io::Result<Signed<Self>>;
@@ -374,6 +357,7 @@ pub struct Signed<T: Sized + Copy> {
     is_negative: bool,
 }
 
+#[allow(unused)]
 impl<T: Sized + Copy> Signed<T> {
     pub fn new(value: T, is_negative: bool) -> Self {
         Signed { value, is_negative }

@@ -64,6 +64,7 @@ impl<'tx> InternStringsStore<'tx> {
     }
 }
 
+#[allow(unused)]
 pub enum Iter<'tx> {
     UnInit(Database<'tx>),
     Init(Cursor<'tx>),
@@ -127,6 +128,7 @@ impl InternStringsKey {
         }
     }
 
+    #[allow(unused)]
     pub fn parse(key: &[u8]) -> Option<&Self> {
         if let Ok(this) = Self::ref_from_bytes(key)
             && this.tag == KEY_PREFIX_INTERN_STR
@@ -137,6 +139,7 @@ impl InternStringsKey {
     }
 }
 
+#[allow(unused)]
 pub struct Inspector<'tx> {
     db: Database<'tx>,
 }

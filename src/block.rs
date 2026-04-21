@@ -17,7 +17,7 @@ use smallvec::{SmallVec, smallvec};
 use std::borrow::Cow;
 use std::fmt::{Debug, Display, Formatter};
 use std::ops::{Deref, DerefMut};
-use zerocopy::{CastError, FromBytes, Immutable, IntoBytes, KnownLayout, TryFromBytes};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, TryFromBytes};
 
 #[repr(C)]
 #[derive(
@@ -1223,9 +1223,6 @@ impl Debug for InsertBlockData {
         Display::fmt(self, f)
     }
 }
-
-pub type ParseError<'a> = CastError<&'a [u8], BlockHeader>;
-pub type ParseMutError<'a> = CastError<&'a mut [u8], BlockHeader>;
 
 #[repr(transparent)]
 #[derive(Clone, Copy, PartialEq, Eq, FromBytes, IntoBytes, KnownLayout, Immutable, Default)]

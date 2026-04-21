@@ -56,19 +56,6 @@ impl<'tx> StateVectorStore<'tx> {
             Err(e) => Err(e.into()),
         }
     }
-
-    pub fn get_clock(&mut self, client_id: ClientID) -> crate::Result<Option<&'tx Clock>> {
-        let key = StateVectorKey::new(client_id);
-        match self.db.get(key.as_bytes()) {
-            Ok(value) => {
-                let clock = Clock::ref_from_bytes(value)
-                    .map_err(|_| crate::Error::InvalidMapping("Clock"))?;
-                Ok(Some(clock))
-            }
-            Err(LmdbError::NOT_FOUND) => Ok(None),
-            Err(e) => Err(e.into()),
-        }
-    }
 }
 
 #[repr(C, packed)]

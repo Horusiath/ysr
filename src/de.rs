@@ -936,8 +936,8 @@ impl<'de> SeqAccess<'de> for ListNodeDeserializer<'de> {
     {
         match self.current.take() {
             None => Ok(None),
-            Some(block_Id) => {
-                let block = self.blocks.get(block_Id)?;
+            Some(block_id) => {
+                let block = self.blocks.get(block_id)?;
                 if !block.is_deleted() {
                     let deserializer =
                         BlockDeserializer::new(block, self.blocks, self.content_store);

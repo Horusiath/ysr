@@ -211,13 +211,11 @@ impl IDRange {
     fn is_squashed(&self) -> bool {
         let mut i = self.0.iter();
         if let Some(r) = i.next() {
-            let mut prev_start = r.start;
             let mut prev_end = r.end;
             for r in i {
                 if r.start < prev_end {
                     return false;
                 }
-                prev_start = r.start;
                 prev_end = r.end;
             }
             true
