@@ -30,20 +30,19 @@ areas:
 ## Progress
 
 - [x] lib0 v1 deserialization.
-- [ ] lib0 v2 deserialization.
+- [x] lib0 v2 deserialization.
 - [x] update application with conflict resolution
-    - [ ] support for move operations
     - [ ] support for weak links
 - [x] block split/merge algorithms
-- [ ] update generation
-- [ ] collaborative Map
+- [x] update generation
+- [x] collaborative Map
     - [x] core API implemented
     - [x] tests (code only)
-- [ ] collaborative List
-    - [ ] core API implemented
+- [x] collaborative List
+    - [x] core API implemented
     - [x] tests (code only)
-- [ ] collaborative Text
-    - [ ] core API implemented
+- [x] collaborative Text
+    - [x] core API implemented
     - [x] tests (code only)
 - [ ] collaborative XmlElement/XmlFragment/XmlText
     - [ ] core API implemented
