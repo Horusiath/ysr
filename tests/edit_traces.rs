@@ -160,24 +160,25 @@ fn test_editing_trace(path: &str) {
     let data = load_testing_data(path);
     let txt: Unmounted<Text> = Unmounted::root("text");
     let start = Instant::now();
-
-    for t in data.txns {
+    {
         let mut tx = mdoc.transact_mut("test").unwrap();
         let mut txt = txt.mount_mut(&mut tx).unwrap();
-        for patch in t.patches {
-            let at = patch.0;
-            let delete_count = patch.1;
-            let content = patch.2;
+        for t in data.txns {
+            for patch in t.patches {
+                let at = patch.0;
+                let delete_count = patch.1;
+                let content = patch.2;
 
-            if delete_count != 0 {
-                txt.remove_range(at..(at + delete_count)).unwrap();
-            }
-            if !content.is_empty() {
-                txt.insert(at, &content).unwrap();
+                if delete_count != 0 {
+                    txt.remove_range(at..(at + delete_count)).unwrap();
+                }
+                if !content.is_empty() {
+                    txt.insert(at, &content).unwrap();
+                }
             }
         }
+        tx.commit(None).unwrap();
     }
-
     let finish = Instant::now();
     println!("elapsed: {}ms", (finish - start).as_millis());
     let mut tx = mdoc.transact_mut("test").unwrap();
