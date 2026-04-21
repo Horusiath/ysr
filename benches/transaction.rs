@@ -22,10 +22,19 @@ struct TestEnv {
 
 impl TestEnv {
     fn new() -> Self {
+        Self::with_flags(0)
+    }
+
+    fn nosync() -> Self {
+        Self::with_flags(ysr::lmdb::ENV_NOSYNC)
+    }
+
+    fn with_flags(flags: u32) -> Self {
         let dir = TempDir::new().unwrap();
         let env = ysr::lmdb::Env::builder()
             .max_dbs(10)
             .map_size(100 * 1024 * 1024) // 100 MB – enough for all bench datasets
+            .flags(flags)
             .open(dir.path(), 0o600)
             .unwrap();
         let mdoc = MultiDoc::new(env, Some(1.into()));
@@ -276,12 +285,91 @@ fn bench_editing_trace(c: &mut Criterion) {
     group.finish();
 }
 
+/// Same as `bench_apply_and_commit` but with `ENV_NOSYNC` — no fsync on commit.
+fn bench_apply_and_commit_nosync(c: &mut Criterion) {
+    let datasets = load_bin_datasets();
+    let mut group = c.benchmark_group("apply_and_commit_nosync");
+    group.sample_size(10);
+
+    for ds in &datasets {
+        group.bench_with_input(BenchmarkId::from_parameter(ds.name), ds, |b, ds| {
+            b.iter_batched(
+                TestEnv::nosync,
+                |env| {
+                    let mut tx = env.mdoc.transact_mut("test").unwrap();
+                    ds.apply(&mut tx);
+                    tx.commit(None).unwrap();
+                },
+                BatchSize::PerIteration,
+            );
+        });
+    }
+
+    group.finish();
+}
+
+/// Same as `bench_editing_trace` but with `ENV_NOSYNC`.
+fn bench_editing_trace_nosync(c: &mut Criterion) {
+    let traces: Vec<(&str, TestData)> = [
+        (
+            "friendsforever",
+            "./tests/test-data/editing-traces/sequential_traces/friendsforever_flat.json.gz",
+        ),
+        (
+            "sveltecomponent",
+            "./tests/test-data/editing-traces/sequential_traces/sveltecomponent.json.gz",
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(name, path)| {
+        std::fs::metadata(path)
+            .ok()
+            .map(|_| (name, load_testing_data(path)))
+    })
+    .collect();
+
+    let mut group = c.benchmark_group("editing_trace_nosync");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(30));
+
+    for (name, data) in &traces {
+        group.bench_function(*name, |b| {
+            b.iter_batched(
+                TestEnv::nosync,
+                |env| {
+                    let mut tx = env.mdoc.transact_mut("test").unwrap();
+                    let txt: Unmounted<Text> = Unmounted::root("text");
+                    {
+                        let mut txt = txt.mount_mut(&mut tx).unwrap();
+                        for t in &data.txns {
+                            for patch in &t.patches {
+                                if patch.1 != 0 {
+                                    txt.remove_range(patch.0..(patch.0 + patch.1)).unwrap();
+                                }
+                                if !patch.2.is_empty() {
+                                    txt.insert(patch.0, &patch.2).unwrap();
+                                }
+                            }
+                        }
+                    }
+                    tx.commit(None).unwrap();
+                },
+                BatchSize::PerIteration,
+            );
+        });
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_apply_update,
     bench_apply_and_commit,
+    bench_apply_and_commit_nosync,
     bench_incremental_update,
     bench_diff_update,
     bench_editing_trace,
+    bench_editing_trace_nosync,
 );
 criterion_main!(benches);

@@ -134,6 +134,7 @@ impl Drop for Env {
 /// Builder for configuring and opening an LMDB [`Env`].
 pub struct EnvBuilder {
     env: *mut MDB_env,
+    flags: u32,
 }
 
 impl EnvBuilder {
@@ -142,7 +143,7 @@ impl EnvBuilder {
         let mut env: *mut MDB_env = std::ptr::null_mut();
         let rc = unsafe { mdb_env_create(&mut env) };
         assert_eq!(rc, 0, "mdb_env_create failed: {rc}");
-        Self { env }
+        Self { env, flags: 0 }
     }
 
     /// Set the maximum number of named databases.
@@ -157,11 +158,18 @@ impl EnvBuilder {
         self
     }
 
+    /// Set environment flags (bitwise OR of `MDB_*` constants).
+    pub fn flags(mut self, flags: u32) -> Self {
+        self.flags |= flags;
+        self
+    }
+
     /// Open the environment at the given path with the specified UNIX permissions.
     pub fn open(self, path: &Path, mode: u32) -> Result<Env, Error> {
         let path_str = path.to_str().expect("LMDB path must be valid UTF-8");
         let c_path = CString::new(path_str).expect("path must not contain null bytes");
-        let rc = unsafe { mdb_env_open(self.env, c_path.as_ptr(), 0, mode as mdb_mode_t) };
+        let rc =
+            unsafe { mdb_env_open(self.env, c_path.as_ptr(), self.flags, mode as mdb_mode_t) };
         if rc != 0 {
             // Don't close in Drop — mdb_env_open failure leaves env in undefined state,
             // but mdb_env_close is still required to free the handle.
@@ -399,3 +407,23 @@ impl Drop for Cursor<'_> {
 
 /// Flag for `mdb_dbi_open`: create the database if it doesn't exist.
 pub const MDB_DB_CREATE: u32 = MDB_CREATE;
+
+// Environment flags for [`EnvBuilder::flags`].
+
+/// Don't flush system buffers to disk on commit. Trades durability for speed.
+/// Database integrity is maintained (ACI), but a system crash may lose the
+/// last committed transactions.
+pub const ENV_NOSYNC: u32 = MDB_NOSYNC;
+
+/// Flush system buffers but omit the metadata-page flush on commit.
+/// Maintains database integrity but a system crash may undo the last
+/// committed transaction.
+pub const ENV_NOMETASYNC: u32 = MDB_NOMETASYNC;
+
+/// Use a writable memory map. Fewer mallocs but no protection from stray
+/// writes. May be faster when the DB fits in RAM.
+pub const ENV_WRITEMAP: u32 = MDB_WRITEMAP;
+
+/// Turn off OS readahead. Helps random-read performance when the DB is
+/// larger than RAM.
+pub const ENV_NORDAHEAD: u32 = MDB_NORDAHEAD;
