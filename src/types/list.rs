@@ -396,7 +396,7 @@ impl Prelim for ListPrelim {
     }
 
     fn prepare(&self) -> crate::Result<Prepare> {
-        Ok(Prepare::Node(NodeType::Map))
+        Ok(Prepare::Node(NodeType::List))
     }
 
     fn integrate<'tx>(

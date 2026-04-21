@@ -1,7 +1,7 @@
 use crate::block::{ID, InsertBlockData};
 use crate::content::{Content, ContentType};
 use crate::lib0::Value;
-use crate::node::NodeType;
+use crate::node::{Node, NodeType};
 use crate::prelim::{DeltaPrelim, Prelim, StringPrelim};
 use crate::state_vector::Snapshot;
 use crate::store::Db;
@@ -9,13 +9,13 @@ use crate::store::block_store::{BlockCursor, SplitResult};
 use crate::store::content_store::ContentStore;
 use crate::transaction::{TransactionState, TxMutScope, TxScope};
 use crate::types::Capability;
-use crate::{Block, BlockMut, Clock, In, Mounted, Out, Prepare, Transaction, lib0};
+use crate::{Block, BlockMut, Clock, In, Mounted, Out, Prepare, Transaction, Unmounted, lib0};
 use serde::{Deserialize, Serialize};
 use smallvec::smallvec;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, Bound};
 use std::fmt::{Display, Formatter};
-use std::ops::{Deref, RangeBounds};
+use std::ops::{Deref, DerefMut, RangeBounds};
 
 pub type TextRef<Txn> = Mounted<Text, Txn>;
 
@@ -447,15 +447,26 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
     {
         let mut pos = BlockPosition::new(&mut self.block);
         let mut tx = self.tx.write_context()?;
+        Self::apply_delta_internal(&mut tx, &mut pos, delta)
+    }
+
+    fn apply_delta_internal<I>(
+        tx: &mut TxMutScope<'_>,
+        pos: &mut BlockPosition,
+        delta: I,
+    ) -> crate::Result<()>
+    where
+        I: IntoIterator<Item = Delta<In>>,
+    {
         for delta in delta {
             match delta {
                 Delta::Insert(value, fmt) => {
                     if !value.is_empty() {
-                        Self::insert_at(&mut tx, &mut pos, DeltaPrelim(value), fmt)?;
+                        Self::insert_at(tx, pos, DeltaPrelim(value), fmt)?;
                     }
                 }
-                Delta::Delete(len) => Self::remove_at(&mut tx, &mut pos, len)?,
-                Delta::Retain(len, fmt) => Self::format_at(&mut tx, &mut pos, len, fmt)?,
+                Delta::Delete(len) => Self::remove_at(tx, pos, len)?,
+                Delta::Retain(len, fmt) => Self::format_at(tx, pos, len, fmt)?,
             }
         }
         Ok(())
@@ -469,6 +480,55 @@ impl<'tx, 'db> Deref for TextRef<&'tx mut Transaction<'db>> {
         // Assuming that the mutable reference can be dereferenced to an immutable reference
         // This is a common pattern in Rust to allow shared access to the same data
         unsafe { &*(self as *const _ as *const TextRef<&'tx Transaction<'db>>) }
+    }
+}
+
+#[repr(transparent)]
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct TextPrelim(Vec<Delta<In>>);
+impl Prelim for TextPrelim {
+    type Return = Unmounted<Text>;
+
+    #[inline]
+    fn clock_len(&self) -> Clock {
+        Clock::new(1) // the text object itself is 1 element
+    }
+
+    fn prepare(&self) -> crate::Result<Prepare> {
+        Ok(Prepare::Node(NodeType::Text))
+    }
+
+    fn integrate<'tx>(
+        self,
+        block: &mut BlockMut,
+        tx: &mut TxMutScope<'tx>,
+    ) -> crate::Result<Self::Return> {
+        let mut pos = BlockPosition::new(block);
+        TextRef::apply_delta_internal(tx, &mut pos, self.0)?;
+        Ok(Unmounted::new(Node::from(*block.id())))
+    }
+}
+impl Deref for TextPrelim {
+    type Target = Vec<Delta<In>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl DerefMut for TextPrelim {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+impl From<Vec<Delta<In>>> for TextPrelim {
+    fn from(value: Vec<Delta<In>>) -> Self {
+        Self(value)
+    }
+}
+
+impl<'a> From<&'a str> for TextPrelim {
+    fn from(str: &'a str) -> Self {
+        Self(vec![Delta::Insert(In::Value(str.into()), None)])
     }
 }
 
@@ -764,31 +824,32 @@ impl<'tx> Uncommitted<'tx> {
                     } else if !block.is_deleted() {
                         self.old_attrs.insert(key.into(), value.clone());
                         if let Some(attrs) = &mut self.attrs
-                            && let Some(attr) = attrs.get(key) {
-                                if attr != &value {
-                                    if matches!(self.delta, Some(Delta::Retain(_, _))) {
-                                        // same as self.add_op() but without encapsulation that breaks borrow checker
-                                        delta = match self.delta.take() {
-                                            Some(Delta::Retain(retain, _)) if !attrs.is_empty() => {
-                                                Some(Delta::Retain(retain, Some(attrs.clone())))
-                                            }
-                                            Some(delta) if !self.current_attrs.is_empty() => {
-                                                Some(delta.with_attrs(Some(Box::new(
-                                                    self.current_attrs.clone(),
-                                                ))))
-                                            }
-                                            delta => delta,
-                                        };
-                                    }
-                                    if value == Value::Null {
-                                        attrs.remove(key);
-                                    } else {
-                                        attrs.insert(key.into(), value);
-                                    }
-                                } else {
-                                    // ??
+                            && let Some(attr) = attrs.get(key)
+                        {
+                            if attr != &value {
+                                if matches!(self.delta, Some(Delta::Retain(_, _))) {
+                                    // same as self.add_op() but without encapsulation that breaks borrow checker
+                                    delta = match self.delta.take() {
+                                        Some(Delta::Retain(retain, _)) if !attrs.is_empty() => {
+                                            Some(Delta::Retain(retain, Some(attrs.clone())))
+                                        }
+                                        Some(delta) if !self.current_attrs.is_empty() => {
+                                            Some(delta.with_attrs(Some(Box::new(
+                                                self.current_attrs.clone(),
+                                            ))))
+                                        }
+                                        delta => delta,
+                                    };
                                 }
+                                if value == Value::Null {
+                                    attrs.remove(key);
+                                } else {
+                                    attrs.insert(key.into(), value);
+                                }
+                            } else {
+                                // ??
                             }
+                        }
                     }
 
                     if !block.is_deleted() {
@@ -1008,18 +1069,17 @@ impl<'a, 'tx> Chunks<'a, 'tx> {
                         let out: Out = Out::Node(*block.id());
                         return Ok(Some(self.stash_or_return(out)));
                     }
-                    ContentType::Format
-                        if Self::seen(self.to, &block) => {
-                            let chunk = self.pack_str();
-                            let contents = self.tx.db.contents();
-                            let content = get_content(&block, &contents)?;
-                            let fmt = content.as_format()?;
-                            self.update_attrs(fmt.key(), fmt.value()?);
+                    ContentType::Format if Self::seen(self.to, &block) => {
+                        let chunk = self.pack_str();
+                        let contents = self.tx.db.contents();
+                        let content = get_content(&block, &contents)?;
+                        let fmt = content.as_format()?;
+                        self.update_attrs(fmt.key(), fmt.value()?);
 
-                            if let Some(chunk) = chunk {
-                                return Ok(Some(chunk));
-                            }
+                        if let Some(chunk) = chunk {
+                            return Ok(Some(chunk));
                         }
+                    }
                     _ => { /* ignore */ }
                 }
             }
@@ -1185,10 +1245,11 @@ impl<'a> BlockPosition<'a> {
                     let content = get_content(&right, &contents)?;
                     let fmt = content.as_format()?;
                     if let Some(attr_value) = attrs.get(fmt.key())
-                        && attr_value == &fmt.value()? {
-                            forward(self, cursor)?;
-                            continue;
-                        }
+                        && attr_value == &fmt.value()?
+                    {
+                        forward(self, cursor)?;
+                        continue;
+                    }
                 }
                 break;
             }
@@ -1329,20 +1390,19 @@ fn clean_format_gap<'tx>(
         && end != current
     {
         let block = tx.cursor.seek(current_id)?;
-        if !block.is_deleted()
-            && block.content_type() == ContentType::Format {
-                let contents = tx.db.contents();
-                let content = get_content(&block, &contents)?;
-                let fmt = content.as_format()?;
-                let key = fmt.key();
-                let value: lib0::Value = fmt.value()?;
-                let e = end_attrs.get(key).unwrap_or(&Value::Null);
-                let s = start_attrs.get(key).unwrap_or(&Value::Null);
-                if e != &value || s == &value {
-                    tx.delete(&mut block.into(), false)?;
-                    cleanups += 1;
-                }
+        if !block.is_deleted() && block.content_type() == ContentType::Format {
+            let contents = tx.db.contents();
+            let content = get_content(&block, &contents)?;
+            let fmt = content.as_format()?;
+            let key = fmt.key();
+            let value: lib0::Value = fmt.value()?;
+            let e = end_attrs.get(key).unwrap_or(&Value::Null);
+            let s = start_attrs.get(key).unwrap_or(&Value::Null);
+            if e != &value || s == &value {
+                tx.delete(&mut block.into(), false)?;
+                cleanups += 1;
             }
+        }
         current = block.right().copied();
     }
     Ok(cleanups)
@@ -2037,7 +2097,6 @@ mod test {
                 expected
             );
 
-            
             t1.diff_update(&StateVector::default()).unwrap()
         };
 
