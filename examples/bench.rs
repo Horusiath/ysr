@@ -1,5 +1,6 @@
 use std::time::Instant;
-use ysr::{DecoderV1, MultiDoc, TextRef, Unmounted};
+use ysr::lib0::v1::DecoderV1;
+use ysr::{MultiDoc, TextRef, Unmounted};
 
 fn main() {
     let data = std::fs::read("./examples/data/b4-update.bin").unwrap();

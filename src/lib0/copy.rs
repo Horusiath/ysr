@@ -1,6 +1,4 @@
-use crate::lib0::Tag;
-use crate::read::ReadExt;
-use crate::write::WriteExt;
+use crate::lib0::{ReadExt, Tag, WriteExt};
 use std::io::{Read, Write};
 
 /// Copies the next object stored in lib0 any binary format from a given `src` to a `dst`.

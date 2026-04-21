@@ -1,6 +1,5 @@
 use crate::block::ID;
-use crate::read::{Decode, Decoder, ReadExt};
-use crate::write::{Encode, Encoder, WriteExt};
+use crate::lib0::{Decode, Decoder, Encode, Encoder, ReadExt, WriteExt};
 use crate::{ClientID, Clock};
 use smallvec::{SmallVec, smallvec};
 use std::collections::BTreeMap;

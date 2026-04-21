@@ -39,13 +39,12 @@ impl From<Env> for MultiDoc {
 
 #[cfg(test)]
 mod test {
-
-    use crate::read::DecoderV1;
     use crate::test_util::multi_doc;
     use crate::transaction::{CommitFlags, TransactionSummary};
 
     use crate::{Map, MultiDoc, StateVector, Text, TextRef, Unmounted, lib0};
-    
+
+    use crate::lib0::v1::DecoderV1;
     use uuid::Uuid;
 
     #[test]

@@ -1421,11 +1421,10 @@ fn get_content<'a>(block: &Block<'a>, contents: &'a ContentStore) -> crate::Resu
 #[cfg(test)]
 mod test {
     use crate::block::ID;
-    use crate::lib0::Value;
-    use crate::read::{Decode, DecoderV1};
+    use crate::lib0::v1::DecoderV1;
+    use crate::lib0::{Decode, Encode, Value, Version};
     use crate::test_util::{multi_doc, sync};
     use crate::types::text::{Attrs, Chunk, Delta, Op};
-    use crate::write::Encode;
     use crate::{ListPrelim, Map, MapPrelim, Out, StateVector, Text, Unmounted, lib0};
 
     #[test]
@@ -1562,14 +1561,14 @@ mod test {
         drop(txt1);
         drop(txt2);
 
-        let d1_sv = t1.state_vector().unwrap().encode().unwrap();
-        let d2_sv = t2.state_vector().unwrap().encode().unwrap();
+        let d1_sv = t1.state_vector().unwrap().encode(Version::V1).unwrap();
+        let d2_sv = t2.state_vector().unwrap().encode(Version::V1).unwrap();
 
         let u1 = t1
-            .diff_update(&StateVector::decode(&d2_sv).unwrap())
+            .diff_update(&StateVector::decode(&d2_sv, Version::V1).unwrap())
             .unwrap();
         let u2 = t2
-            .diff_update(&StateVector::decode(&d1_sv).unwrap())
+            .diff_update(&StateVector::decode(&d1_sv, Version::V1).unwrap())
             .unwrap();
 
         t1.apply_update(&mut DecoderV1::from_slice(&u2)).unwrap();
@@ -1601,9 +1600,9 @@ mod test {
 
         drop(txt1);
 
-        let d2_sv = t2.state_vector().unwrap().encode().unwrap();
+        let d2_sv = t2.state_vector().unwrap().encode(Version::V1).unwrap();
         let u1 = t1
-            .diff_update(&StateVector::decode(&d2_sv).unwrap())
+            .diff_update(&StateVector::decode(&d2_sv, Version::V1).unwrap())
             .unwrap();
         t2.apply_update(&mut DecoderV1::from_slice(&u1)).unwrap();
 
@@ -1621,13 +1620,13 @@ mod test {
         drop(txt1);
         drop(txt2);
 
-        let d2_sv = t2.state_vector().unwrap().encode().unwrap();
-        let d1_sv = t1.state_vector().unwrap().encode().unwrap();
+        let d2_sv = t2.state_vector().unwrap().encode(Version::V1).unwrap();
+        let d1_sv = t1.state_vector().unwrap().encode(Version::V1).unwrap();
         let u1 = t1
-            .diff_update(&StateVector::decode(d2_sv.as_slice()).unwrap())
+            .diff_update(&StateVector::decode(d2_sv.as_slice(), Version::V1).unwrap())
             .unwrap();
         let u2 = t2
-            .diff_update(&StateVector::decode(d1_sv.as_slice()).unwrap())
+            .diff_update(&StateVector::decode(d1_sv.as_slice(), Version::V1).unwrap())
             .unwrap();
         t1.apply_update(&mut DecoderV1::from_slice(&u2)).unwrap();
         t2.apply_update(&mut DecoderV1::from_slice(&u1)).unwrap();
@@ -1661,9 +1660,9 @@ mod test {
         let (d2, _) = multi_doc(2);
         let mut t2 = d2.transact_mut("test").unwrap();
 
-        let d2_sv = t2.state_vector().unwrap().encode().unwrap();
+        let d2_sv = t2.state_vector().unwrap().encode(Version::V1).unwrap();
         let u1 = t1
-            .diff_update(&StateVector::decode(d2_sv.as_slice()).unwrap())
+            .diff_update(&StateVector::decode(d2_sv.as_slice(), Version::V1).unwrap())
             .unwrap();
         t2.apply_update(&mut DecoderV1::from_slice(&u1)).unwrap();
 
@@ -1682,13 +1681,13 @@ mod test {
         drop(txt1);
         drop(txt2);
 
-        let d2_sv = t2.state_vector().unwrap().encode().unwrap();
-        let d1_sv = t1.state_vector().unwrap().encode().unwrap();
+        let d2_sv = t2.state_vector().unwrap().encode(Version::V1).unwrap();
+        let d1_sv = t1.state_vector().unwrap().encode(Version::V1).unwrap();
         let u1 = t1
-            .diff_update(&StateVector::decode(d2_sv.as_slice()).unwrap())
+            .diff_update(&StateVector::decode(d2_sv.as_slice(), Version::V1).unwrap())
             .unwrap();
         let u2 = t2
-            .diff_update(&StateVector::decode(d1_sv.as_slice()).unwrap())
+            .diff_update(&StateVector::decode(d1_sv.as_slice(), Version::V1).unwrap())
             .unwrap();
 
         t1.apply_update(&mut DecoderV1::from_slice(&u2)).unwrap();
@@ -1854,10 +1853,14 @@ mod test {
         drop(txt1);
         drop(txt2);
 
-        let sv1 = t1.state_vector().unwrap().encode().unwrap();
-        let sv2 = t2.state_vector().unwrap().encode().unwrap();
-        let u1 = t1.diff_update(&StateVector::decode(&sv2).unwrap()).unwrap();
-        let u2 = t2.diff_update(&StateVector::decode(&sv1).unwrap()).unwrap();
+        let sv1 = t1.state_vector().unwrap().encode(Version::V1).unwrap();
+        let sv2 = t2.state_vector().unwrap().encode(Version::V1).unwrap();
+        let u1 = t1
+            .diff_update(&StateVector::decode(&sv2, Version::V1).unwrap())
+            .unwrap();
+        let u2 = t2
+            .diff_update(&StateVector::decode(&sv1, Version::V1).unwrap())
+            .unwrap();
 
         t1.apply_update(&mut DecoderV1::from_slice(&u2)).unwrap();
         t2.apply_update(&mut DecoderV1::from_slice(&u1)).unwrap();

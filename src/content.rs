@@ -3,10 +3,8 @@ use crate::block::{
     CONTENT_TYPE_EMBED, CONTENT_TYPE_FORMAT, CONTENT_TYPE_JSON, CONTENT_TYPE_NODE,
     CONTENT_TYPE_STRING,
 };
-use crate::lib0::Value;
+use crate::lib0::{Decoder, Value, WriteExt};
 use crate::node::{Named, Node, NodeID};
-use crate::read::Decoder;
-use crate::write::WriteExt;
 use crate::{Out, Unmounted, lib0};
 use bytes::Bytes;
 use serde::Serialize;

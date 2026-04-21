@@ -4,10 +4,10 @@ use crate::block::{
 use crate::content::{Content, ContentType, FormatAttribute};
 use crate::id_set::IDSet;
 use crate::integrate::IntegrationContext;
+use crate::lib0::v1::DecoderV1;
+use crate::lib0::{Decode, Decoder, Encoder, ReadExt, Version};
 use crate::node::{Node, NodeID, NodeType};
-use crate::read::{Decode, Decoder, ReadExt};
 use crate::transaction::TxMutScope;
-use crate::write::Encoder;
 use crate::{ClientID, Clock, U32};
 use bytes::{BufMut, BytesMut};
 use smallvec::SmallVec;
@@ -24,9 +24,14 @@ pub struct Update {
 }
 
 impl Update {
-    pub fn decode(bytes: &[u8]) -> crate::Result<Self> {
-        let mut decoder = crate::read::DecoderV1::from_slice(bytes);
-        Self::decode_with(&mut decoder)
+    pub fn decode(bytes: &[u8], version: Version) -> crate::Result<Self> {
+        match version {
+            Version::V1 => {
+                let mut decoder = DecoderV1::from_slice(bytes);
+                Self::decode_with(&mut decoder)
+            }
+            Version::V2 => todo!(),
+        }
     }
 
     pub fn decode_with<D: Decoder>(decoder: &mut D) -> crate::Result<Self> {
@@ -710,7 +715,7 @@ mod test {
     use crate::ClientID;
     use crate::block::ID;
     use crate::block_reader::{BlockReader, Carrier};
-    use crate::read::DecoderV1;
+    use crate::lib0::v1::DecoderV1;
     use std::io::Cursor;
 
     #[test]

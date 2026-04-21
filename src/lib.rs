@@ -11,7 +11,6 @@ mod multi_doc;
 mod node;
 mod output;
 mod prelim;
-pub mod read;
 mod state_vector;
 mod store;
 #[cfg(test)]
@@ -19,15 +18,12 @@ mod test_util;
 mod transaction;
 mod types;
 mod update;
-mod varint;
-mod write;
 
 pub use crate::block::{Block, BlockHeader, BlockMut, ID};
 pub use input::In;
 pub use multi_doc::MultiDoc;
 pub use output::Out;
 pub use prelim::*;
-pub use read::DecoderV1;
 use serde::{Deserialize, Serialize};
 use smallvec::CollectionAllocErr;
 pub use state_vector::StateVector;

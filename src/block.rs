@@ -1,11 +1,11 @@
 use crate::block_reader::BlockRange;
 use crate::content::{Content, ContentType, FormatAttribute, utf16_to_utf8};
 use crate::integrate::IntegrationContext;
+use crate::lib0::{Encoder, WriteExt};
 use crate::node::{Named, Node, NodeID, NodeType};
 use crate::prelim::Prelim;
 use crate::store::Db;
 use crate::transaction::TxMutScope;
-use crate::write::{Encoder, WriteExt};
 use crate::{ClientID, Clock, Optional, Prepare, U32, lib0};
 use crate::{Error, Result};
 use bitflags::bitflags;

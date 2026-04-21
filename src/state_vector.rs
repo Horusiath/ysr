@@ -1,11 +1,10 @@
 use crate::Clock;
 use crate::id_set::IDSet;
-use crate::read::{Decode, Decoder, ReadExt};
-use crate::write::{Encode, Encoder, WriteExt};
+use crate::lib0::{Decode, Decoder, Encode, Encoder, ReadExt, WriteExt};
 use crate::{ClientID, ID};
 use std::cmp::Ordering;
-use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 use std::iter::FromIterator;
 
 /// State vector is a compact representation of all known blocks inserted and integrated into

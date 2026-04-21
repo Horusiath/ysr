@@ -5,8 +5,9 @@ use std::io::{BufReader, Cursor, Read};
 use std::path::Path;
 use std::time::Instant;
 use tempfile::TempDir;
-use ysr::read::ReadExt;
-use ysr::{ClientID, DecoderV1, MultiDoc, Text, Unmounted};
+use ysr::lib0::ReadExt;
+use ysr::lib0::v1::DecoderV1;
+use ysr::{ClientID, MultiDoc, Text, Unmounted};
 
 #[test]
 fn edit_trace_automerge() {

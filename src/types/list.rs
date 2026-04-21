@@ -429,7 +429,7 @@ impl From<Vec<In>> for ListPrelim {
 #[cfg(test)]
 mod test {
     use crate::lib0::Value;
-    use crate::read::DecoderV1;
+    use crate::lib0::v1::DecoderV1;
     use crate::test_util::{multi_doc, sync};
     use crate::{In, List, MapPrelim, Optional, StateVector, Transaction, Unmounted, lib0};
     use std::collections::BTreeMap;

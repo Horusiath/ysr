@@ -2,16 +2,16 @@ use crate::block::{Block, BlockMut, ID};
 use crate::block_reader::{Carrier, Update};
 use crate::content::{ContentType, FormatAttribute};
 use crate::id_set::IDSet;
+use crate::lib0::v1::EncoderV1;
+use crate::lib0::{Decode, Decoder, Encode, Encoder, Version, WriteExt};
 use crate::lmdb::{Database, Dbi, RwTxn};
 use crate::node::{Node, NodeID};
-use crate::read::{Decode, Decoder};
 use crate::state_vector::Snapshot;
 use crate::store::block_store::BlockCursor;
 use crate::store::content_store::ContentStore;
 use crate::store::intern_strings::InternStringsStore;
 use crate::store::meta_store::MetaStore;
 use crate::store::{Db, MapEntriesStore};
-use crate::write::{Encode, Encoder, EncoderV1, WriteExt};
 use crate::{ClientID, Clock, Error, Optional, StateVector, U32, lib0};
 use bitflags::bitflags;
 use bytes::{BufMut, Bytes, BytesMut};
@@ -677,10 +677,10 @@ impl<'db> Transaction<'db> {
         let mut pending_update = if pending.update.is_empty() {
             Update::default()
         } else {
-            Update::decode(pending.update)?
+            Update::decode(pending.update, Version::V1)?
         };
         if !pending.delete_set.is_empty() {
-            pending_update.delete_set = IDSet::decode(pending.delete_set)?;
+            pending_update.delete_set = IDSet::decode(pending.delete_set, Version::V1)?;
         }
 
         let missing_sv = pending.missing_sv;
