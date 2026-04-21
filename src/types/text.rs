@@ -163,13 +163,70 @@ impl<'db, 'tx> TextRef<&'tx mut Transaction<'db>> {
         if let Some(attrs) = attrs
             && !attrs.is_empty()
         {
+            let mut remaining = len as u32;
             pos.minimize(&attrs, &mut tx.cursor)?;
-            let negated = pos.insert_attributes(tx, attrs)?;
-            pos.forward_by(len, &mut tx.cursor)?;
+            let mut negated = pos.insert_attributes(tx, attrs.clone())?;
+
+            while let Some(id) = pos.right {
+                let right = tx.cursor.seek(id)?;
+                if !(remaining != 0 || (!negated.is_empty() && Self::is_valid_target(&right))) {
+                    break;
+                }
+
+                if !right.is_deleted() {
+                    match right.content_type() {
+                        ContentType::Format => {
+                            let contents = tx.db.contents();
+                            let content = get_content(&right, &contents)?;
+                            let fmt = content.as_format()?;
+                            let key = fmt.key();
+                            if let Some(curr_value) = attrs.get(key) {
+                                let value = fmt.value()?;
+                                if curr_value == &value {
+                                    negated.remove(key);
+                                } else {
+                                    negated.insert(key.into(), value);
+                                }
+                                tx.delete(&mut right.into(), false)?;
+                            }
+                        }
+                        _ => {
+                            let block_len = right.clock_len().get();
+                            if remaining < block_len {
+                                // split block
+                                match tx.cursor.split_current(Clock::new(remaining))? {
+                                    SplitResult::Unchanged(left) => {
+                                        pos.left = Some(left.last_id());
+                                        pos.right = None;
+                                    }
+                                    SplitResult::Split(left, right) => {
+                                        pos.left = Some(left.last_id());
+                                        pos.right = Some(*right.id());
+                                    }
+                                }
+                                break;
+                            } else {
+                                remaining -= block_len;
+                            }
+                        }
+                    }
+                }
+
+                forward(pos, &mut tx.cursor)?;
+            }
+
             pos.insert_negated(tx, negated)?;
             Ok(())
         } else {
             pos.forward_by(len, &mut tx.cursor)
+        }
+    }
+
+    fn is_valid_target(block: &Block<'_>) -> bool {
+        if block.is_deleted() {
+            true
+        } else {
+            block.content_type() == ContentType::Format
         }
     }
 
