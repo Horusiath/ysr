@@ -511,7 +511,7 @@ mod test {
         t2.apply_update(&mut DecoderV1::from_slice(&update))
             .unwrap();
 
-        let a2 = arr.mount(&mut t2).unwrap();
+        let a2 = arr.mount(&t2).unwrap();
         let actual: Vec<_> = a2.iter::<String>().map(Result::unwrap).collect();
 
         assert_eq!(actual, vec!["Hi".to_string()]);

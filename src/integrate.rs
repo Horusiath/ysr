@@ -79,7 +79,6 @@ impl IntegrationContext {
             (None, None) => true,                          // !target.left && !target.right
             (None, Some(right)) => right.left().is_some(), // !target.left && target.right.left !== null
             (Some(left), _) => left.right() != self.right.as_ref().map(|r| r.id()), // target.left && target.left.right !== target.right
-            _ => false,
         }
     }
 

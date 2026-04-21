@@ -527,7 +527,7 @@ mod test {
 
         t2.apply_update(&mut DecoderV1::from_slice(&u1)).unwrap();
 
-        let mut m2 = map.mount_mut(&mut t2).unwrap();
+        let m2 = map.mount_mut(&mut t2).unwrap();
 
         assert_eq!(m2.len().unwrap(), 0);
         assert_eq!(m2.get::<_, Value>("key1").optional().unwrap(), None);

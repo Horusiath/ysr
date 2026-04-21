@@ -45,7 +45,7 @@ mod test {
     use crate::transaction::{CommitFlags, TransactionSummary};
 
     use crate::{Map, MultiDoc, StateVector, Text, TextRef, Unmounted, lib0};
-    use bytes::Bytes;
+    
     use uuid::Uuid;
 
     #[test]

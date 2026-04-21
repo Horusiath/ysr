@@ -1192,7 +1192,7 @@ impl InsertBlockData {
                     writer.write_all(data)?;
                 }
                 None => {
-                    let mut i = self.content.iter();
+                    let i = self.content.iter();
                     writer.write_len(block.clock_len())?;
                     for content in i {
                         writer.write_all(content.bytes())?;
@@ -1353,7 +1353,7 @@ mod test {
 
     #[test]
     fn block_set_header_values() {
-        let id = ID::new(CLIENT, 1.into());
+        let _id = ID::new(CLIENT, 1.into());
         let left = ID::new(CLIENT, 3.into());
         let o_left = ID::new(CLIENT, 13.into());
         let right = ID::new(CLIENT, 4.into());

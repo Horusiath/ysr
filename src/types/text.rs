@@ -1564,10 +1564,10 @@ mod test {
         let d2_sv = t2.state_vector().unwrap().encode().unwrap();
         let d1_sv = t1.state_vector().unwrap().encode().unwrap();
         let u1 = t1
-            .diff_update(&StateVector::decode(&d2_sv.as_slice()).unwrap())
+            .diff_update(&StateVector::decode(d2_sv.as_slice()).unwrap())
             .unwrap();
         let u2 = t2
-            .diff_update(&StateVector::decode(&d1_sv.as_slice()).unwrap())
+            .diff_update(&StateVector::decode(d1_sv.as_slice()).unwrap())
             .unwrap();
         t1.apply_update(&mut DecoderV1::from_slice(&u2)).unwrap();
         t2.apply_update(&mut DecoderV1::from_slice(&u1)).unwrap();
@@ -1603,7 +1603,7 @@ mod test {
 
         let d2_sv = t2.state_vector().unwrap().encode().unwrap();
         let u1 = t1
-            .diff_update(&StateVector::decode(&d2_sv.as_slice()).unwrap())
+            .diff_update(&StateVector::decode(d2_sv.as_slice()).unwrap())
             .unwrap();
         t2.apply_update(&mut DecoderV1::from_slice(&u1)).unwrap();
 
@@ -1625,10 +1625,10 @@ mod test {
         let d2_sv = t2.state_vector().unwrap().encode().unwrap();
         let d1_sv = t1.state_vector().unwrap().encode().unwrap();
         let u1 = t1
-            .diff_update(&StateVector::decode(&d2_sv.as_slice()).unwrap())
+            .diff_update(&StateVector::decode(d2_sv.as_slice()).unwrap())
             .unwrap();
         let u2 = t2
-            .diff_update(&StateVector::decode(&d1_sv.as_slice()).unwrap())
+            .diff_update(&StateVector::decode(d1_sv.as_slice()).unwrap())
             .unwrap();
 
         t1.apply_update(&mut DecoderV1::from_slice(&u2)).unwrap();
@@ -1841,7 +1841,7 @@ mod test {
             let mut txn = d2.transact_mut("test").unwrap();
             txn.apply_update(&mut DecoderV1::from_slice(&update))
                 .unwrap();
-            let mut txt2 = txt.mount_mut(&mut txn).unwrap();
+            let txt2 = txt.mount_mut(&mut txn).unwrap();
             let uncommitted: Vec<_> = txt2.uncommitted().map(Result::unwrap).collect();
 
             assert_eq!(txt2.to_string(), "abc");
@@ -1869,7 +1869,7 @@ mod test {
             let mut txn = d2.transact_mut("test").unwrap();
             txn.apply_update(&mut DecoderV1::from_slice(&update))
                 .unwrap();
-            let mut txt2 = txt.mount_mut(&mut txn).unwrap();
+            let txt2 = txt.mount_mut(&mut txn).unwrap();
             let uncommitted: Vec<_> = txt2.uncommitted().map(Result::unwrap).collect();
 
             assert_eq!(txt2.to_string(), "bc");
@@ -1900,7 +1900,7 @@ mod test {
             txn.apply_update(&mut DecoderV1::from_slice(&update))
                 .unwrap();
 
-            let mut txt2 = txt.mount_mut(&mut txn).unwrap();
+            let txt2 = txt.mount_mut(&mut txn).unwrap();
             let uncommitted: Vec<_> = txt2.uncommitted().map(Result::unwrap).collect();
             assert_eq!(txt2.to_string(), "b");
             assert_eq!(uncommitted, expected);
@@ -1928,7 +1928,7 @@ mod test {
             let mut txn = d2.transact_mut("test").unwrap();
             txn.apply_update(&mut DecoderV1::from_slice(&update))
                 .unwrap();
-            let mut txt2 = txt.mount_mut(&mut txn).unwrap();
+            let txt2 = txt.mount_mut(&mut txn).unwrap();
             let uncommitted: Vec<_> = txt2.uncommitted().map(Result::unwrap).collect();
             assert_eq!(txt2.to_string(), "zb");
             assert_eq!(uncommitted, expected);
@@ -1957,7 +1957,7 @@ mod test {
             txn.apply_update(&mut DecoderV1::from_slice(&update))
                 .unwrap();
 
-            let mut txt2 = txt.mount_mut(&mut txn).unwrap();
+            let txt2 = txt.mount_mut(&mut txn).unwrap();
             let uncommitted: Vec<_> = txt2.uncommitted().map(Result::unwrap).collect();
             assert_eq!(txt2.to_string(), "yzb");
             assert_eq!(uncommitted, expected);
@@ -1986,7 +1986,7 @@ mod test {
             let mut txn = d2.transact_mut("test").unwrap();
             txn.apply_update(&mut DecoderV1::from_slice(&update))
                 .unwrap();
-            let mut txt2 = txt.mount_mut(&mut txn).unwrap();
+            let txt2 = txt.mount_mut(&mut txn).unwrap();
             let uncommitted: Vec<_> = txt2.uncommitted().map(Result::unwrap).collect();
             assert_eq!(txt2.to_string(), "yzb");
             assert_eq!(uncommitted, expected);
@@ -2037,8 +2037,8 @@ mod test {
                 expected
             );
 
-            let update_v1 = t1.diff_update(&StateVector::default()).unwrap();
-            update_v1
+            
+            t1.diff_update(&StateVector::default()).unwrap()
         };
 
         let a2 = Attrs::from([("width".into(), Value::from(100.0))]);
