@@ -319,6 +319,31 @@ pub(crate) fn utf16_to_utf8(str: &str, utf16: usize) -> Option<usize> {
     }
 }
 
+/// Count the number of UTF-16 code units needed to represent valid UTF-8 bytes.
+/// Equivalent to `str::encode_utf16().count()` but avoids iterator overhead
+/// by inspecting only the leading bytes of each character.
+pub(crate) fn utf8_to_utf16_len(bytes: &[u8]) -> u32 {
+    let mut len: u32 = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b < 0x80 {
+            len += 1;
+            i += 1;
+        } else if b < 0xE0 {
+            len += 1;
+            i += 2;
+        } else if b < 0xF0 {
+            len += 1;
+            i += 3;
+        } else {
+            len += 2;
+            i += 4;
+        }
+    }
+    len
+}
+
 impl<'a> Display for Content<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self.content_type {
