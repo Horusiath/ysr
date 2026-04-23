@@ -101,11 +101,11 @@ impl Env {
     ///
     /// This internally creates and commits a short-lived write transaction.
     /// Must not be called concurrently with other `create_db` calls.
-    pub fn create_db(&self, name: &str, flags: EnvFlags) -> Result<Dbi, Error> {
+    pub fn create_db(&self, name: &str, flags: u32) -> Result<Dbi, Error> {
         let txn = self.begin_rw_txn()?;
         let c_name = CString::new(name).expect("database name must not contain null bytes");
         let mut dbi: MDB_dbi = 0;
-        let rc = unsafe { mdb_dbi_open(txn.txn, c_name.as_ptr(), flags.bits(), &mut dbi) };
+        let rc = unsafe { mdb_dbi_open(txn.txn, c_name.as_ptr(), flags, &mut dbi) };
         lmdb_result(rc)?;
         txn.commit()?;
         Ok(Dbi(dbi))
@@ -293,6 +293,18 @@ impl<'txn> Database<'txn> {
         lmdb_result(rc)
     }
 
+    /// Empty all contents of the database, but keep the database itself.
+    pub fn clear(&self) -> Result<(), Error> {
+        let rc = unsafe { mdb_drop(self.txn, self.dbi, 0) };
+        lmdb_result(rc)
+    }
+
+    /// Delete the database entirely from the environment.
+    pub fn remove(&self) -> Result<(), Error> {
+        let rc = unsafe { mdb_drop(self.txn, self.dbi, 1) };
+        lmdb_result(rc)
+    }
+
     /// Open a new cursor on this database.
     pub fn cursor(&self) -> Result<Cursor<'txn>, Error> {
         let mut cursor: *mut MDB_cursor = std::ptr::null_mut();
@@ -422,9 +434,6 @@ pub struct EnvFlags(u32);
 bitflags! {
     impl EnvFlags : u32 {
         const NONE = 0;
-
-        /// Flag for `mdb_dbi_open`: create the database if it doesn't exist.
-        const CREATE = MDB_CREATE;
 
         /// no environment directory
         const NOSUBDIR = MDB_NOSUBDIR;

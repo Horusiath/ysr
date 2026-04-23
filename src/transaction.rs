@@ -364,6 +364,12 @@ impl<'db> Transaction<'db> {
         }
     }
 
+    /// Removes all the contents of the document, but keeping the empty document itself.
+    pub fn clear_all(&mut self) -> crate::Result<()> {
+        self.db.get().clear()?;
+        Ok(())
+    }
+
     pub fn incremental_update(&self) -> crate::Result<Vec<u8>> {
         let mut buf = Vec::new();
         self.incremental_update_with(&mut buf)?;
