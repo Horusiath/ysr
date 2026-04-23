@@ -1,6 +1,6 @@
 use crate::lmdb::{Database, Error as LmdbError};
 use crate::store::KEY_PREFIX_STATE_VECTOR;
-use crate::{ClientID, Clock, Optional, StateVector};
+use crate::{ClientID, Clock, StateVector};
 use std::collections::BTreeMap;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 

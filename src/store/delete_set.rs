@@ -1,3 +1,4 @@
+#![allow(unused)]
 use crate::id_set::IDRange;
 use crate::lmdb::{Cursor, Database, Error as LmdbError};
 use crate::{ClientID, Clock, ID};
@@ -95,6 +96,7 @@ impl DeleteSetKey {
     }
 }
 
+#[allow(unused)]
 pub struct Iter<'tx> {
     state: IterState<'tx>,
 }
@@ -106,6 +108,7 @@ enum IterState<'tx> {
 }
 
 impl<'tx> Iter<'tx> {
+    #[allow(unused)]
     fn new(db: Database<'tx>) -> Iter<'tx> {
         Iter {
             state: IterState::Uninit(db),

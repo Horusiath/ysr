@@ -1,5 +1,4 @@
 use crate::lib0::Version;
-use crate::lib0::v1::DecoderV1;
 use crate::{ClientID, MultiDoc, Transaction};
 use tempfile::TempDir;
 

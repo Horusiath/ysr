@@ -1,12 +1,9 @@
 use flate2::read::GzDecoder;
 use serde::Deserialize;
 use std::fs::File;
-use std::io::{BufReader, Cursor, Read};
-use std::path::Path;
+use std::io::{BufReader, Read};
 use std::time::Instant;
 use tempfile::TempDir;
-use ysr::lib0::ReadExt;
-use ysr::lib0::v1::DecoderV1;
 use ysr::{ClientID, MultiDoc, Text, Unmounted};
 
 #[ignore]
@@ -42,42 +39,6 @@ fn edit_trace_sveltecomponent() {
 #[test]
 fn edit_trace_rustcode() {
     test_editing_trace("./tests/test-data/editing-traces/sequential_traces/rustcode.json.gz");
-}
-
-enum TextOp {
-    Insert(u32, String),
-    Delete(u32, u32),
-}
-
-impl TextOp {
-    pub(crate) fn from_file<P: AsRef<Path>>(path: P) -> Vec<Self> {
-        let mut f = File::open(path).unwrap();
-        let mut buf = Vec::new();
-        std::io::Read::read_to_end(&mut f, &mut buf).unwrap();
-        let mut decoder = DecoderV1::new(Cursor::new(buf.as_slice()));
-        let len: usize = decoder.read_var().unwrap();
-        let mut result = Vec::with_capacity(len);
-        for _ in 0..len {
-            let op = {
-                match decoder.read_var().unwrap() {
-                    1u32 => {
-                        let idx = decoder.read_var().unwrap();
-                        let mut chunk = Vec::new();
-                        decoder.read_string(&mut chunk).unwrap();
-                        TextOp::Insert(idx, String::from_utf8(chunk).unwrap())
-                    }
-                    2u32 => {
-                        let idx = decoder.read_var().unwrap();
-                        let len = decoder.read_var().unwrap();
-                        TextOp::Delete(idx, len)
-                    }
-                    other => panic!("unrecognized TextOp tag type: {}", other),
-                }
-            };
-            result.push(op);
-        }
-        result
-    }
 }
 
 /// This file contains some simple helpers for loading test data. Its used by benchmarking and

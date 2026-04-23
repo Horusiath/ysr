@@ -483,6 +483,7 @@ impl<'tx, 'db> Deref for TextRef<&'tx mut Transaction<'db>> {
     }
 }
 
+#[allow(unused)]
 #[repr(transparent)]
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct TextPrelim(Vec<Delta<In>>);
@@ -1421,7 +1422,6 @@ fn get_content<'a>(block: &Block<'a>, contents: &'a ContentStore) -> crate::Resu
 #[cfg(test)]
 mod test {
     use crate::block::ID;
-    use crate::lib0::v1::DecoderV1;
     use crate::lib0::{Decode, Encode, Value, Version};
     use crate::test_util::{multi_doc, sync};
     use crate::types::text::{Attrs, Chunk, Delta, Op};

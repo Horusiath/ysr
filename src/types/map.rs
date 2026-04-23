@@ -322,7 +322,6 @@ impl FromIterator<(String, In)> for MapPrelim {
 mod test {
     use crate::lib0::{Value, Version};
 
-    use crate::lib0::v1::DecoderV1;
     use crate::test_util::{multi_doc, sync};
     use crate::{
         In, List, ListPrelim, ListRef, Map, MapPrelim, Optional, StateVector, Unmounted, lib0,

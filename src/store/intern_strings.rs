@@ -58,6 +58,7 @@ impl<'tx> InternStringsStore<'tx> {
         Inspector { db: self.db }
     }
 
+    #[allow(unused)]
     pub fn iter(&mut self) -> Iter<'tx> {
         Iter::new(self.db)
     }
@@ -146,13 +147,12 @@ impl<'tx> Debug for Inspector<'tx> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let mut s = f.debug_map();
         let mut cursor = self.db.cursor().map_err(|_| std::fmt::Error)?;
-        let (mut key, mut value) = match cursor
-            .set_range(InternStringsKey::new(0.into()).as_bytes())
-        {
-            Ok(kv) => kv,
-            Err(LmdbError::NOT_FOUND) => return s.finish(),
-            Err(_) => return Err(std::fmt::Error),
-        };
+        let (mut key, mut value) =
+            match cursor.set_range(InternStringsKey::new(0.into()).as_bytes()) {
+                Ok(kv) => kv,
+                Err(LmdbError::NOT_FOUND) => return s.finish(),
+                Err(_) => return Err(std::fmt::Error),
+            };
         while let Some(id) = InternStringsKey::parse(key) {
             s.key(&id.hash);
             let str = unsafe { std::str::from_utf8_unchecked(value) };

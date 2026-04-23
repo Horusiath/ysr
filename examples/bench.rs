@@ -1,6 +1,5 @@
 use std::time::Instant;
 use ysr::lib0::Version;
-use ysr::lib0::v1::DecoderV1;
 use ysr::{MultiDoc, TextRef, Unmounted};
 
 fn main() {

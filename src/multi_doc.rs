@@ -45,7 +45,6 @@ mod test {
     use crate::{Map, MultiDoc, StateVector, Text, TextRef, Unmounted, lib0};
 
     use crate::lib0::Version;
-    use crate::lib0::v1::DecoderV1;
     use uuid::Uuid;
 
     #[test]

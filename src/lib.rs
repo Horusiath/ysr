@@ -156,7 +156,6 @@ impl<T> Optional for Result<T, crate::lmdb::Error> {
 pub struct ClientID(U32);
 
 impl ClientID {
-    const MAX: Self = ClientID(U32::new(u32::MAX));
     const ROOT: Self = ClientID(U32::new(0));
 
     pub fn new_random() -> Self {
@@ -165,7 +164,7 @@ impl ClientID {
     }
 
     pub fn is_valid(self) -> bool {
-        self > Self::ROOT
+        self != Self::ROOT
     }
 
     pub fn new(id: U32) -> Option<Self> {

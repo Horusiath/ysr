@@ -891,7 +891,7 @@ impl<'tx> TxScope<'tx> {
 
 pub struct TxMutScope<'tx> {
     inner: TxScope<'tx>,
-    pub state: &'tx mut TransactionState,
+    pub(crate) state: &'tx mut TransactionState,
 }
 
 impl<'tx> TxMutScope<'tx> {

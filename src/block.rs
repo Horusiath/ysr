@@ -779,45 +779,8 @@ impl InsertBlockData {
         &self.content
     }
 
-    pub(crate) fn new_node(node: &Node, kind: NodeType, start: Option<ID>) -> Self {
-        let id = node.id();
-        let content = match start {
-            None => Content::new(ContentType::Node, Cow::Borrowed(&[0u8; size_of::<ID>()])),
-            Some(id) => Content::new(ContentType::Node, Cow::Owned(id.as_bytes().into())),
-        };
-        Self {
-            block: BlockMut::new(
-                id,
-                BlockHeader {
-                    len: 1.into(),
-                    flags: BlockFlags::COUNTABLE,
-                    node_type: kind,
-                    content_type: ContentType::Node,
-                    inline_content_len: size_of::<NodeID>() as u8,
-                    parent: id,
-                    key_hash: Default::default(),
-                    left: Default::default(),
-                    right: Default::default(),
-                    origin_left: Default::default(),
-                    origin_right: Default::default(),
-                    inline_content: id.into_bytes(),
-                },
-            ),
-            parent: None,
-            entry: None,
-            content: smallvec![content],
-        }
-    }
-
     pub fn id(&self) -> &ID {
         &self.block.id
-    }
-
-    pub fn last_id(&self) -> ID {
-        ID::new(
-            self.block.id.client,
-            self.block.id.clock + self.clock_len() - 1,
-        )
     }
 
     pub fn parent(&self) -> Option<&Node<'static>> {
@@ -1328,7 +1291,6 @@ mod test {
     use crate::content::{Content, ContentType};
     use crate::node::{Node, NodeID};
     use crate::{BlockHeader, BlockMut, ClientID, Clock};
-    use serde::{Deserialize, Serialize};
     use smallvec::smallvec;
 
     const CLIENT: ClientID = unsafe { ClientID::new_unchecked(123) };
@@ -1561,19 +1523,6 @@ mod test {
         assert!(block.merge(right.as_block()));
 
         assert_eq!(block, expected);
-    }
-
-    #[derive(Debug, Eq, PartialEq, Serialize, Deserialize)]
-    struct User {
-        name: String,
-    }
-
-    impl User {
-        fn new(name: &str) -> Self {
-            Self {
-                name: name.to_string(),
-            }
-        }
     }
 
     fn block(

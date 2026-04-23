@@ -18,16 +18,6 @@ impl<W: Write> Serializer<W> {
     pub fn new(writer: W) -> Self {
         Self { writer }
     }
-
-    fn serialize_variant(
-        &mut self,
-        variant: &'static str,
-        param_len: usize,
-    ) -> Result<(), super::Error> {
-        self.writer.write_string(variant)?;
-        self.writer.write_var(param_len)?;
-        Ok(())
-    }
 }
 
 impl<'a, W: Write> serde::ser::Serializer for &'a mut Serializer<W> {

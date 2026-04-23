@@ -15,7 +15,6 @@ use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt::{Display, Formatter};
-use std::io::Read;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 #[derive(Default)]
@@ -388,85 +387,6 @@ impl Update {
     }
 }
 
-pub(crate) struct BlockReader<'a, D> {
-    decoder: &'a mut D,
-    remaining_clients: usize,
-    remaining_blocks: usize,
-    current_client: ClientID,
-    current_clock: Clock,
-}
-
-impl<'a, D: Decoder> BlockReader<'a, D> {
-    pub fn new(decoder: &'a mut D) -> crate::Result<Self> {
-        let num_of_state_updates: usize = decoder.read_var()?;
-        Ok(Self {
-            decoder,
-            remaining_clients: num_of_state_updates,
-            remaining_blocks: 0,
-            current_client: 0.into(),
-            current_clock: Clock::new(0),
-        })
-    }
-
-    fn next_block(&mut self) -> crate::Result<Option<Carrier>> {
-        if self.remaining_blocks == 0 && self.remaining_clients == 0 {
-            return Ok(None);
-        }
-
-        while self.remaining_blocks == 0 && self.remaining_clients > 0 {
-            self.remaining_blocks = self.decoder.read_var()?;
-            self.current_client = self.decoder.read_client()?;
-            self.current_clock = self.decoder.read_var()?;
-            self.remaining_clients -= 1;
-        }
-
-        let info = self.decoder.read_info()?;
-        match info & CARRIER_INFO {
-            CONTENT_TYPE_GC => {
-                let len = self.decoder.read_len()?;
-                let id = ID::new(self.current_client, self.current_clock);
-                let end = self.current_clock + len - 1;
-                let carrier = Carrier::GC(BlockRange::new(id, end));
-                self.current_clock += len;
-                self.remaining_blocks -= 1;
-                Ok(Some(carrier))
-            }
-            CONTENT_TYPE_SKIP => {
-                let len = self.decoder.read_len()?;
-                let id = ID::new(self.current_client, self.current_clock);
-                let end = self.current_clock + len - 1;
-                let carrier = Carrier::Skip(BlockRange::new(id, end));
-                self.current_clock += len;
-                self.remaining_blocks -= 1;
-                Ok(Some(carrier))
-            }
-            _ => {
-                let block_id = ID::new(self.current_client, self.current_clock);
-                match Update::read_block(block_id, info, self.decoder)? {
-                    None => Ok(None),
-                    Some(carrier) => {
-                        self.remaining_blocks -= 1;
-                        self.current_clock += carrier.len();
-                        Ok(Some(carrier))
-                    }
-                }
-            }
-        }
-    }
-}
-
-impl<'a, D: Decoder> Iterator for BlockReader<'a, D> {
-    type Item = crate::Result<Carrier>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self.next_block() {
-            Ok(None) => None,
-            Ok(Some(carrier)) => Some(Ok(carrier)),
-            Err(err) => Some(Err(err)),
-        }
-    }
-}
-
 fn copy_lib0<D: Decoder>(
     decoder: &mut D,
     acc: &mut SmallVec<[Content<'static>; 1]>,
@@ -710,60 +630,5 @@ impl Display for BlockRange {
             "<{}:{}..{}>",
             self.head.client, self.head.clock, self.end
         )
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use crate::ClientID;
-    use crate::block::ID;
-    use crate::block_reader::{BlockReader, Carrier};
-    use crate::lib0::v1::DecoderV1;
-    use std::io::Cursor;
-
-    #[test]
-    fn decode_basic_v1() {
-        let update = &[
-            1, 3, 227, 214, 245, 198, 5, 0, 4, 1, 4, 116, 121, 112, 101, 1, 48, 68, 227, 214, 245,
-            198, 5, 0, 1, 49, 68, 227, 214, 245, 198, 5, 1, 1, 50, 0,
-        ];
-        let mut decoder = DecoderV1::new(Cursor::new(update));
-        let mut reader = BlockReader::new(&mut decoder).unwrap();
-        const CLIENT: ClientID = unsafe { ClientID::new_unchecked(1490905955) };
-        // index: 0
-        let Carrier::Block(n) = reader.next().unwrap().unwrap() else {
-            unreachable!()
-        };
-        assert_eq!(n.id(), &ID::new(CLIENT, 0.into()));
-        assert_eq!(n.block.origin_right(), None);
-        assert_eq!(n.block.origin_left(), None);
-        let Ok(text) = n.content[0].as_str() else {
-            unreachable!()
-        };
-        assert_eq!(text, "0");
-
-        // index: 1
-        let Carrier::Block(n) = reader.next().unwrap().unwrap() else {
-            unreachable!()
-        };
-        assert_eq!(n.id(), &ID::new(CLIENT, 1.into()));
-        assert_eq!(n.block.origin_right(), Some(&ID::new(CLIENT, 0.into())));
-        let Ok(text) = n.content[0].as_str() else {
-            unreachable!()
-        };
-        assert_eq!(text, "1");
-
-        // index: 2
-        let Carrier::Block(n) = reader.next().unwrap().unwrap() else {
-            unreachable!()
-        };
-        assert_eq!(n.id(), &ID::new(CLIENT, 2.into()));
-        let Ok(text) = n.content[0].as_str() else {
-            unreachable!()
-        };
-        assert_eq!(text, "2");
-
-        // finish
-        assert!(reader.next().is_none());
     }
 }

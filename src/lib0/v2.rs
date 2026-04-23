@@ -5,8 +5,6 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::io::{Cursor, Read, Write};
-use std::sync::Arc;
-use zerocopy::{FromZeros, U32};
 
 pub struct EncoderV2<W> {
     writer: W,

@@ -615,16 +615,11 @@ impl<'de> Deserializer<'de> for BlockDeserializer<'de> {
 struct NodeDeserializer<'de> {
     block: Block<'de>,
     blocks: BlockStore<'de>,
-    content_store: ContentStore<'de>,
 }
 
 impl<'de> NodeDeserializer<'de> {
-    fn new(block: Block<'de>, blocks: BlockStore<'de>, content_store: ContentStore<'de>) -> Self {
-        NodeDeserializer {
-            block,
-            blocks,
-            content_store,
-        }
+    fn new(block: Block<'de>, blocks: BlockStore<'de>) -> Self {
+        NodeDeserializer { block, blocks }
     }
 }
 
@@ -890,7 +885,7 @@ impl<'de> Deserializer<'de> for NodeDeserializer<'de> {
 
 impl<'de> From<BlockDeserializer<'de>> for NodeDeserializer<'de> {
     fn from(value: BlockDeserializer<'de>) -> Self {
-        Self::new(value.block, value.blocks, value.content_store)
+        Self::new(value.block, value.blocks)
     }
 }
 
