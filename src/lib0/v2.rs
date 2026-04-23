@@ -107,54 +107,54 @@ impl<W: Write> Encoder for EncoderV2<W> {
     }
 
     fn write_left_id(&mut self, id: &ID) -> crate::Result<()> {
-        self.client_encoder.write_u64(id.client.0.get() as u64);
-        self.left_clock_encoder.write_u32(id.clock.get());
+        self.client_encoder.write_u64(id.client.0.get() as u64)?;
+        self.left_clock_encoder.write_u32(id.clock.get())?;
         Ok(())
     }
 
     fn write_right_id(&mut self, id: &ID) -> crate::Result<()> {
-        self.client_encoder.write_u64(id.client.0.get() as u64);
-        self.right_clock_encoder.write_u32(id.clock.get());
+        self.client_encoder.write_u64(id.client.0.get() as u64)?;
+        self.right_clock_encoder.write_u32(id.clock.get())?;
         Ok(())
     }
 
     #[inline]
     fn write_client(&mut self, client: ClientID) -> crate::Result<usize> {
-        self.client_encoder.write_u64(client.0.get() as u64);
+        self.client_encoder.write_u64(client.0.get() as u64)?;
         Ok(0)
     }
 
     #[inline]
     fn write_info(&mut self, info: u8) -> crate::Result<()> {
-        self.info_encoder.write_u8(info);
+        self.info_encoder.write_u8(info)?;
         Ok(())
     }
 
     #[inline]
     fn write_parent_info(&mut self, is_y_key: bool) -> crate::Result<()> {
         self.parent_info_encoder
-            .write_u8(if is_y_key { 1 } else { 0 });
+            .write_u8(if is_y_key { 1 } else { 0 })?;
         Ok(())
     }
 
     #[inline]
     fn write_type_ref(&mut self, info: u8) -> crate::Result<()> {
-        self.type_ref_encoder.write_u64(info as u64);
+        self.type_ref_encoder.write_u64(info as u64)?;
         Ok(())
     }
 
     #[inline]
     fn write_len(&mut self, len: Clock) -> crate::Result<usize> {
-        self.len_encoder.write_u64(len.get() as u64);
+        self.len_encoder.write_u64(len.get() as u64)?;
         Ok(0)
     }
 
     fn write_key(&mut self, key: &str) -> crate::Result<usize> {
         //TODO: this is wrong (key_table is never updated), but this behavior matches Yjs
-        self.key_clock_encoder.write_u32(self.seqeuncer);
+        self.key_clock_encoder.write_u32(self.seqeuncer)?;
         self.seqeuncer += 1;
         if self.key_table.get(key).is_none() {
-            self.string_encoder.write(key);
+            self.string_encoder.write(key)?;
         }
         Ok(0)
     }
@@ -203,17 +203,18 @@ impl IntDiffOptRleEncoder {
         }
     }
 
-    fn write_u32(&mut self, value: u32) {
+    fn write_u32(&mut self, value: u32) -> std::io::Result<()> {
         let diff = value as i32 - self.last as i32;
         if self.diff == diff {
             self.last = value;
             self.count += 1;
         } else {
-            self.flush();
+            self.flush()?;
             self.count = 1;
             self.diff = diff;
             self.last = value;
         }
+        Ok(())
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
@@ -258,14 +259,15 @@ impl UIntOptRleEncoder {
         }
     }
 
-    fn write_u64(&mut self, value: u64) {
+    fn write_u64(&mut self, value: u64) -> std::io::Result<()> {
         if self.last == value {
             self.count += 1;
         } else {
-            self.flush();
+            self.flush()?;
             self.count = 1;
             self.last = value;
         }
+        Ok(())
     }
 
     fn finish(&mut self) -> std::io::Result<&[u8]> {
@@ -310,18 +312,19 @@ impl RleEncoder {
         }
     }
 
-    fn write_u8(&mut self, value: u8) {
+    fn write_u8(&mut self, value: u8) -> std::io::Result<()> {
         if self.last == Some(value) {
             self.count += 1;
         } else {
             if self.count > 0 {
                 // flush counter, unless this is the first value (count = 0)
-                self.buf.write_var(self.count - 1);
+                self.buf.write_var(self.count - 1)?;
             }
             self.count = 1;
-            self.buf.write_u8(value);
+            self.buf.write_u8(value)?;
             self.last = Some(value);
         }
+        Ok(())
     }
 
     fn finish(&self) -> &[u8] {
@@ -350,10 +353,10 @@ impl StringEncoder {
         }
     }
 
-    fn write(&mut self, str: &str) {
+    fn write(&mut self, str: &str) -> std::io::Result<()> {
         let utf16_len = str.encode_utf16().count(); // Yjs encodes offsets using utf-16
         self.buf.push_str(str);
-        self.len_encoder.write_u64(utf16_len as u64);
+        self.len_encoder.write_u64(utf16_len as u64)
     }
 
     fn finish(&mut self) -> std::io::Result<Vec<u8>> {
