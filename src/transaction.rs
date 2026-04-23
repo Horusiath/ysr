@@ -2,7 +2,8 @@ use crate::block::{Block, BlockMut, ID};
 use crate::block_reader::{Carrier, Update};
 use crate::content::{ContentType, FormatAttribute};
 use crate::id_set::IDSet;
-use crate::lib0::v1::EncoderV1;
+use crate::lib0::v1::{DecoderV1, EncoderV1};
+use crate::lib0::v2::DecoderV2;
 use crate::lib0::{Decode, Decoder, Encode, Encoder, Version, WriteExt};
 use crate::lmdb::{Database, Dbi, RwTxn};
 use crate::node::{Node, NodeID};
@@ -389,7 +390,7 @@ impl<'db> Transaction<'db> {
         // in order to build delete set we need to go through all the blocks anyway
         match block_cursor.start_from(ID::new(1.into(), 0.into())) {
             Ok(_) => {}
-            Err(crate::Error::NotFound) => {
+            Err(Error::NotFound) => {
                 // no blocks to encode
                 writer.write_var(0usize)?;
                 IDSet::default().encode_with(&mut writer)?;
@@ -617,10 +618,17 @@ impl<'db> Transaction<'db> {
                 break;
             }
         }
-        found.ok_or_else(|| crate::Error::NotFound)
+        found.ok_or_else(|| Error::NotFound)
     }
 
-    pub fn apply_update<D: Decoder>(&mut self, decoder: &mut D) -> crate::Result<()> {
+    pub fn apply_update(&mut self, update: &[u8], version: Version) -> crate::Result<()> {
+        match version {
+            Version::V1 => self.apply_update_with(&mut DecoderV1::from_slice(update)),
+            Version::V2 => self.apply_update_with(&mut DecoderV2::from_slice(update)?),
+        }
+    }
+
+    pub fn apply_update_with<D: Decoder>(&mut self, decoder: &mut D) -> crate::Result<()> {
         let mut current = Some(Update::decode_with(decoder)?);
         while let Some(update) = current.take() {
             let mut tx = self.write_context()?;
@@ -1083,7 +1091,7 @@ impl<'tx> TxMutScope<'tx> {
                                 }
                                 let mut block: BlockMut = block.into();
                                 block.set_deleted();
-                                self.cursor.update_current(block.header())?;
+                                self.cursor.update_current(*block.id(), block.header())?;
                                 self.state.delete_set.insert(*block.id(), block.clock_len());
                             }
                             block = match self.cursor.next()? {

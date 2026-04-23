@@ -161,21 +161,20 @@ impl Update {
                 block.set_clock_len(len);
             }
             ContentType::Binary => {
-                let mut w = Vec::new();
-
                 block.set_clock_len(1.into());
-                let len = decoder.read_len()?;
-                std::io::copy(&mut decoder.take(len.into()), &mut w)?;
+                let len = decoder.read_len()?.get() as usize;
+                let mut w = Vec::with_capacity(len);
+                unsafe { w.set_len(len) };
+                decoder.read_exact(&mut w)?;
 
                 result.push(Content::new(ContentType::Binary, Cow::Owned(w)));
             }
             ContentType::String => {
-                let mut w = Vec::new();
-
-                let byte_len = decoder.read_len()?;
-                std::io::copy(&mut decoder.take(byte_len.into()), &mut w)?;
-                let str = unsafe { std::str::from_utf8_unchecked(&w) };
-                let utf16_len = str.encode_utf16().count() as u32;
+                let byte_len = decoder.read_len()?.get() as usize;
+                let mut w = Vec::with_capacity(byte_len);
+                unsafe { w.set_len(byte_len) };
+                decoder.read_exact(&mut w)?;
+                let utf16_len = crate::content::utf8_to_utf16_len(&w);
                 block.set_clock_len(Clock::new(utf16_len));
 
                 result.push(Content::new(ContentType::String, Cow::Owned(w)));

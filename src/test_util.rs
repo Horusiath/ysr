@@ -1,3 +1,4 @@
+use crate::lib0::Version;
 use crate::lib0::v1::DecoderV1;
 use crate::{ClientID, MultiDoc, Transaction};
 use tempfile::TempDir;
@@ -23,9 +24,7 @@ pub fn sync<const N: usize>(txns: [&mut Transaction<'_>; N]) {
         for j in 0..N {
             if i != j {
                 let update = txns[j].diff_update(&sv).unwrap();
-                txns[i]
-                    .apply_update(&mut DecoderV1::from_slice(&update))
-                    .unwrap();
+                txns[i].apply_update(&update, Version::V1).unwrap();
             }
         }
     }

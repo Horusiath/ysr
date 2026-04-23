@@ -31,8 +31,7 @@ impl<'tx> InternStringsStore<'tx> {
             Err(LmdbError::NOT_FOUND) => {
                 cursor.put(key.as_bytes(), value.as_bytes(), 0)?;
             }
-            Ok(_) => {
-                let existing: &[u8] = cursor.value()?;
+            Ok((_, existing)) => {
                 let existing = unsafe { std::str::from_utf8_unchecked(existing) };
                 if existing != value {
                     return Err(crate::Error::HashCollision(hash));
@@ -101,13 +100,12 @@ impl<'tx> Iter<'tx> {
         } else {
             unreachable!()
         };
-        let key: &'tx [u8] = cursor.key()?;
+        let (key, value) = cursor.key_value()?;
         if key[0] != KEY_PREFIX_INTERN_STR {
             return Ok(None);
         }
         let hash = crate::U32::ref_from_bytes(&key[1..])
             .map_err(|_| crate::Error::InvalidMapping("intern string hash"))?;
-        let value: &'tx [u8] = cursor.value()?;
         let string = unsafe { std::str::from_utf8_unchecked(value) };
         Ok(Some((hash, string)))
     }
@@ -148,22 +146,25 @@ impl<'tx> Debug for Inspector<'tx> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let mut s = f.debug_map();
         let mut cursor = self.db.cursor().map_err(|_| std::fmt::Error)?;
-        cursor
+        let (mut key, mut value) = match cursor
             .set_range(InternStringsKey::new(0.into()).as_bytes())
-            .map_err(|_| std::fmt::Error)?;
-        let mut key: &[u8] = match cursor.key() {
-            Ok(key) => key,
+        {
+            Ok(kv) => kv,
             Err(LmdbError::NOT_FOUND) => return s.finish(),
             Err(_) => return Err(std::fmt::Error),
         };
         while let Some(id) = InternStringsKey::parse(key) {
             s.key(&id.hash);
-            let value: &[u8] = cursor.value().map_err(|_| std::fmt::Error)?;
-            let value = unsafe { std::str::from_utf8_unchecked(value) };
-            s.value(&value);
+            let str = unsafe { std::str::from_utf8_unchecked(value) };
+            s.value(&str);
 
-            cursor.next().optional().map_err(|_| std::fmt::Error)?;
-            key = cursor.key().map_err(|_| std::fmt::Error)?;
+            match cursor.next().optional().map_err(|_| std::fmt::Error)? {
+                Some(kv) => {
+                    key = kv.0;
+                    value = kv.1;
+                }
+                None => break,
+            }
         }
         s.finish()
     }

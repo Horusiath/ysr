@@ -1,4 +1,4 @@
-use crate::lmdb::{Env, MDB_DB_CREATE};
+use crate::lmdb::{Env, EnvFlags};
 use crate::transaction::Origin;
 use crate::{ClientID, Transaction};
 
@@ -13,7 +13,7 @@ impl MultiDoc {
     }
 
     pub fn transact_mut(&self, doc_id: &str) -> crate::Result<Transaction<'_>> {
-        let handle = self.env.create_db(doc_id, MDB_DB_CREATE)?;
+        let handle = self.env.create_db(doc_id, EnvFlags::CREATE)?;
         let tx = self.env.begin_rw_txn()?;
         Transaction::read_write(tx, handle, self.client_id, None)
     }
@@ -24,7 +24,7 @@ impl MultiDoc {
         origin: O,
     ) -> crate::Result<Transaction<'_>> {
         let origin = origin.into();
-        let handle = self.env.create_db(doc_id, MDB_DB_CREATE)?;
+        let handle = self.env.create_db(doc_id, EnvFlags::CREATE)?;
         let tx = self.env.begin_rw_txn()?;
         Transaction::read_write(tx, handle, self.client_id, Some(origin))
     }
@@ -44,6 +44,7 @@ mod test {
 
     use crate::{Map, MultiDoc, StateVector, Text, TextRef, Unmounted, lib0};
 
+    use crate::lib0::Version;
     use crate::lib0::v1::DecoderV1;
     use uuid::Uuid;
 
@@ -70,8 +71,7 @@ mod test {
         let doc_id = Uuid::new_v4().to_string();
         let txt: Unmounted<Text> = Unmounted::root("type");
         let mut tx = mdoc.transact_mut(&doc_id).unwrap();
-        let mut decoder = DecoderV1::from_slice(update);
-        tx.apply_update(&mut decoder).unwrap();
+        tx.apply_update(update, Version::V1).unwrap();
         tx.commit(None).unwrap();
 
         let mut tx = mdoc.transact_mut(&doc_id).unwrap();
@@ -105,8 +105,7 @@ mod test {
         let binary = t1.diff_update(&sv).unwrap();
 
         // decode an update incoming from A and integrate it at B
-        t2.apply_update(&mut DecoderV1::from_slice(&binary))
-            .unwrap();
+        t2.apply_update(&binary, Version::V1).unwrap();
 
         // check if B sees the same thing that A does
         let txt2 = txt.mount_mut(&mut t2).unwrap();
@@ -146,12 +145,12 @@ mod test {
 
         let (d2, _) = multi_doc(1);
         let mut t2 = d2.transact_mut("test").unwrap();
-        t2.apply_update(&mut DecoderV1::from_slice(&u)).unwrap();
+        t2.apply_update(&u, Version::V1).unwrap();
 
         let mut txt1 = txt.mount_mut(&mut t1).unwrap();
         txt1.insert(5, "world").unwrap();
         let u = t1.diff_update(&StateVector::default()).unwrap();
-        t2.apply_update(&mut DecoderV1::from_slice(&u)).unwrap();
+        t2.apply_update(&u, Version::V1).unwrap();
 
         t1.commit(None).unwrap();
         t2.commit(None).unwrap();
@@ -204,19 +203,19 @@ mod test {
             let u1 = updates.pop().unwrap();
 
             let mut t2 = d2.transact_mut("test").unwrap();
-            t2.apply_update(&mut DecoderV1::from_slice(&u1)).unwrap();
+            t2.apply_update(&u1, Version::V1).unwrap();
             let m2 = map.mount(&t2).unwrap();
             assert_eq!(m2.to_value().unwrap(), lib0!({"a": 1.0})); // applied
             t2.commit(None).unwrap();
 
             let mut t2 = d2.transact_mut("test").unwrap();
-            t2.apply_update(&mut DecoderV1::from_slice(&u3)).unwrap();
+            t2.apply_update(&u3, Version::V1).unwrap();
             let m2 = map.mount(&t2).unwrap();
             assert_eq!(m2.to_value().unwrap(), lib0!({"a": 1.0})); // pending update waiting for u2
             t2.commit(None).unwrap();
 
             let mut t2 = d2.transact_mut("test").unwrap();
-            t2.apply_update(&mut DecoderV1::from_slice(&u2)).unwrap();
+            t2.apply_update(&u2, Version::V1).unwrap();
             let m2 = map.mount(&t2).unwrap();
             assert_eq!(m2.to_value().unwrap(), lib0!({"a": 1.1, "b": 2.0})); // applied all updates
             t2.commit(None).unwrap();

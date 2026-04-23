@@ -267,7 +267,8 @@ impl<'tx, 'db> ListRef<&'tx mut Transaction<'db>> {
 
         // update current parent node length
         tx.cursor.seek(*self.block.id())?;
-        tx.cursor.update_current(self.block.header())?;
+        tx.cursor
+            .update_current(*self.block.id(), self.block.header())?;
 
         Ok(())
     }
@@ -428,8 +429,8 @@ impl From<Vec<In>> for ListPrelim {
 
 #[cfg(test)]
 mod test {
-    use crate::lib0::Value;
     use crate::lib0::v1::DecoderV1;
+    use crate::lib0::{Value, Version};
     use crate::test_util::{multi_doc, sync};
     use crate::{In, List, MapPrelim, Optional, StateVector, Transaction, Unmounted, lib0};
     use std::collections::BTreeMap;
@@ -508,8 +509,7 @@ mod test {
         let (d2, _) = multi_doc(2);
         let mut t2 = d2.transact_mut("test").unwrap();
 
-        t2.apply_update(&mut DecoderV1::from_slice(&update))
-            .unwrap();
+        t2.apply_update(&update, Version::V1).unwrap();
 
         let a2 = arr.mount(&t2).unwrap();
         let actual: Vec<_> = a2.iter::<String>().map(Result::unwrap).collect();
@@ -904,7 +904,7 @@ mod test {
 
         let (doc, _) = multi_doc(2);
         let mut tx = doc.transact_mut("test").unwrap();
-        tx.apply_update(&mut DecoderV1::from_slice(&data)).unwrap();
+        tx.apply_update(&data, Version::V1).unwrap();
 
         let array = arr.mount_mut(&mut tx).unwrap();
 

@@ -40,8 +40,8 @@ impl<'tx> MapEntriesStore<'tx> {
     ) -> crate::Result<()> {
         let mut cursor = self.db.cursor()?;
         let key = HashKeyPrefix::new(node_id, hash);
-        cursor.set_range(key.as_bytes())?;
-        cursor.put_current(block_id.as_bytes())?;
+        let (found_key, _) = cursor.set_range(key.as_bytes())?;
+        cursor.put_current(found_key, block_id.as_bytes())?;
         Ok(())
     }
 
@@ -57,22 +57,23 @@ impl<'tx> MapEntriesStore<'tx> {
     pub fn remove_all(&self, node_id: &NodeID) -> crate::Result<usize> {
         let key = MapEntriesKey::new(*node_id);
         let mut cursor = self.db.cursor()?;
-        match cursor.set_range(key.as_bytes()) {
-            Ok(_) => { /* cursor position set */ }
+        let (mut k, _) = match cursor.set_range(key.as_bytes()) {
+            Ok(kv) => kv,
             Err(LmdbError::NOT_FOUND) => return Ok(0),
             Err(e) => return Err(e.into()),
-        }
+        };
 
         let mut deleted_entries = 0;
-        while let Some(key) = MapKey::parse(cursor.key()?) {
-            if key.node_id() != node_id {
-                break;
+        loop {
+            match MapKey::parse(k) {
+                Some(key) if key.node_id() == node_id => {
+                    cursor.del()?;
+                    deleted_entries += 1;
+                }
+                _ => break,
             }
-
-            cursor.del()?;
-            deleted_entries += 1;
             match cursor.next() {
-                Ok(_) => {}
+                Ok((next_key, _)) => k = next_key,
                 Err(LmdbError::NOT_FOUND) => break,
                 Err(e) => return Err(e.into()),
             }
@@ -131,43 +132,31 @@ impl<'tx> HashKeys<'tx> {
     }
 
     pub fn next(&mut self) -> crate::Result<Option<(&'tx str, &'tx ID)>> {
-        match &mut self.state {
+        let (key, value) = match &mut self.state {
             HashKeysState::Uninit(db) => {
                 let mut cursor = db.cursor()?;
-                match cursor.set_range(self.prefix.as_bytes()) {
-                    Ok(_) => {
-                        let key: &'tx [u8] = cursor.key()?;
-                        if !key.starts_with(self.prefix.as_bytes()) {
-                            self.finish()
-                        } else {
-                            let value: &'tx ID = ID::parse(cursor.value()?)?;
-                            let str: &'tx [u8] = &key[size_of::<HashKeyPrefix>()..];
-                            let str = unsafe { std::str::from_utf8_unchecked(str) };
-                            self.state = HashKeysState::Init(cursor);
-                            Ok(Some((str, value)))
-                        }
-                    }
-                    Err(LmdbError::NOT_FOUND) => self.finish(),
-                    Err(e) => Err(e.into()),
-                }
+                let kv = match cursor.set_range(self.prefix.as_bytes()) {
+                    Ok(kv) => kv,
+                    Err(LmdbError::NOT_FOUND) => return self.finish(),
+                    Err(e) => return Err(e.into()),
+                };
+                self.state = HashKeysState::Init(cursor);
+                kv
             }
             HashKeysState::Init(cursor) => match cursor.next() {
-                Ok(_) => {
-                    let key: &'tx [u8] = cursor.key()?;
-                    if !key.starts_with(self.prefix.as_bytes()) {
-                        self.finish()
-                    } else {
-                        let value: &'tx ID = ID::parse(cursor.value()?)?;
-                        let str: &'tx [u8] = &key[size_of::<HashKeyPrefix>()..];
-                        let str = unsafe { std::str::from_utf8_unchecked(str) };
-                        Ok(Some((str, value)))
-                    }
-                }
-                Err(LmdbError::NOT_FOUND) => self.finish(),
-                Err(e) => Err(e.into()),
+                Ok(kv) => kv,
+                Err(LmdbError::NOT_FOUND) => return self.finish(),
+                Err(e) => return Err(e.into()),
             },
-            HashKeysState::Finished => Ok(None),
+            HashKeysState::Finished => return Ok(None),
+        };
+        if !key.starts_with(self.prefix.as_bytes()) {
+            return self.finish();
         }
+        let id: &'tx ID = ID::parse(value)?;
+        let str: &'tx [u8] = &key[size_of::<HashKeyPrefix>()..];
+        let str = unsafe { std::str::from_utf8_unchecked(str) };
+        Ok(Some((str, id)))
     }
 
     fn finish(&mut self) -> crate::Result<Option<(&'tx str, &'tx ID)>> {
@@ -197,7 +186,7 @@ impl<'tx> MapEntries<'tx> {
 
     pub fn block_id(&mut self) -> crate::Result<&'tx ID> {
         if let MapEntriesState::Init(cursor) = &mut self.state {
-            let value: &'tx [u8] = cursor.value()?;
+            let (_, value) = cursor.key_value()?;
             let id: &'tx ID = ID::parse(value)?;
             Ok(id)
         } else {
@@ -206,47 +195,38 @@ impl<'tx> MapEntries<'tx> {
     }
 
     pub fn next(&mut self) -> crate::Result<Option<MapKey<'tx>>> {
-        match &mut self.state {
+        let (k, _) = match &mut self.state {
             MapEntriesState::Uninit(db) => {
                 let mut cursor = db.cursor()?;
                 let key = MapEntriesKey::new(self.node_id);
-                match cursor.set_range(key.as_bytes()) {
+                let kv = match cursor.set_range(key.as_bytes()) {
+                    Ok(kv) => kv,
                     Err(LmdbError::NOT_FOUND) => {
                         self.state = MapEntriesState::Finished;
-                        Ok(None)
+                        return Ok(None);
                     }
-                    Err(e) => Err(e.into()),
-                    Ok(_) => {
-                        if let Some(key) = MapKey::parse(cursor.key()?)
-                            && key.node_id() == &self.node_id
-                        {
-                            self.state = MapEntriesState::Init(cursor);
-                            Ok(Some(key))
-                        } else {
-                            self.state = MapEntriesState::Finished;
-                            Ok(None)
-                        }
-                    }
-                }
+                    Err(e) => return Err(e.into()),
+                };
+                self.state = MapEntriesState::Init(cursor);
+                kv
             }
             MapEntriesState::Init(cursor) => match cursor.next() {
-                Ok(_) => {
-                    if let Some(key) = MapKey::parse(cursor.key()?)
-                        && key.node_id() == &self.node_id
-                    {
-                        Ok(Some(key))
-                    } else {
-                        self.state = MapEntriesState::Finished;
-                        Ok(None)
-                    }
-                }
+                Ok(kv) => kv,
                 Err(LmdbError::NOT_FOUND) => {
                     self.state = MapEntriesState::Finished;
-                    Ok(None)
+                    return Ok(None);
                 }
-                Err(e) => Err(e.into()),
+                Err(e) => return Err(e.into()),
             },
-            MapEntriesState::Finished => Ok(None),
+            MapEntriesState::Finished => return Ok(None),
+        };
+        if let Some(key) = MapKey::parse(k)
+            && key.node_id() == &self.node_id
+        {
+            Ok(Some(key))
+        } else {
+            self.state = MapEntriesState::Finished;
+            Ok(None)
         }
     }
 }
@@ -334,46 +314,36 @@ impl<'tx> Iter<'tx> {
 
     #[allow(unused)]
     pub fn next(&mut self) -> crate::Result<Option<(MapKey<'tx>, &'tx ID)>> {
-        match &mut self.state {
+        let (k, v) = match &mut self.state {
             IterState::Uninit(db) => {
                 let mut cursor = db.cursor()?;
-                match cursor.set_range(&[MapEntriesStore::PREFIX]) {
+                let kv = match cursor.set_range(&[MapEntriesStore::PREFIX]) {
+                    Ok(kv) => kv,
                     Err(LmdbError::NOT_FOUND) => {
                         self.state = IterState::Finished;
-                        Ok(None)
+                        return Ok(None);
                     }
-                    Err(e) => Err(e.into()),
-                    Ok(_) => {
-                        if let Some(key) = MapKey::parse(cursor.key()?) {
-                            let value: &'tx [u8] = cursor.value()?;
-                            let id: &'tx ID = ID::parse(value)?;
-                            self.state = IterState::Init(cursor);
-                            Ok(Some((key, id)))
-                        } else {
-                            self.state = IterState::Finished;
-                            Ok(None)
-                        }
-                    }
-                }
+                    Err(e) => return Err(e.into()),
+                };
+                self.state = IterState::Init(cursor);
+                kv
             }
             IterState::Init(cursor) => match cursor.next() {
-                Ok(_) => {
-                    if let Some(key) = MapKey::parse(cursor.key()?) {
-                        let value: &'tx [u8] = cursor.value()?;
-                        let id: &'tx ID = ID::parse(value)?;
-                        Ok(Some((key, id)))
-                    } else {
-                        self.state = IterState::Finished;
-                        Ok(None)
-                    }
-                }
+                Ok(kv) => kv,
                 Err(LmdbError::NOT_FOUND) => {
                     self.state = IterState::Finished;
-                    Ok(None)
+                    return Ok(None);
                 }
-                Err(e) => Err(e.into()),
+                Err(e) => return Err(e.into()),
             },
-            IterState::Finished => Ok(None),
+            IterState::Finished => return Ok(None),
+        };
+        if let Some(key) = MapKey::parse(k) {
+            let id: &'tx ID = ID::parse(v)?;
+            Ok(Some((key, id)))
+        } else {
+            self.state = IterState::Finished;
+            Ok(None)
         }
     }
 }

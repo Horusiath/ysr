@@ -1571,8 +1571,8 @@ mod test {
             .diff_update(&StateVector::decode(&d1_sv, Version::V1).unwrap())
             .unwrap();
 
-        t1.apply_update(&mut DecoderV1::from_slice(&u2)).unwrap();
-        t2.apply_update(&mut DecoderV1::from_slice(&u1)).unwrap();
+        t1.apply_update(&u2, Version::V1).unwrap();
+        t2.apply_update(&u1, Version::V1).unwrap();
 
         let a = txt.mount(&t1).unwrap().to_string();
         let b = txt.mount(&t2).unwrap().to_string();
@@ -1604,7 +1604,7 @@ mod test {
         let u1 = t1
             .diff_update(&StateVector::decode(&d2_sv, Version::V1).unwrap())
             .unwrap();
-        t2.apply_update(&mut DecoderV1::from_slice(&u1)).unwrap();
+        t2.apply_update(&u1, Version::V1).unwrap();
 
         let mut txt2 = txt.mount_mut(&mut t2).unwrap();
         assert_eq!(txt2.to_string(), "I expect that");
@@ -1628,8 +1628,8 @@ mod test {
         let u2 = t2
             .diff_update(&StateVector::decode(d1_sv.as_slice(), Version::V1).unwrap())
             .unwrap();
-        t1.apply_update(&mut DecoderV1::from_slice(&u2)).unwrap();
-        t2.apply_update(&mut DecoderV1::from_slice(&u1)).unwrap();
+        t1.apply_update(&u2, Version::V1).unwrap();
+        t2.apply_update(&u1, Version::V1).unwrap();
 
         let txt1 = txt.mount(&t1).unwrap();
         let txt2 = txt.mount(&t2).unwrap();
@@ -1664,7 +1664,7 @@ mod test {
         let u1 = t1
             .diff_update(&StateVector::decode(d2_sv.as_slice(), Version::V1).unwrap())
             .unwrap();
-        t2.apply_update(&mut DecoderV1::from_slice(&u1)).unwrap();
+        t2.apply_update(&u1, Version::V1).unwrap();
 
         let mut txt2 = txt.mount_mut(&mut t2).unwrap();
         assert_eq!(txt2.to_string(), "aaa");
@@ -1690,8 +1690,8 @@ mod test {
             .diff_update(&StateVector::decode(d1_sv.as_slice(), Version::V1).unwrap())
             .unwrap();
 
-        t1.apply_update(&mut DecoderV1::from_slice(&u2)).unwrap();
-        t2.apply_update(&mut DecoderV1::from_slice(&u1)).unwrap();
+        t1.apply_update(&u2, Version::V1).unwrap();
+        t2.apply_update(&u1, Version::V1).unwrap();
 
         let txt1 = txt.mount(&t1).unwrap();
         let txt2 = txt.mount(&t2).unwrap();
@@ -1834,7 +1834,7 @@ mod test {
         let (d2, _) = multi_doc(2);
         let mut t2 = d2.transact_mut("test").unwrap();
 
-        t2.apply_update(&mut DecoderV1::from_slice(&u1)).unwrap();
+        t2.apply_update(&u1, Version::V1).unwrap();
 
         let mut txt2 = txt.mount_mut(&mut t2).unwrap();
         assert_eq!(txt2.to_string(), "hello world");
@@ -1862,8 +1862,8 @@ mod test {
             .diff_update(&StateVector::decode(&sv1, Version::V1).unwrap())
             .unwrap();
 
-        t1.apply_update(&mut DecoderV1::from_slice(&u2)).unwrap();
-        t2.apply_update(&mut DecoderV1::from_slice(&u1)).unwrap();
+        t1.apply_update(&u2, Version::V1).unwrap();
+        t2.apply_update(&u1, Version::V1).unwrap();
 
         let txt1 = txt.mount(&t1).unwrap();
         let txt2 = txt.mount(&t2).unwrap();
@@ -1902,8 +1902,7 @@ mod test {
             txn.commit(None).unwrap();
 
             let mut txn = d2.transact_mut("test").unwrap();
-            txn.apply_update(&mut DecoderV1::from_slice(&update))
-                .unwrap();
+            txn.apply_update(&update, Version::V1).unwrap();
             let txt2 = txt.mount_mut(&mut txn).unwrap();
             let uncommitted: Vec<_> = txt2.uncommitted().map(Result::unwrap).collect();
 
@@ -1930,8 +1929,7 @@ mod test {
             txn.commit(None).unwrap();
 
             let mut txn = d2.transact_mut("test").unwrap();
-            txn.apply_update(&mut DecoderV1::from_slice(&update))
-                .unwrap();
+            txn.apply_update(&update, Version::V1).unwrap();
             let txt2 = txt.mount_mut(&mut txn).unwrap();
             let uncommitted: Vec<_> = txt2.uncommitted().map(Result::unwrap).collect();
 
@@ -1960,8 +1958,7 @@ mod test {
             txn.commit(None).unwrap();
 
             let mut txn = d2.transact_mut("test").unwrap();
-            txn.apply_update(&mut DecoderV1::from_slice(&update))
-                .unwrap();
+            txn.apply_update(&update, Version::V1).unwrap();
 
             let txt2 = txt.mount_mut(&mut txn).unwrap();
             let uncommitted: Vec<_> = txt2.uncommitted().map(Result::unwrap).collect();
@@ -1989,8 +1986,7 @@ mod test {
             txn.commit(None).unwrap();
 
             let mut txn = d2.transact_mut("test").unwrap();
-            txn.apply_update(&mut DecoderV1::from_slice(&update))
-                .unwrap();
+            txn.apply_update(&update, Version::V1).unwrap();
             let txt2 = txt.mount_mut(&mut txn).unwrap();
             let uncommitted: Vec<_> = txt2.uncommitted().map(Result::unwrap).collect();
             assert_eq!(txt2.to_string(), "zb");
@@ -2017,8 +2013,7 @@ mod test {
             txn.commit(None).unwrap();
 
             let mut txn = d2.transact_mut("test").unwrap();
-            txn.apply_update(&mut DecoderV1::from_slice(&update))
-                .unwrap();
+            txn.apply_update(&update, Version::V1).unwrap();
 
             let txt2 = txt.mount_mut(&mut txn).unwrap();
             let uncommitted: Vec<_> = txt2.uncommitted().map(Result::unwrap).collect();
@@ -2047,8 +2042,7 @@ mod test {
             txn.commit(None).unwrap();
 
             let mut txn = d2.transact_mut("test").unwrap();
-            txn.apply_update(&mut DecoderV1::from_slice(&update))
-                .unwrap();
+            txn.apply_update(&update, Version::V1).unwrap();
             let txt2 = txt.mount_mut(&mut txn).unwrap();
             let uncommitted: Vec<_> = txt2.uncommitted().map(Result::unwrap).collect();
             assert_eq!(txt2.to_string(), "yzb");
@@ -2113,8 +2107,7 @@ mod test {
 
         let (d2, _) = multi_doc(2);
         let mut t2 = d2.transact_mut("test").unwrap();
-        t2.apply_update(&mut DecoderV1::from_slice(&update_v1))
-            .unwrap();
+        t2.apply_update(&update_v1, Version::V1).unwrap();
         let txt2 = txt.mount_mut(&mut t2).unwrap();
         assert_eq!(
             txt2.chunks().map(Result::unwrap).collect::<Vec<_>>(),
@@ -2383,7 +2376,7 @@ mod test {
         let (mdoc, _) = multi_doc(1);
         let mut txn = mdoc.transact_mut("test").unwrap();
 
-        txn.apply_update(&mut DecoderV1::from_slice(&bin)).unwrap();
+        txn.apply_update(&bin, Version::V1).unwrap();
 
         let txt = root.mount(&txn).unwrap();
         assert_eq!(txt.to_string(), "abc");
@@ -2524,8 +2517,7 @@ mod test {
         assert_eq!(actual, Value::from("val"));
 
         let update = t1.incremental_update().unwrap();
-        t2.apply_update(&mut DecoderV1::from_slice(&update))
-            .unwrap();
+        t2.apply_update(&update, Version::V1).unwrap();
         t1.commit(None).unwrap();
         t2.commit(None).unwrap();
 
@@ -2636,7 +2628,7 @@ mod test {
         let (mdoc, _) = multi_doc(2);
         let mut txn = mdoc.transact_mut("test").unwrap();
 
-        txn.apply_update(&mut DecoderV1::from_slice(&bin)).unwrap();
+        txn.apply_update(&bin, Version::V1).unwrap();
 
         let txt = root.mount(&txn).unwrap();
         assert_eq!(txt.to_string(), "ab");
