@@ -529,7 +529,7 @@ impl<'a> IntDiffOptRleDecoder {
             let diff = self.cursor.read_var::<i32>()?;
             // if the first bit is set, we read more data
             let has_count = diff & 1;
-            self.diff = (diff >> 1) as i32;
+            self.diff = diff >> 1 ;
             self.count = if has_count != 0 {
                 self.cursor.read_var::<u32>()? + 2
             } else {

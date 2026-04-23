@@ -161,13 +161,11 @@ impl<'tx> BlockCursor<'tx> {
     /// Moves current cursor position to a block starting with a given [ID].
     pub fn seek(&mut self, id: ID) -> crate::Result<Block<'tx>> {
         // fast path: check if we're already at the right position
-        if let Ok((key, value)) = self.cursor.key_value() {
-            if let Some(block) = Self::parse_block(key, value)? {
-                if block.id() == &id {
+        if let Ok((key, value)) = self.cursor.key_value()
+            && let Some(block) = Self::parse_block(key, value)?
+                && block.id() == &id {
                     return Ok(block);
                 }
-            }
-        }
 
         let key = BlockKey::new(id);
         match self.cursor.set_key(key.as_bytes()) {
@@ -182,11 +180,10 @@ impl<'tx> BlockCursor<'tx> {
         let key = BlockKey::new(id);
         match self.cursor.set_range(key.as_bytes()) {
             Ok((found_key, value)) => {
-                if let Some(block) = Self::parse_block(found_key, value)? {
-                    if block.id() == &id {
+                if let Some(block) = Self::parse_block(found_key, value)?
+                    && block.id() == &id {
                         return Ok(block);
                     }
-                }
             }
             Err(LmdbError::NOT_FOUND) => { /* no >= key found */ }
             Err(e) => return Err(Error::Lmdb(e)),
