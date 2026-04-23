@@ -4,11 +4,13 @@
 //! management, transactions, database handles, cursors, and key-value operations.
 //! Lifetimes enforce that cursors and data references don't outlive their transactions.
 
+use bitflags::bitflags;
 use lmdb_master_sys::*;
 use std::ffi::{CStr, CString};
 use std::marker::PhantomData;
 use std::path::Path;
 use std::ptr::null_mut;
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 // ---------------------------------------------------------------------------
 // Error
 // ---------------------------------------------------------------------------
@@ -99,11 +101,11 @@ impl Env {
     ///
     /// This internally creates and commits a short-lived write transaction.
     /// Must not be called concurrently with other `create_db` calls.
-    pub fn create_db(&self, name: &str, flags: u32) -> Result<Dbi, Error> {
+    pub fn create_db(&self, name: &str, flags: EnvFlags) -> Result<Dbi, Error> {
         let txn = self.begin_rw_txn()?;
         let c_name = CString::new(name).expect("database name must not contain null bytes");
         let mut dbi: MDB_dbi = 0;
-        let rc = unsafe { mdb_dbi_open(txn.txn, c_name.as_ptr(), flags, &mut dbi) };
+        let rc = unsafe { mdb_dbi_open(txn.txn, c_name.as_ptr(), flags.bits(), &mut dbi) };
         lmdb_result(rc)?;
         txn.commit()?;
         Ok(Dbi(dbi))
@@ -134,7 +136,7 @@ impl Drop for Env {
 /// Builder for configuring and opening an LMDB [`Env`].
 pub struct EnvBuilder {
     env: *mut MDB_env,
-    flags: u32,
+    flags: EnvFlags,
 }
 
 impl EnvBuilder {
@@ -143,7 +145,10 @@ impl EnvBuilder {
         let mut env: *mut MDB_env = std::ptr::null_mut();
         let rc = unsafe { mdb_env_create(&mut env) };
         assert_eq!(rc, 0, "mdb_env_create failed: {rc}");
-        Self { env, flags: 0 }
+        Self {
+            env,
+            flags: EnvFlags::NONE,
+        }
     }
 
     /// Set the maximum number of named databases.
@@ -159,7 +164,7 @@ impl EnvBuilder {
     }
 
     /// Set environment flags (bitwise OR of `MDB_*` constants).
-    pub fn flags(mut self, flags: u32) -> Self {
+    pub fn flags(mut self, flags: EnvFlags) -> Self {
         self.flags |= flags;
         self
     }
@@ -168,8 +173,14 @@ impl EnvBuilder {
     pub fn open(self, path: &Path, mode: u32) -> Result<Env, Error> {
         let path_str = path.to_str().expect("LMDB path must be valid UTF-8");
         let c_path = CString::new(path_str).expect("path must not contain null bytes");
-        let rc =
-            unsafe { mdb_env_open(self.env, c_path.as_ptr(), self.flags, mode as mdb_mode_t) };
+        let rc = unsafe {
+            mdb_env_open(
+                self.env,
+                c_path.as_ptr(),
+                self.flags.bits(),
+                mode as mdb_mode_t,
+            )
+        };
         if rc != 0 {
             // Don't close in Drop — mdb_env_open failure leaves env in undefined state,
             // but mdb_env_close is still required to free the handle.
@@ -404,26 +415,35 @@ impl Drop for Cursor<'_> {
 // ---------------------------------------------------------------------------
 // Public constants
 // ---------------------------------------------------------------------------
+#[repr(transparent)]
+#[derive(FromBytes, KnownLayout, Immutable, IntoBytes, Default)]
+pub struct EnvFlags(u32);
 
-/// Flag for `mdb_dbi_open`: create the database if it doesn't exist.
-pub const MDB_DB_CREATE: u32 = MDB_CREATE;
+bitflags! {
+    impl EnvFlags : u32 {
+        const NONE = 0;
 
-// Environment flags for [`EnvBuilder::flags`].
+        /// Flag for `mdb_dbi_open`: create the database if it doesn't exist.
+        const CREATE = MDB_CREATE;
 
-/// Don't flush system buffers to disk on commit. Trades durability for speed.
-/// Database integrity is maintained (ACI), but a system crash may lose the
-/// last committed transactions.
-pub const ENV_NOSYNC: u32 = MDB_NOSYNC;
+        // Environment flags for [`EnvBuilder::flags`].
 
-/// Flush system buffers but omit the metadata-page flush on commit.
-/// Maintains database integrity but a system crash may undo the last
-/// committed transaction.
-pub const ENV_NOMETASYNC: u32 = MDB_NOMETASYNC;
+        /// Don't flush system buffers to disk on commit. Trades durability for speed.
+        /// Database integrity is maintained (ACI), but a system crash may lose the
+        /// last committed transactions.
+        const NOSYNC = MDB_NOSYNC;
 
-/// Use a writable memory map. Fewer mallocs but no protection from stray
-/// writes. May be faster when the DB fits in RAM.
-pub const ENV_WRITEMAP: u32 = MDB_WRITEMAP;
+        /// Flush system buffers but omit the metadata-page flush on commit.
+        /// Maintains database integrity but a system crash may undo the last
+        /// committed transaction.
+        const NOMETASYNC = MDB_NOMETASYNC;
 
-/// Turn off OS readahead. Helps random-read performance when the DB is
-/// larger than RAM.
-pub const ENV_NORDAHEAD: u32 = MDB_NORDAHEAD;
+        /// Use a writable memory map. Fewer mallocs but no protection from stray
+        /// writes. May be faster when the DB fits in RAM.
+        const WRITEMAP = MDB_WRITEMAP;
+
+        /// Turn off OS readahead. Helps random-read performance when the DB is
+        /// larger than RAM.
+        const NORDAHEAD = MDB_NORDAHEAD;
+    }
+}

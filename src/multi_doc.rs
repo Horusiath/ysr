@@ -1,4 +1,4 @@
-use crate::lmdb::{Env, MDB_DB_CREATE};
+use crate::lmdb::{Env, EnvFlags};
 use crate::transaction::Origin;
 use crate::{ClientID, Transaction};
 
@@ -13,7 +13,7 @@ impl MultiDoc {
     }
 
     pub fn transact_mut(&self, doc_id: &str) -> crate::Result<Transaction<'_>> {
-        let handle = self.env.create_db(doc_id, MDB_DB_CREATE)?;
+        let handle = self.env.create_db(doc_id, EnvFlags::CREATE)?;
         let tx = self.env.begin_rw_txn()?;
         Transaction::read_write(tx, handle, self.client_id, None)
     }
@@ -24,7 +24,7 @@ impl MultiDoc {
         origin: O,
     ) -> crate::Result<Transaction<'_>> {
         let origin = origin.into();
-        let handle = self.env.create_db(doc_id, MDB_DB_CREATE)?;
+        let handle = self.env.create_db(doc_id, EnvFlags::CREATE)?;
         let tx = self.env.begin_rw_txn()?;
         Transaction::read_write(tx, handle, self.client_id, Some(origin))
     }

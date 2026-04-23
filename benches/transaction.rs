@@ -7,6 +7,7 @@ use std::time::Duration;
 use tempfile::TempDir;
 use ysr::lib0::v1::DecoderV1;
 use ysr::lib0::v2::DecoderV2;
+use ysr::lmdb::EnvFlags;
 use ysr::{MultiDoc, StateVector, Text, Unmounted};
 
 // ---------------------------------------------------------------------------
@@ -22,14 +23,14 @@ struct TestEnv {
 
 impl TestEnv {
     fn new() -> Self {
-        Self::with_flags(0)
+        Self::with_flags(EnvFlags::NONE)
     }
 
     fn nosync() -> Self {
-        Self::with_flags(ysr::lmdb::ENV_NOSYNC)
+        Self::with_flags(EnvFlags::NOSYNC)
     }
 
-    fn with_flags(flags: u32) -> Self {
+    fn with_flags(flags: EnvFlags) -> Self {
         let dir = TempDir::new().unwrap();
         let env = ysr::lmdb::Env::builder()
             .max_dbs(10)

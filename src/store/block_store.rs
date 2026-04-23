@@ -133,7 +133,7 @@ impl<'tx> BlockCursor<'tx> {
 
     /// Try to interpret a raw LMDB key+value pair as a Block.
     /// Returns `None` if the key prefix doesn't match the block key-space.
-    fn try_parse_block(key: &[u8], value: &'tx [u8]) -> crate::Result<Option<Block<'tx>>> {
+    fn parse_block(key: &[u8], value: &'tx [u8]) -> crate::Result<Option<Block<'tx>>> {
         if key.first() == Some(&Self::PREFIX) {
             let &id = ID::parse(&key[1..])?;
             Ok(Some(Block::new(id, value)?))
@@ -145,7 +145,7 @@ impl<'tx> BlockCursor<'tx> {
     /// Returns a [Block] at the current cursor position.
     pub fn current(&mut self) -> crate::Result<Block<'tx>> {
         let (key, value) = self.cursor.key_value()?;
-        Self::try_parse_block(key, value)?.ok_or(crate::Error::NotFound)
+        Self::parse_block(key, value)?.ok_or(crate::Error::NotFound)
     }
 
     /// Move cursor to the beginning of the block store space.
@@ -162,7 +162,7 @@ impl<'tx> BlockCursor<'tx> {
     pub fn seek(&mut self, id: ID) -> crate::Result<Block<'tx>> {
         // fast path: check if we're already at the right position
         if let Ok((key, value)) = self.cursor.key_value() {
-            if let Some(block) = Self::try_parse_block(key, value)? {
+            if let Some(block) = Self::parse_block(key, value)? {
                 if block.id() == &id {
                     return Ok(block);
                 }
@@ -182,7 +182,7 @@ impl<'tx> BlockCursor<'tx> {
         let key = BlockKey::new(id);
         match self.cursor.set_range(key.as_bytes()) {
             Ok((found_key, value)) => {
-                if let Some(block) = Self::try_parse_block(found_key, value)? {
+                if let Some(block) = Self::parse_block(found_key, value)? {
                     if block.id() == &id {
                         return Ok(block);
                     }
@@ -210,7 +210,7 @@ impl<'tx> BlockCursor<'tx> {
     /// Returns `None` if current cursor position is outside the block boundaries.
     pub fn next(&mut self) -> crate::Result<Option<Block<'tx>>> {
         match self.cursor.next() {
-            Ok((key, value)) => Self::try_parse_block(key, value),
+            Ok((key, value)) => Self::parse_block(key, value),
             Err(LmdbError::NOT_FOUND) => Ok(None),
             Err(e) => Err(e.into()),
         }
@@ -220,7 +220,7 @@ impl<'tx> BlockCursor<'tx> {
     /// Returns `None` if current cursor position is outside the block boundaries.
     pub fn prev(&mut self) -> crate::Result<Option<Block<'tx>>> {
         match self.cursor.prev() {
-            Ok((key, value)) => Self::try_parse_block(key, value),
+            Ok((key, value)) => Self::parse_block(key, value),
             Err(LmdbError::NOT_FOUND) => Ok(None),
             Err(e) => Err(e.into()),
         }
@@ -259,8 +259,7 @@ impl<'tx> BlockCursor<'tx> {
     #[inline]
     pub fn update_current(&mut self, id: ID, header: &BlockHeader) -> crate::Result<()> {
         let key = BlockKey::new(id);
-        self.cursor
-            .put_current(key.as_bytes(), header.as_bytes())?;
+        self.cursor.put_current(key.as_bytes(), header.as_bytes())?;
         Ok(())
     }
 
@@ -324,7 +323,7 @@ impl<'tx> BlockCursor<'tx> {
         };
 
         loop {
-            match Self::try_parse_block(key, value)? {
+            match Self::parse_block(key, value)? {
                 Some(block) => {
                     if block.is_deleted() {
                         ds.insert(*block.id(), block.clock_len());
