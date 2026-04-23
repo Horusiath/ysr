@@ -320,7 +320,7 @@ impl FromIterator<(String, In)> for MapPrelim {
 
 #[cfg(test)]
 mod test {
-    use crate::lib0::Value;
+    use crate::lib0::{Value, Version};
 
     use crate::lib0::v1::DecoderV1;
     use crate::test_util::{multi_doc, sync};
@@ -346,8 +346,7 @@ mod test {
         t1.commit(None).unwrap();
 
         let mut t2 = d2.transact_mut("test").unwrap();
-        t2.apply_update(&mut DecoderV1::from_slice(&update))
-            .unwrap();
+        t2.apply_update(&update, Version::V1).unwrap();
         let m2 = map.mount_mut(&mut t2).unwrap();
         assert_eq!(m2.to_value().unwrap(), lib0!({"number": 1.1}));
     }
@@ -395,8 +394,7 @@ mod test {
         let update = t1.diff_update(&StateVector::default()).unwrap();
 
         let mut t2 = d2.transact_mut("test").unwrap();
-        t2.apply_update(&mut DecoderV1::from_slice(&update))
-            .unwrap();
+        t2.apply_update(&update, Version::V1).unwrap();
         let m2 = map.mount_mut(&mut t2).unwrap();
 
         let v2 = m2.to_value().unwrap();
@@ -420,8 +418,7 @@ mod test {
         let (d2, _) = multi_doc(2);
         let mut t2 = d2.transact_mut("test").unwrap();
 
-        t2.apply_update(&mut DecoderV1::from_slice(&update))
-            .unwrap();
+        t2.apply_update(&update, Version::V1).unwrap();
 
         let m2 = map.mount_mut(&mut t2).unwrap();
 
@@ -520,7 +517,7 @@ mod test {
         let (d2, _) = multi_doc(2);
         let mut t2 = d2.transact_mut("test").unwrap();
 
-        t2.apply_update(&mut DecoderV1::from_slice(&u1)).unwrap();
+        t2.apply_update(&u1, Version::V1).unwrap();
 
         let m2 = map.mount_mut(&mut t2).unwrap();
 

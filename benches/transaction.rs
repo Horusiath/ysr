@@ -5,11 +5,9 @@ use std::fs::File;
 use std::io::{BufReader, Read};
 use std::time::Duration;
 use tempfile::TempDir;
-use ysr::lib0::v1::DecoderV1;
-use ysr::lib0::v2::DecoderV2;
+use ysr::lib0::Version;
 use ysr::lmdb::EnvFlags;
 use ysr::{MultiDoc, StateVector, Text, Unmounted};
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -43,30 +41,15 @@ impl TestEnv {
     }
 }
 
-#[derive(Clone, Copy)]
-enum Encoding {
-    V1,
-    V2,
-}
-
 struct BinDataset {
     name: &'static str,
-    encoding: Encoding,
+    encoding: Version,
     data: Vec<u8>,
 }
 
 impl BinDataset {
     fn apply(&self, tx: &mut ysr::Transaction<'_>) {
-        match self.encoding {
-            Encoding::V1 => {
-                tx.apply_update(&mut DecoderV1::from_slice(&self.data))
-                    .unwrap();
-            }
-            Encoding::V2 => {
-                tx.apply_update(&mut DecoderV2::from_slice(&self.data).unwrap())
-                    .unwrap();
-            }
-        }
+        tx.apply_update(&self.data, self.encoding).unwrap();
     }
 }
 
@@ -74,14 +57,14 @@ fn load_bin_datasets() -> Vec<BinDataset> {
     [
         (
             "small-v2",
-            Encoding::V2,
+            Version::V2,
             "./tests/test-data/bench-input/small-test-dataset.bin",
         ),
         // medium-test-dataset.bin is excluded for now: 30MB dataset
         // needs format investigation (decodes with neither V1 nor V2).
         (
             "b4-v1",
-            Encoding::V1,
+            Version::V1,
             "./tests/test-data/bench-input/b4-update.bin",
         ),
     ]
