@@ -1,15 +1,22 @@
-use crate::lmdb::{Env, EnvFlags};
+use crate::lmdb::Env;
 use crate::transaction::Origin;
 use crate::{ClientID, Transaction};
 use lmdb_master_sys::MDB_CREATE;
-use std::path::Path;
 
+/// [MultiDoc] is an entry point to the library. It allows to store multiple documents within
+/// the same database file. Individual documents can be accessed by opening transaction with their
+/// identifiers.
 pub struct MultiDoc {
     env: Env,
     client_id: Option<ClientID>,
 }
 
 impl MultiDoc {
+    /// Creates a new [MultiDoc] instance.
+    ///
+    /// If `client_id` was provided it will be used by all the documents within the scope of
+    /// this multi-doc. Otherwise, it will be generated randomly once when the document is created,
+    /// then persisted and reused in subsequent requests.
     pub fn new(env: Env, client_id: Option<ClientID>) -> Self {
         MultiDoc { env, client_id }
     }
@@ -19,12 +26,21 @@ impl MultiDoc {
         &self.env
     }
 
+    /// Opens new read-only transaction.
+    pub fn transact(&self, doc_id: &str) -> crate::Result<Transaction<'_>> {
+        let handle = self.env.create_db(doc_id, 0)?;
+        let tx = self.env.begin_ro_txn()?;
+        Ok(Transaction::read_only(tx, handle))
+    }
+
+    /// Opens new read-write transaction.
     pub fn transact_mut(&self, doc_id: &str) -> crate::Result<Transaction<'_>> {
         let handle = self.env.create_db(doc_id, MDB_CREATE)?;
         let tx = self.env.begin_rw_txn()?;
         Transaction::read_write(tx, handle, self.client_id, None)
     }
 
+    /// Opens new read-write transaction with specific origin identifier.
     pub fn transact_mut_with<O: Into<Origin>>(
         &self,
         doc_id: &str,

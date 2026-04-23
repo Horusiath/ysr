@@ -111,6 +111,17 @@ impl Env {
         Ok(Dbi(dbi))
     }
 
+    /// Begin a new read-only transaction.
+    pub fn begin_ro_txn(&self) -> Result<RwTxn<'_>, Error> {
+        let mut txn: *mut MDB_txn = std::ptr::null_mut();
+        let rc = unsafe { mdb_txn_begin(self.env, std::ptr::null_mut(), MDB_RDONLY, &mut txn) };
+        lmdb_result(rc)?;
+        Ok(RwTxn {
+            txn,
+            _marker: PhantomData,
+        })
+    }
+
     /// Begin a new read-write transaction.
     pub fn begin_rw_txn(&self) -> Result<RwTxn<'_>, Error> {
         let mut txn: *mut MDB_txn = std::ptr::null_mut();

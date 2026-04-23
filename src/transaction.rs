@@ -323,6 +323,14 @@ pub struct Transaction<'db> {
 }
 
 impl<'db> Transaction<'db> {
+    pub(crate) fn read_only(txn: RwTxn<'db>, handle: Dbi) -> Self {
+        let db = DbHandle { txn, handle };
+        Transaction {
+            db,
+            state: LazyState::new(),
+        }
+    }
+
     pub(crate) fn read_write(
         txn: RwTxn<'db>,
         handle: Dbi,
