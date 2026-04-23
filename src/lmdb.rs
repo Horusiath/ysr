@@ -426,7 +426,11 @@ bitflags! {
         /// Flag for `mdb_dbi_open`: create the database if it doesn't exist.
         const CREATE = MDB_CREATE;
 
-        // Environment flags for [`EnvBuilder::flags`].
+        /// no environment directory
+        const NOSUBDIR = MDB_NOSUBDIR;
+
+        /// Set up the environment in read-only mode. No changes will be possible.
+        const READONLY = MDB_RDONLY;
 
         /// Don't flush system buffers to disk on commit. Trades durability for speed.
         /// Database integrity is maintained (ACI), but a system crash may lose the
@@ -442,8 +446,20 @@ bitflags! {
         /// writes. May be faster when the DB fits in RAM.
         const WRITEMAP = MDB_WRITEMAP;
 
+        /// Use asynchronous msync when [Self::WRITEMAP] is used.
+        const MAPASYNC = MDB_MAPASYNC;
+
+        /// Tie reader locktable slots to MDB_txn objects instead of to threads
+        const NOTLS = MDB_NOTLS;
+
+        /// Don't do any locking, caller must manage their own locks.
+        const NOLOCK = MDB_NOLOCK;
+
         /// Turn off OS readahead. Helps random-read performance when the DB is
         /// larger than RAM.
         const NORDAHEAD = MDB_NORDAHEAD;
+
+        /// Don't initialize malloc'd memory before writing to datafile.
+        const NOMEMINIT = MDB_NOMEMINIT;
     }
 }
