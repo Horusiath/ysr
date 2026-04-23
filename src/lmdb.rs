@@ -121,6 +121,26 @@ impl Env {
             _marker: PhantomData,
         })
     }
+
+    /// Copy an LMDB environment to the specified path.
+    ///
+    /// If `compact` is true, perform compaction while copying: omit free pages and sequentially
+    /// renumber all pages in output. This option consumes more CPU and runs more slowly than
+    /// the default. Currently, it fails if the environment has suffered a page leak.
+    ///
+    /// This function may be used to make a backup of an existing environment. No lockfile
+    /// is created, since it gets recreated at need.
+    ///
+    /// Note: This call can trigger significant file size growth if run in parallel with
+    /// write transactions, because it employs a read-only transaction. See long-lived transactions
+    /// under caveats_sec.
+    pub fn copy_to<P: AsRef<Path>>(&self, path: P, compact: bool) -> Result<(), Error> {
+        let path = path.as_ref().as_os_str().to_str().expect("invalid path");
+        let path = CString::new(path).expect("database name must not contain null bytes");
+        let flags = if compact { MDB_CP_COMPACT } else { 0 };
+        let rc = unsafe { mdb_env_copy2(self.env, path.as_ptr(), flags) };
+        lmdb_result(rc)
+    }
 }
 
 impl Drop for Env {
