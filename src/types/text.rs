@@ -1558,9 +1558,6 @@ mod test {
 
         txt2.insert(0, "world").unwrap();
 
-        drop(txt1);
-        drop(txt2);
-
         let d1_sv = t1.state_vector().unwrap().encode(Version::V1).unwrap();
         let d2_sv = t2.state_vector().unwrap().encode(Version::V1).unwrap();
 
@@ -1598,8 +1595,6 @@ mod test {
         let (d2, _) = multi_doc(2);
         let mut t2 = d2.transact_mut("test").unwrap();
 
-        drop(txt1);
-
         let d2_sv = t2.state_vector().unwrap().encode(Version::V1).unwrap();
         let u1 = t1
             .diff_update(&StateVector::decode(&d2_sv, Version::V1).unwrap())
@@ -1616,9 +1611,6 @@ mod test {
         let mut txt1 = txt.mount_mut(&mut t1).unwrap();
         txt1.insert(1, " didn't").unwrap();
         assert_eq!(txt1.to_string(), "I didn't expect that");
-
-        drop(txt1);
-        drop(txt2);
 
         let d2_sv = t2.state_vector().unwrap().encode(Version::V1).unwrap();
         let d1_sv = t1.state_vector().unwrap().encode(Version::V1).unwrap();
@@ -1655,8 +1647,6 @@ mod test {
         txt1.insert(0, "aaa").unwrap();
         assert_eq!(txt1.to_string(), "aaa");
 
-        drop(txt1);
-
         let (d2, _) = multi_doc(2);
         let mut t2 = d2.transact_mut("test").unwrap();
 
@@ -1677,9 +1667,6 @@ mod test {
 
         txt1.insert(3, "aaa").unwrap();
         assert_eq!(txt1.to_string(), "aaaaaa");
-
-        drop(txt1);
-        drop(txt2);
 
         let d2_sv = t2.state_vector().unwrap().encode(Version::V1).unwrap();
         let d1_sv = t1.state_vector().unwrap().encode(Version::V1).unwrap();
@@ -1827,8 +1814,6 @@ mod test {
         txt1.insert(0, "hello world").unwrap();
         assert_eq!(txt1.to_string(), "hello world");
 
-        drop(txt1);
-
         let u1 = t1.diff_update(&StateVector::default()).unwrap();
 
         let (d2, _) = multi_doc(2);
@@ -1849,9 +1834,6 @@ mod test {
         txt2.remove_range(0..1).unwrap();
         txt2.insert(0, "H").unwrap();
         assert_eq!(txt2.to_string(), "Hellod");
-
-        drop(txt1);
-        drop(txt2);
 
         let sv1 = t1.state_vector().unwrap().encode(Version::V1).unwrap();
         let sv2 = t2.state_vector().unwrap().encode(Version::V1).unwrap();
