@@ -5,7 +5,7 @@ use std::fs::File;
 use std::io::{BufReader, Read};
 use std::time::Duration;
 use tempfile::TempDir;
-use ysr::lib0::Version;
+use ysr::lib0::Encoding;
 use ysr::lmdb::EnvFlags;
 use ysr::{MultiDoc, StateVector, Text, Unmounted};
 // ---------------------------------------------------------------------------
@@ -43,7 +43,7 @@ impl TestEnv {
 
 struct BinDataset {
     name: &'static str,
-    encoding: Version,
+    encoding: Encoding,
     data: Vec<u8>,
 }
 
@@ -57,14 +57,14 @@ fn load_bin_datasets() -> Vec<BinDataset> {
     [
         (
             "small-v2",
-            Version::V2,
+            Encoding::V2,
             "./tests/test-data/bench-input/small-test-dataset.bin",
         ),
         // medium-test-dataset.bin is excluded for now: 30MB dataset
         // needs format investigation (decodes with neither V1 nor V2).
         (
             "b4-v1",
-            Version::V1,
+            Encoding::V1,
             "./tests/test-data/bench-input/b4-update.bin",
         ),
     ]

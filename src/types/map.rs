@@ -320,7 +320,7 @@ impl FromIterator<(String, In)> for MapPrelim {
 
 #[cfg(test)]
 mod test {
-    use crate::lib0::{Value, Version};
+    use crate::lib0::{Encoding, Value};
 
     use crate::test_util::{multi_doc, sync};
     use crate::{
@@ -341,11 +341,13 @@ mod test {
         let mut m1 = map.mount_mut(&mut t1).unwrap();
         m1.insert("number", 1.1).unwrap();
 
-        let update = t1.diff_update(&StateVector::default()).unwrap();
+        let update = t1
+            .diff_update(&StateVector::default(), Encoding::V1)
+            .unwrap();
         t1.commit(None).unwrap();
 
         let mut t2 = d2.transact_mut("test").unwrap();
-        t2.apply_update(&update, Version::V1).unwrap();
+        t2.apply_update(&update, Encoding::V1).unwrap();
         let m2 = map.mount_mut(&mut t2).unwrap();
         assert_eq!(m2.to_value().unwrap(), lib0!({"number": 1.1}));
     }
@@ -390,10 +392,12 @@ mod test {
         let v1 = m1.to_value().unwrap();
         assert_eq!(v1, expected);
 
-        let update = t1.diff_update(&StateVector::default()).unwrap();
+        let update = t1
+            .diff_update(&StateVector::default(), Encoding::V1)
+            .unwrap();
 
         let mut t2 = d2.transact_mut("test").unwrap();
-        t2.apply_update(&update, Version::V1).unwrap();
+        t2.apply_update(&update, Encoding::V1).unwrap();
         let m2 = map.mount_mut(&mut t2).unwrap();
 
         let v2 = m2.to_value().unwrap();
@@ -412,12 +416,14 @@ mod test {
         m1.insert("stuff", "stuffy").unwrap();
         m1.insert("null", None as Option<String>).unwrap();
 
-        let update = t1.diff_update(&StateVector::default()).unwrap();
+        let update = t1
+            .diff_update(&StateVector::default(), Encoding::V1)
+            .unwrap();
 
         let (d2, _) = multi_doc(2);
         let mut t2 = d2.transact_mut("test").unwrap();
 
-        t2.apply_update(&update, Version::V1).unwrap();
+        t2.apply_update(&update, Encoding::V1).unwrap();
 
         let m2 = map.mount_mut(&mut t2).unwrap();
 
@@ -509,14 +515,16 @@ mod test {
         assert_eq!(m1.get::<_, Value>("key1").optional().unwrap(), None);
         assert_eq!(m1.get::<_, Value>("key2").optional().unwrap(), None);
 
-        let u1 = t1.diff_update(&StateVector::default()).unwrap();
+        let u1 = t1
+            .diff_update(&StateVector::default(), Encoding::V1)
+            .unwrap();
 
         t1.commit(None).unwrap();
 
         let (d2, _) = multi_doc(2);
         let mut t2 = d2.transact_mut("test").unwrap();
 
-        t2.apply_update(&u1, Version::V1).unwrap();
+        t2.apply_update(&u1, Encoding::V1).unwrap();
 
         let m2 = map.mount_mut(&mut t2).unwrap();
 

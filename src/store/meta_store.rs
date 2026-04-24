@@ -1,4 +1,4 @@
-use crate::lib0::{Decode, Encode, Version};
+use crate::lib0::{Decode, Encode, Encoding};
 use crate::lmdb::{Cursor, Database, Error as LmdbError};
 use crate::store::{KEY_PREFIX_META, ReadableBytes};
 use crate::transaction::PendingUpdate;
@@ -42,7 +42,7 @@ impl<'tx> MetaStore<'tx> {
     /// Get pending update if any exists.
     pub fn pending(&self) -> crate::Result<Option<PendingUpdate<'tx>>> {
         if let Some(missing_sv) = self.get(Self::KEY_MISSING_SV)? {
-            let missing_sv = StateVector::decode(missing_sv, Version::V1)?;
+            let missing_sv = StateVector::decode(missing_sv, Encoding::V1)?;
             let update = self.get(Self::KEY_PENDING)?.ok_or(crate::Error::NotFound)?;
             let ds = self
                 .get(Self::KEY_PENDING_DS)?
@@ -57,7 +57,7 @@ impl<'tx> MetaStore<'tx> {
     pub fn insert_pending(&self, pending: &PendingUpdate<'_>) -> crate::Result<()> {
         self.insert(
             Self::KEY_MISSING_SV,
-            &pending.missing_sv.encode(Version::V1)?,
+            &pending.missing_sv.encode(Encoding::V1)?,
         )?;
         self.insert(Self::KEY_PENDING, pending.update)?;
         self.insert(Self::KEY_PENDING_DS, pending.delete_set)?;

@@ -1,4 +1,4 @@
-use crate::lib0::Version;
+use crate::lib0::Encoding;
 use crate::{ClientID, MultiDoc, Transaction};
 use tempfile::TempDir;
 
@@ -22,8 +22,8 @@ pub fn sync<const N: usize>(txns: [&mut Transaction<'_>; N]) {
         let sv = states[i].clone();
         for j in 0..N {
             if i != j {
-                let update = txns[j].diff_update(&sv).unwrap();
-                txns[i].apply_update(&update, Version::V1).unwrap();
+                let update = txns[j].diff_update(&sv, Encoding::V1).unwrap();
+                txns[i].apply_update(&update, Encoding::V1).unwrap();
             }
         }
     }

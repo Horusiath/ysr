@@ -6,7 +6,7 @@ use crate::id_set::IDSet;
 use crate::integrate::IntegrationContext;
 use crate::lib0::v1::DecoderV1;
 use crate::lib0::v2::DecoderV2;
-use crate::lib0::{Decode, Decoder, Encoder, ReadExt, Version};
+use crate::lib0::{Decode, Decoder, Encoder, Encoding, ReadExt};
 use crate::node::{Node, NodeID, NodeType};
 use crate::transaction::TxMutScope;
 use crate::{ClientID, Clock, U32};
@@ -24,13 +24,13 @@ pub struct Update {
 }
 
 impl Update {
-    pub fn decode(bytes: &[u8], version: Version) -> crate::Result<Self> {
+    pub fn decode(bytes: &[u8], version: Encoding) -> crate::Result<Self> {
         match version {
-            Version::V1 => {
+            Encoding::V1 => {
                 let mut decoder = DecoderV1::from_slice(bytes);
                 Self::decode_with(&mut decoder)
             }
-            Version::V2 => {
+            Encoding::V2 => {
                 let mut decoder = DecoderV2::from_slice(bytes)?;
                 Self::decode_with(&mut decoder)
             }

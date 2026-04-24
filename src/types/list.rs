@@ -429,7 +429,7 @@ impl From<Vec<In>> for ListPrelim {
 
 #[cfg(test)]
 mod test {
-    use crate::lib0::{Value, Version};
+    use crate::lib0::{Encoding, Value};
     use crate::test_util::{multi_doc, sync};
     use crate::{In, List, MapPrelim, Optional, StateVector, Transaction, Unmounted, lib0};
     use std::collections::BTreeMap;
@@ -501,14 +501,16 @@ mod test {
         let mut a1 = arr.mount_mut(&mut t1).unwrap();
 
         a1.insert(0, "Hi").unwrap();
-        let update = t1.diff_update(&StateVector::default()).unwrap();
+        let update = t1
+            .diff_update(&StateVector::default(), Encoding::V1)
+            .unwrap();
 
         t1.commit(None).unwrap();
 
         let (d2, _) = multi_doc(2);
         let mut t2 = d2.transact_mut("test").unwrap();
 
-        t2.apply_update(&update, Version::V1).unwrap();
+        t2.apply_update(&update, Encoding::V1).unwrap();
 
         let a2 = arr.mount(&t2).unwrap();
         let actual: Vec<_> = a2.iter::<String>().map(Result::unwrap).collect();
@@ -897,13 +899,15 @@ mod test {
             vec![Value::Number(1.into()), Value::Number(2.into())]
         );
 
-        let data = tx.diff_update(&StateVector::default()).unwrap();
+        let data = tx
+            .diff_update(&StateVector::default(), Encoding::V1)
+            .unwrap();
 
         tx.commit(None).unwrap();
 
         let (doc, _) = multi_doc(2);
         let mut tx = doc.transact_mut("test").unwrap();
-        tx.apply_update(&data, Version::V1).unwrap();
+        tx.apply_update(&data, Encoding::V1).unwrap();
 
         let array = arr.mount_mut(&mut tx).unwrap();
 

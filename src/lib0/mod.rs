@@ -168,11 +168,18 @@ impl Expected for ExpectedString {
     }
 }
 
+/// Which version of lib0 encoding should be used.
 #[repr(u8)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
-pub enum Version {
+pub enum Encoding {
+    /// (Default) V1 encoding, works faster for small payloads (like incremental updates) and has
+    /// less intermediate allocations. For bigger payloads it can produce a bigger size footprint.
     #[default]
     V1 = 1,
+
+    /// V2 encoding, it's better at compressing updates with a high number of changes (like initial
+    /// document state). It can be slower, and update size can be a bit bigger for smaller updates,
+    /// but for big updates it can often lead to massive size savings.
     V2 = 2,
 }
 
@@ -223,14 +230,14 @@ pub trait Encoder: Write {
 }
 
 pub trait Encode {
-    fn encode(&self, version: Version) -> crate::Result<Vec<u8>> {
+    fn encode(&self, version: Encoding) -> crate::Result<Vec<u8>> {
         match version {
-            Version::V1 => {
+            Encoding::V1 => {
                 let mut encoder = EncoderV1::new(Vec::new());
                 self.encode_with(&mut encoder)?;
                 Ok(encoder.into_inner())
             }
-            Version::V2 => {
+            Encoding::V2 => {
                 let mut encoder = EncoderV2::new(Vec::new());
                 self.encode_with(&mut encoder)?;
                 Ok(encoder.into_inner()?)
@@ -404,13 +411,13 @@ pub trait Decoder: Read {
 pub trait Decode: Sized {
     fn decode_with<D: Decoder>(decoder: &mut D) -> crate::Result<Self>;
 
-    fn decode(data: &[u8], version: Version) -> crate::Result<Self> {
+    fn decode(data: &[u8], version: Encoding) -> crate::Result<Self> {
         match version {
-            Version::V1 => {
+            Encoding::V1 => {
                 let mut decoder = DecoderV1::from_slice(data);
                 Self::decode_with(&mut decoder)
             }
-            Version::V2 => {
+            Encoding::V2 => {
                 let mut decoder = DecoderV2::from_slice(data)?;
                 Self::decode_with(&mut decoder)
             }

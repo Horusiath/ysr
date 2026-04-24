@@ -1,5 +1,5 @@
 use std::time::Instant;
-use ysr::lib0::Version;
+use ysr::lib0::Encoding;
 use ysr::{MultiDoc, TextRef, Unmounted};
 
 fn main() {
@@ -13,7 +13,7 @@ fn main() {
     let mdoc = MultiDoc::new(env, Some(1.into()));
     let mut tx = mdoc.transact_mut("test").unwrap();
     let start = Instant::now();
-    tx.apply_update(&data, Version::V1).unwrap();
+    tx.apply_update(&data, Encoding::V1).unwrap();
     tx.commit(None).unwrap();
     let end = start.elapsed();
     println!("applied {}B update in {:?}", data.len(), end);

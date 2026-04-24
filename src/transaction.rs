@@ -3,8 +3,8 @@ use crate::block_reader::{Carrier, Update};
 use crate::content::{ContentType, FormatAttribute};
 use crate::id_set::IDSet;
 use crate::lib0::v1::{DecoderV1, EncoderV1};
-use crate::lib0::v2::DecoderV2;
-use crate::lib0::{Decode, Decoder, Encode, Encoder, Version, WriteExt};
+use crate::lib0::v2::{DecoderV2, EncoderV2};
+use crate::lib0::{Decode, Decoder, Encode, Encoder, Encoding, WriteExt};
 use crate::lmdb::{Database, Dbi, RwTxn};
 use crate::node::{Node, NodeID};
 use crate::state_vector::Snapshot;
@@ -92,7 +92,7 @@ impl TransactionState {
         if let Some(summary) = summary.as_deref_mut()
             && summary.flags.contains(CommitFlags::OBSERVE_NODES)
         {
-            // // gather info about which nodes have changed
+            summary.changed_nodes.extend(self.changed.keys());
             // todo!();
             // if summary.flags.contains(CommitFlags::OBSERVE_NODES_DEEP) {
             //     // bubble up changes to parent nodes and gather them as well
@@ -100,7 +100,7 @@ impl TransactionState {
             // }
         }
 
-        //if (doc.gc) {
+        //TODO: if (doc.gc) {
         //  tryGcDeleteSet(ds, store, doc.gcFilter)
         //}
         //tryMergeDeleteSet(ds, store)
@@ -133,7 +133,13 @@ impl TransactionState {
         if let Some(summary) = summary
             && (self.begin_state != self.current_state || !self.delete_set.is_empty())
         {
-            self.incremental_update(&db, &mut summary.update)?;
+            if summary.flags.contains(CommitFlags::UPDATE_V1) {
+                let mut encoder = EncoderV1::new(&mut summary.update);
+                self.incremental_update(&db, &mut encoder)?;
+            } else if summary.flags.contains(CommitFlags::UPDATE_V2) {
+                let mut encoder = EncoderV2::new(&mut summary.update);
+                self.incremental_update(&db, &mut encoder)?;
+            }
         }
 
         //TODO: subdoc events
@@ -141,7 +147,11 @@ impl TransactionState {
         Ok(())
     }
 
-    fn incremental_update<W: Write>(&self, db: &Database<'_>, writer: &mut W) -> crate::Result<()> {
+    fn incremental_update<E: Encoder>(
+        &self,
+        db: &Database<'_>,
+        writer: &mut E,
+    ) -> crate::Result<()> {
         /*
            The write path works as follows:
            - {varint} number of clients affected
@@ -166,7 +176,6 @@ impl TransactionState {
         */
         let begin_state = &self.begin_state;
         let current_state = &self.current_state;
-        let mut writer = EncoderV1::new(writer);
         // wrote updates
         let blocks = db.blocks();
         let contents = db.contents();
@@ -212,7 +221,7 @@ impl TransactionState {
                 &contents,
                 &map_entries,
                 &intern_strings,
-                &mut writer,
+                writer,
             )?;
             // write rest of the blocks
             for block in block_buf[1..].iter() {
@@ -222,13 +231,13 @@ impl TransactionState {
                     &contents,
                     &map_entries,
                     &intern_strings,
-                    &mut writer,
+                    writer,
                 )?
             }
         }
 
         // write down transaction's own delete set
-        self.delete_set.encode_with(&mut writer)?;
+        self.delete_set.encode_with(writer)?;
 
         Ok(())
     }
@@ -312,6 +321,8 @@ impl LazyState {
         self.inner.take()
     }
 
+    /// Returns an origin passed to this transaction when it was created
+    /// with [crate::MultiDoc::transact_mut_with].
     pub fn origin(&self) -> Option<&Origin> {
         self.inner.as_ref()?.origin.as_ref()
     }
@@ -355,15 +366,23 @@ impl<'db> Transaction<'db> {
         Ok(Self { db, state })
     }
 
+    /// Returns a globally unique identifier of the current client.
     pub fn client_id(&self) -> Option<&ClientID> {
         let state = self.state.get()?;
         Some(&state.client_id)
     }
 
+    /// Returns an origin passed to this transaction when it was created
+    /// with [crate::MultiDoc::transact_mut_with].
     pub fn origin(&self) -> Option<&Origin> {
         self.state.origin()
     }
 
+    /// Returns a current state vector of this transaction.
+    ///
+    /// For read-write transactions it includes changes made by current transaction.
+    /// For read-only transactions it only shows the changes at the moment when the transaction was
+    /// created.
     pub fn state_vector(&self) -> crate::Result<StateVector> {
         if let Some(state) = self.state.get() {
             Ok(state.current_state.clone())
@@ -373,29 +392,54 @@ impl<'db> Transaction<'db> {
     }
 
     /// Removes all the contents of the document, but keeping the empty document itself.
+    /// This doesn't cause the database file to shrink, but it releases the space occupied by this
+    /// document to be reused by other documents and their changes.
     pub fn clear_all(&mut self) -> crate::Result<()> {
         self.db.get().clear()?;
         Ok(())
     }
 
-    pub fn incremental_update(&self) -> crate::Result<Vec<u8>> {
+    /// Returns an update which contains only changes made within the scope of this transaction.
+    ///
+    /// You can also use [Transaction::commit] with a `summary` parameter specified and configured
+    /// to use [CommitFlags::UPDATE_V1]/[CommitFlags::UPDATE_V2] to retrieve the update combined
+    /// with confirmed commit operation.
+    pub fn incremental_update(&self, version: Encoding) -> crate::Result<Vec<u8>> {
         let mut buf = Vec::new();
-        self.incremental_update_with(&mut buf)?;
+        match version {
+            Encoding::V1 => {
+                let mut encoder = EncoderV1::new(&mut buf);
+                self.incremental_update_with(&mut encoder)?;
+            }
+            Encoding::V2 => {
+                let mut encoder = EncoderV2::new(&mut buf);
+                self.incremental_update_with(&mut encoder)?;
+            }
+        }
         Ok(buf)
     }
 
-    pub fn diff_update(&self, since: &StateVector) -> crate::Result<Bytes> {
-        let mut buf = BytesMut::new().writer();
-        self.diff_update_with(since, &mut buf)?;
-        Ok(buf.into_inner().freeze())
+    /// Returns an update that contains all changes that happened `since` a given state vector.
+    pub fn diff_update(&self, since: &StateVector, version: Encoding) -> crate::Result<Vec<u8>> {
+        let mut buf = Vec::new();
+        match version {
+            Encoding::V1 => {
+                let mut encoder = EncoderV1::new(&mut buf);
+                self.diff_update_with(since, &mut encoder)?;
+            }
+            Encoding::V2 => {
+                let mut encoder = EncoderV2::new(&mut buf);
+                self.diff_update_with(since, &mut encoder)?;
+            }
+        }
+        Ok(buf)
     }
 
-    pub fn diff_update_with<W: Write>(
+    pub fn diff_update_with<E: Encoder>(
         &self,
         since: &StateVector,
-        writer: &mut W,
+        writer: &mut E,
     ) -> crate::Result<()> {
-        let mut writer = EncoderV1::new(writer);
         // wrote updates
         let current_state = self.state_vector()?;
         let db = self.db.get();
@@ -407,7 +451,7 @@ impl<'db> Transaction<'db> {
             Err(Error::NotFound) => {
                 // no blocks to encode
                 writer.write_var(0usize)?;
-                IDSet::default().encode_with(&mut writer)?;
+                IDSet::default().encode_with(writer)?;
                 return Ok(());
             }
             Err(e) => return Err(e),
@@ -483,7 +527,7 @@ impl<'db> Transaction<'db> {
                 &contents,
                 &map_entries,
                 &intern_strings,
-                &mut writer,
+                writer,
             )?;
             // write rest of the blocks
             for _ in 1..block_count {
@@ -495,19 +539,19 @@ impl<'db> Transaction<'db> {
                         &contents,
                         &map_entries,
                         &intern_strings,
-                        &mut writer,
+                        writer,
                     )?,
                 }
             }
         }
 
         // write delete set
-        ds.encode_with(&mut writer)?;
+        ds.encode_with(writer)?;
 
         Ok(())
     }
 
-    pub fn incremental_update_with<W: Write>(&self, writer: &mut W) -> crate::Result<()> {
+    pub fn incremental_update_with<E: Encoder>(&self, writer: &mut E) -> crate::Result<()> {
         if let Some(state) = self.state.get() {
             let db = self.db.get();
             state.incremental_update(&db, writer)?;
@@ -635,10 +679,16 @@ impl<'db> Transaction<'db> {
         found.ok_or_else(|| Error::NotFound)
     }
 
-    pub fn apply_update(&mut self, update: &[u8], version: Version) -> crate::Result<()> {
+    /// Decodes an incoming `update` (which will be decoded using provided lib0 `version`) and
+    /// integrates the changes it provided into current document.
+    ///
+    /// Any missing updates that would block the changes from being integrated will be stashed
+    /// (and persisted) aside as pending updates (you can access them using [MetaStore::pending]
+    /// method).
+    pub fn apply_update(&mut self, update: &[u8], version: Encoding) -> crate::Result<()> {
         match version {
-            Version::V1 => self.apply_update_with(&mut DecoderV1::from_slice(update)),
-            Version::V2 => self.apply_update_with(&mut DecoderV2::from_slice(update)?),
+            Encoding::V1 => self.apply_update_with(&mut DecoderV1::from_slice(update)),
+            Encoding::V2 => self.apply_update_with(&mut DecoderV2::from_slice(update)?),
         }
     }
 
@@ -699,10 +749,10 @@ impl<'db> Transaction<'db> {
         let mut pending_update = if pending.update.is_empty() {
             Update::default()
         } else {
-            Update::decode(pending.update, Version::V1)?
+            Update::decode(pending.update, Encoding::V1)?
         };
         if !pending.delete_set.is_empty() {
-            pending_update.delete_set = IDSet::decode(pending.delete_set, Version::V1)?;
+            pending_update.delete_set = IDSet::decode(pending.delete_set, Encoding::V1)?;
         }
 
         let missing_sv = pending.missing_sv;
@@ -743,6 +793,17 @@ impl<'db> Transaction<'db> {
         Ok(())
     }
 
+    /// Commits current transaction, optionally filling the transaction `summary` report.
+    /// This commit operation also commits underlying database transaction, making changes visible
+    /// and permanent.
+    ///
+    /// Transaction summary can hold specific flags to inform which notifications are we interested
+    /// in:
+    /// - [CommitFlags::UPDATE_V1] and [CommitFlags::UPDATE_V2] will cause transaction to submit
+    ///   the update containing the changes made by this transaction (it can also be obtained before
+    ///   commit via [Transaction::incremental_update], but that update may be larger).
+    /// - [CommitFlags::OBSERVE_NODES] will include [NodeID] of all the nodes modified as part of
+    ///   this transaction.
     pub fn commit(mut self, summary: Option<&mut TransactionSummary>) -> crate::Result<()> {
         if let Some(mut state) = self.state.take() {
             let db = self.db.get();
@@ -785,6 +846,7 @@ impl<'db> Transaction<'db> {
     }
 }
 
+/// Summary of transaction changes.
 #[derive(Debug, Default, Clone)]
 pub struct TransactionSummary {
     pub flags: CommitFlags,
@@ -814,9 +876,20 @@ pub struct CommitFlags(u8);
 bitflags! {
     impl CommitFlags : u8 {
         const NONE = 0b0000_0000;
+
+        /// Include update containing changes made by the transaction,
+        /// serialized using lib0 V1 encoding.
         const UPDATE_V1 = 0b0000_0001;
+
+        /// Include update containing changes made by the transaction,
+        /// serialized using lib0 V2 encoding.
         const UPDATE_V2 = 0b0000_0010;
+
+        /// Include list of identifiers of nodes which have been modified as part of this transaction.
         const OBSERVE_NODES = 0b0000_0100;
+
+        /// Include list of identifiers of nodes which have been modified as part of this transaction,
+        /// including parent nodes of those nodes.
         const OBSERVE_NODES_DEEP = 0b0000_1000;
     }
 }

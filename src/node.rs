@@ -1,10 +1,13 @@
-use crate::ClientID;
 use crate::block::ID;
+use crate::{ClientID, Mounted};
 use bitflags::bitflags;
 use std::borrow::Cow;
 use std::fmt::Display;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, TryFromBytes};
 
+/// A unique identifier of the node.
+/// Root-level nodes (which cannot be deleted and are created via [crate::Unmounted::root])
+/// can be identified via [NodeID::is_root].
 pub type NodeID = ID;
 
 #[derive(Debug, Clone, Eq, PartialEq)]

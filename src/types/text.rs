@@ -1422,7 +1422,7 @@ fn get_content<'a>(block: &Block<'a>, contents: &'a ContentStore) -> crate::Resu
 #[cfg(test)]
 mod test {
     use crate::block::ID;
-    use crate::lib0::{Decode, Encode, Value, Version};
+    use crate::lib0::{Decode, Encode, Encoding, Value};
     use crate::test_util::{multi_doc, sync};
     use crate::types::text::{Attrs, Chunk, Delta, Op};
     use crate::{ListPrelim, Map, MapPrelim, Out, StateVector, Text, Unmounted, lib0};
@@ -1558,18 +1558,24 @@ mod test {
 
         txt2.insert(0, "world").unwrap();
 
-        let d1_sv = t1.state_vector().unwrap().encode(Version::V1).unwrap();
-        let d2_sv = t2.state_vector().unwrap().encode(Version::V1).unwrap();
+        let d1_sv = t1.state_vector().unwrap().encode(Encoding::V1).unwrap();
+        let d2_sv = t2.state_vector().unwrap().encode(Encoding::V1).unwrap();
 
         let u1 = t1
-            .diff_update(&StateVector::decode(&d2_sv, Version::V1).unwrap())
+            .diff_update(
+                &StateVector::decode(&d2_sv, Encoding::V1).unwrap(),
+                Encoding::V1,
+            )
             .unwrap();
         let u2 = t2
-            .diff_update(&StateVector::decode(&d1_sv, Version::V1).unwrap())
+            .diff_update(
+                &StateVector::decode(&d1_sv, Encoding::V1).unwrap(),
+                Encoding::V1,
+            )
             .unwrap();
 
-        t1.apply_update(&u2, Version::V1).unwrap();
-        t2.apply_update(&u1, Version::V1).unwrap();
+        t1.apply_update(&u2, Encoding::V1).unwrap();
+        t2.apply_update(&u1, Encoding::V1).unwrap();
 
         let a = txt.mount(&t1).unwrap().to_string();
         let b = txt.mount(&t2).unwrap().to_string();
@@ -1595,11 +1601,14 @@ mod test {
         let (d2, _) = multi_doc(2);
         let mut t2 = d2.transact_mut("test").unwrap();
 
-        let d2_sv = t2.state_vector().unwrap().encode(Version::V1).unwrap();
+        let d2_sv = t2.state_vector().unwrap().encode(Encoding::V1).unwrap();
         let u1 = t1
-            .diff_update(&StateVector::decode(&d2_sv, Version::V1).unwrap())
+            .diff_update(
+                &StateVector::decode(&d2_sv, Encoding::V1).unwrap(),
+                Encoding::V1,
+            )
             .unwrap();
-        t2.apply_update(&u1, Version::V1).unwrap();
+        t2.apply_update(&u1, Encoding::V1).unwrap();
 
         let mut txt2 = txt.mount_mut(&mut t2).unwrap();
         assert_eq!(txt2.to_string(), "I expect that");
@@ -1612,16 +1621,22 @@ mod test {
         txt1.insert(1, " didn't").unwrap();
         assert_eq!(txt1.to_string(), "I didn't expect that");
 
-        let d2_sv = t2.state_vector().unwrap().encode(Version::V1).unwrap();
-        let d1_sv = t1.state_vector().unwrap().encode(Version::V1).unwrap();
+        let d2_sv = t2.state_vector().unwrap().encode(Encoding::V1).unwrap();
+        let d1_sv = t1.state_vector().unwrap().encode(Encoding::V1).unwrap();
         let u1 = t1
-            .diff_update(&StateVector::decode(d2_sv.as_slice(), Version::V1).unwrap())
+            .diff_update(
+                &StateVector::decode(d2_sv.as_slice(), Encoding::V1).unwrap(),
+                Encoding::V1,
+            )
             .unwrap();
         let u2 = t2
-            .diff_update(&StateVector::decode(d1_sv.as_slice(), Version::V1).unwrap())
+            .diff_update(
+                &StateVector::decode(d1_sv.as_slice(), Encoding::V1).unwrap(),
+                Encoding::V1,
+            )
             .unwrap();
-        t1.apply_update(&u2, Version::V1).unwrap();
-        t2.apply_update(&u1, Version::V1).unwrap();
+        t1.apply_update(&u2, Encoding::V1).unwrap();
+        t2.apply_update(&u1, Encoding::V1).unwrap();
 
         let txt1 = txt.mount(&t1).unwrap();
         let txt2 = txt.mount(&t2).unwrap();
@@ -1650,11 +1665,14 @@ mod test {
         let (d2, _) = multi_doc(2);
         let mut t2 = d2.transact_mut("test").unwrap();
 
-        let d2_sv = t2.state_vector().unwrap().encode(Version::V1).unwrap();
+        let d2_sv = t2.state_vector().unwrap().encode(Encoding::V1).unwrap();
         let u1 = t1
-            .diff_update(&StateVector::decode(d2_sv.as_slice(), Version::V1).unwrap())
+            .diff_update(
+                &StateVector::decode(d2_sv.as_slice(), Encoding::V1).unwrap(),
+                Encoding::V1,
+            )
             .unwrap();
-        t2.apply_update(&u1, Version::V1).unwrap();
+        t2.apply_update(&u1, Encoding::V1).unwrap();
 
         let mut txt2 = txt.mount_mut(&mut t2).unwrap();
         assert_eq!(txt2.to_string(), "aaa");
@@ -1668,17 +1686,23 @@ mod test {
         txt1.insert(3, "aaa").unwrap();
         assert_eq!(txt1.to_string(), "aaaaaa");
 
-        let d2_sv = t2.state_vector().unwrap().encode(Version::V1).unwrap();
-        let d1_sv = t1.state_vector().unwrap().encode(Version::V1).unwrap();
+        let d2_sv = t2.state_vector().unwrap().encode(Encoding::V1).unwrap();
+        let d1_sv = t1.state_vector().unwrap().encode(Encoding::V1).unwrap();
         let u1 = t1
-            .diff_update(&StateVector::decode(d2_sv.as_slice(), Version::V1).unwrap())
+            .diff_update(
+                &StateVector::decode(d2_sv.as_slice(), Encoding::V1).unwrap(),
+                Encoding::V1,
+            )
             .unwrap();
         let u2 = t2
-            .diff_update(&StateVector::decode(d1_sv.as_slice(), Version::V1).unwrap())
+            .diff_update(
+                &StateVector::decode(d1_sv.as_slice(), Encoding::V1).unwrap(),
+                Encoding::V1,
+            )
             .unwrap();
 
-        t1.apply_update(&u2, Version::V1).unwrap();
-        t2.apply_update(&u1, Version::V1).unwrap();
+        t1.apply_update(&u2, Encoding::V1).unwrap();
+        t2.apply_update(&u1, Encoding::V1).unwrap();
 
         let txt1 = txt.mount(&t1).unwrap();
         let txt2 = txt.mount(&t2).unwrap();
@@ -1814,12 +1838,14 @@ mod test {
         txt1.insert(0, "hello world").unwrap();
         assert_eq!(txt1.to_string(), "hello world");
 
-        let u1 = t1.diff_update(&StateVector::default()).unwrap();
+        let u1 = t1
+            .diff_update(&StateVector::default(), Encoding::V1)
+            .unwrap();
 
         let (d2, _) = multi_doc(2);
         let mut t2 = d2.transact_mut("test").unwrap();
 
-        t2.apply_update(&u1, Version::V1).unwrap();
+        t2.apply_update(&u1, Encoding::V1).unwrap();
 
         let mut txt2 = txt.mount_mut(&mut t2).unwrap();
         assert_eq!(txt2.to_string(), "hello world");
@@ -1835,17 +1861,23 @@ mod test {
         txt2.insert(0, "H").unwrap();
         assert_eq!(txt2.to_string(), "Hellod");
 
-        let sv1 = t1.state_vector().unwrap().encode(Version::V1).unwrap();
-        let sv2 = t2.state_vector().unwrap().encode(Version::V1).unwrap();
+        let sv1 = t1.state_vector().unwrap().encode(Encoding::V1).unwrap();
+        let sv2 = t2.state_vector().unwrap().encode(Encoding::V1).unwrap();
         let u1 = t1
-            .diff_update(&StateVector::decode(&sv2, Version::V1).unwrap())
+            .diff_update(
+                &StateVector::decode(&sv2, Encoding::V1).unwrap(),
+                Encoding::V1,
+            )
             .unwrap();
         let u2 = t2
-            .diff_update(&StateVector::decode(&sv1, Version::V1).unwrap())
+            .diff_update(
+                &StateVector::decode(&sv1, Encoding::V1).unwrap(),
+                Encoding::V1,
+            )
             .unwrap();
 
-        t1.apply_update(&u2, Version::V1).unwrap();
-        t2.apply_update(&u1, Version::V1).unwrap();
+        t1.apply_update(&u2, Encoding::V1).unwrap();
+        t2.apply_update(&u1, Encoding::V1).unwrap();
 
         let txt1 = txt.mount(&t1).unwrap();
         let txt2 = txt.mount(&t2).unwrap();
@@ -1880,11 +1912,11 @@ mod test {
                 vec![Chunk::new("abc").with_attrs(a.clone())]
             );
             assert_eq!(uncommitted, expected);
-            let update = txn.incremental_update().unwrap();
+            let update = txn.incremental_update(Encoding::V1).unwrap();
             txn.commit(None).unwrap();
 
             let mut txn = d2.transact_mut("test").unwrap();
-            txn.apply_update(&update, Version::V1).unwrap();
+            txn.apply_update(&update, Encoding::V1).unwrap();
             let txt2 = txt.mount_mut(&mut txn).unwrap();
             let uncommitted: Vec<_> = txt2.uncommitted().map(Result::unwrap).collect();
 
@@ -1907,11 +1939,11 @@ mod test {
                 vec![Chunk::new("bc").with_attrs(a.clone())]
             );
             assert_eq!(uncommitted, expected);
-            let update = txn.incremental_update().unwrap();
+            let update = txn.incremental_update(Encoding::V1).unwrap();
             txn.commit(None).unwrap();
 
             let mut txn = d2.transact_mut("test").unwrap();
-            txn.apply_update(&update, Version::V1).unwrap();
+            txn.apply_update(&update, Encoding::V1).unwrap();
             let txt2 = txt.mount_mut(&mut txn).unwrap();
             let uncommitted: Vec<_> = txt2.uncommitted().map(Result::unwrap).collect();
 
@@ -1936,11 +1968,11 @@ mod test {
             );
             assert_eq!(uncommitted, expected);
 
-            let update = txn.incremental_update().unwrap();
+            let update = txn.incremental_update(Encoding::V1).unwrap();
             txn.commit(None).unwrap();
 
             let mut txn = d2.transact_mut("test").unwrap();
-            txn.apply_update(&update, Version::V1).unwrap();
+            txn.apply_update(&update, Encoding::V1).unwrap();
 
             let txt2 = txt.mount_mut(&mut txn).unwrap();
             let uncommitted: Vec<_> = txt2.uncommitted().map(Result::unwrap).collect();
@@ -1964,11 +1996,11 @@ mod test {
                 vec![Chunk::new("zb").with_attrs(a.clone())]
             );
             assert_eq!(uncommitted, expected);
-            let update = txn.incremental_update().unwrap();
+            let update = txn.incremental_update(Encoding::V1).unwrap();
             txn.commit(None).unwrap();
 
             let mut txn = d2.transact_mut("test").unwrap();
-            txn.apply_update(&update, Version::V1).unwrap();
+            txn.apply_update(&update, Encoding::V1).unwrap();
             let txt2 = txt.mount_mut(&mut txn).unwrap();
             let uncommitted: Vec<_> = txt2.uncommitted().map(Result::unwrap).collect();
             assert_eq!(txt2.to_string(), "zb");
@@ -1991,11 +2023,11 @@ mod test {
                 vec![Chunk::new("y"), Chunk::new("zb").with_attrs(a.clone())]
             );
             assert_eq!(uncommitted, expected);
-            let update = txn.incremental_update().unwrap();
+            let update = txn.incremental_update(Encoding::V1).unwrap();
             txn.commit(None).unwrap();
 
             let mut txn = d2.transact_mut("test").unwrap();
-            txn.apply_update(&update, Version::V1).unwrap();
+            txn.apply_update(&update, Encoding::V1).unwrap();
 
             let txt2 = txt.mount_mut(&mut txn).unwrap();
             let uncommitted: Vec<_> = txt2.uncommitted().map(Result::unwrap).collect();
@@ -2020,11 +2052,11 @@ mod test {
                 vec![Chunk::new("yz"), Chunk::new("b").with_attrs(a.clone())]
             );
             assert_eq!(uncommitted, expected);
-            let update = txn.incremental_update().unwrap();
+            let update = txn.incremental_update(Encoding::V1).unwrap();
             txn.commit(None).unwrap();
 
             let mut txn = d2.transact_mut("test").unwrap();
-            txn.apply_update(&update, Version::V1).unwrap();
+            txn.apply_update(&update, Encoding::V1).unwrap();
             let txt2 = txt.mount_mut(&mut txn).unwrap();
             let uncommitted: Vec<_> = txt2.uncommitted().map(Result::unwrap).collect();
             assert_eq!(txt2.to_string(), "yzb");
@@ -2076,7 +2108,8 @@ mod test {
                 expected
             );
 
-            t1.diff_update(&StateVector::default()).unwrap()
+            t1.diff_update(&StateVector::default(), Encoding::V1)
+                .unwrap()
         };
 
         let a2 = Attrs::from([("width".into(), Value::from(100.0))]);
@@ -2089,7 +2122,7 @@ mod test {
 
         let (d2, _) = multi_doc(2);
         let mut t2 = d2.transact_mut("test").unwrap();
-        t2.apply_update(&update_v1, Version::V1).unwrap();
+        t2.apply_update(&update_v1, Encoding::V1).unwrap();
         let txt2 = txt.mount_mut(&mut t2).unwrap();
         assert_eq!(
             txt2.chunks().map(Result::unwrap).collect::<Vec<_>>(),
@@ -2351,14 +2384,16 @@ mod test {
 
         assert_eq!(txt.to_string(), "abc");
 
-        let bin = txn.diff_update(&StateVector::default()).unwrap();
+        let bin = txn
+            .diff_update(&StateVector::default(), Encoding::V1)
+            .unwrap();
 
         txn.commit(None).unwrap();
 
         let (mdoc, _) = multi_doc(1);
         let mut txn = mdoc.transact_mut("test").unwrap();
 
-        txn.apply_update(&bin, Version::V1).unwrap();
+        txn.apply_update(&bin, Encoding::V1).unwrap();
 
         let txt = root.mount(&txn).unwrap();
         assert_eq!(txt.to_string(), "abc");
@@ -2498,8 +2533,8 @@ mod test {
         let actual: Value = map.get("key").unwrap();
         assert_eq!(actual, Value::from("val"));
 
-        let update = t1.incremental_update().unwrap();
-        t2.apply_update(&update, Version::V1).unwrap();
+        let update = t1.incremental_update(Encoding::V1).unwrap();
+        t2.apply_update(&update, Encoding::V1).unwrap();
         t1.commit(None).unwrap();
         t2.commit(None).unwrap();
 
@@ -2603,14 +2638,16 @@ mod test {
         txt.apply_delta(delta).unwrap();
         assert_eq!(txt.to_string(), "ab");
 
-        let bin = txn.diff_update(&StateVector::default()).unwrap();
+        let bin = txn
+            .diff_update(&StateVector::default(), Encoding::V1)
+            .unwrap();
 
         txn.commit(None).unwrap();
 
         let (mdoc, _) = multi_doc(2);
         let mut txn = mdoc.transact_mut("test").unwrap();
 
-        txn.apply_update(&bin, Version::V1).unwrap();
+        txn.apply_update(&bin, Encoding::V1).unwrap();
 
         let txt = root.mount(&txn).unwrap();
         assert_eq!(txt.to_string(), "ab");

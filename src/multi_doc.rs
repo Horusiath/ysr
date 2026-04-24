@@ -26,21 +26,53 @@ impl MultiDoc {
         &self.env
     }
 
-    /// Opens new read-only transaction.
+    /// Opens a new read-only transaction into the document with a given `doc_id`. If the document
+    /// doesn't exist locally an error will be returned. This transaction can only be used
+    /// for reading the state of the document. Any operations changing its state will cause an error.
+    ///
+    /// Multiple read-only transactions to the same document can coexist at the same time without
+    /// blocking the read-write transactions (they won't however sho the changes made by concurrent
+    /// read-write transactions).
+    ///
+    /// Keep in mind that read-only transactions are blocking the LMDB pages from being released and
+    /// reused by future writes. This means that keeping the transaction for prolonged amount of
+    /// time can cause database file to grow in face of writes. The database file can be compacted
+    /// into a new file via [Env::copy_to] method with `compact` flag on.
     pub fn transact(&self, doc_id: &str) -> crate::Result<Transaction<'_>> {
         let handle = self.env.create_db(doc_id, 0)?;
         let tx = self.env.begin_ro_txn()?;
         Ok(Transaction::read_only(tx, handle))
     }
 
-    /// Opens new read-write transaction.
+    /// Opens a new read-write transaction into the document with a given `doc_id`. If the document
+    /// doesn't exist locally, it will be created. Each newly created document requires LMDB to
+    /// reserve at least 4 pages of extra space (1 db page, 2x transaction root pages and
+    /// 1 leaf page for initial data), which means that **overhead of a document is at least 16KiB**.
+    ///
+    /// Only one read-write transaction for the same document can exist at the same time. It will
+    /// not block read-only transactions from being created, however read-only transactions will
+    /// hold on database pages from being released and reused by read-write transaction to apply
+    /// changes. This means that keeping the read-only transaction for prolonged amount of
+    /// time can cause database file to grow in face of writes. The database file can be compacted
+    /// into a new file via [Env::copy_to] method with `compact` flag on.
     pub fn transact_mut(&self, doc_id: &str) -> crate::Result<Transaction<'_>> {
         let handle = self.env.create_db(doc_id, MDB_CREATE)?;
         let tx = self.env.begin_rw_txn()?;
         Transaction::read_write(tx, handle, self.client_id, None)
     }
 
-    /// Opens new read-write transaction with specific origin identifier.
+    /// Opens a new read-write transaction into the document with a given `doc_id` with a specific
+    /// origin that can be used to differentiate transaction purpose. If the document doesn't exist
+    /// locally, it will be created. Each newly created document requires LMDB to reserve
+    /// at least 4 pages of extra space (1 db page, 2x transaction root pages and 1 leaf page for
+    /// initial data), which means that **overhead of a document is at least 16KiB**.
+    ///
+    /// Only one read-write transaction for the same document can exist at the same time. It will
+    /// not block read-only transactions from being created, however read-only transactions will
+    /// hold on database pages from being released and reused by read-write transaction to apply
+    /// changes. This means that keeping the read-only transaction for prolonged amount of
+    /// time can cause database file to grow in face of writes. The database file can be compacted
+    /// into a new file via [Env::copy_to] method with `compact` flag on.
     pub fn transact_mut_with<O: Into<Origin>>(
         &self,
         doc_id: &str,
@@ -52,7 +84,12 @@ impl MultiDoc {
         Transaction::read_write(tx, handle, self.client_id, Some(origin))
     }
 
-    /// Permanently removes a document from current db file, together with all of its contents.
+    /// Permanently removes a document from current database file, together with all of its contents.
+    /// The space occupied by the document doesn't cause the database file to shrink, however it can
+    /// be reused by other documents to accommodate their changes.
+    ///
+    /// The database file can be compacted into a new file via [Env::copy_to] method with `compact`
+    /// flag on.
     pub fn destroy_doc(&self, doc_id: &str) -> crate::Result<()> {
         let handle = self.env.create_db(doc_id, 0)?;
         let tx = self.env.begin_rw_txn()?;
@@ -75,7 +112,7 @@ mod test {
 
     use crate::{Map, MultiDoc, StateVector, Text, TextRef, Unmounted, lib0};
 
-    use crate::lib0::Version;
+    use crate::lib0::Encoding;
     use uuid::Uuid;
 
     #[test]
@@ -101,7 +138,7 @@ mod test {
         let doc_id = Uuid::new_v4().to_string();
         let txt: Unmounted<Text> = Unmounted::root("type");
         let mut tx = mdoc.transact_mut(&doc_id).unwrap();
-        tx.apply_update(update, Version::V1).unwrap();
+        tx.apply_update(update, Encoding::V1).unwrap();
         tx.commit(None).unwrap();
 
         let mut tx = mdoc.transact_mut(&doc_id).unwrap();
@@ -132,10 +169,10 @@ mod test {
         let sv = t2.state_vector().unwrap();
 
         // create an update A->B based on B's state vector
-        let binary = t1.diff_update(&sv).unwrap();
+        let binary = t1.diff_update(&sv, Encoding::V1).unwrap();
 
         // decode an update incoming from A and integrate it at B
-        t2.apply_update(&binary, Version::V1).unwrap();
+        t2.apply_update(&binary, Encoding::V1).unwrap();
 
         // check if B sees the same thing that A does
         let txt2 = txt.mount_mut(&mut t2).unwrap();
@@ -155,7 +192,9 @@ mod test {
         txt.insert(0, "1").unwrap();
         txt.insert(0, "2").unwrap();
 
-        let encoded = t.diff_update(&StateVector::default()).unwrap();
+        let encoded = t
+            .diff_update(&StateVector::default(), Encoding::V1)
+            .unwrap();
         let expected = &[
             1, 3, 227, 214, 245, 198, 5, 0, 4, 1, 4, 116, 121, 112, 101, 1, 48, 68, 227, 214, 245,
             198, 5, 0, 1, 49, 68, 227, 214, 245, 198, 5, 1, 1, 50, 0,
@@ -171,16 +210,20 @@ mod test {
         let mut t1 = d1.transact_mut("test").unwrap();
         let mut txt1 = txt.mount_mut(&mut t1).unwrap();
         txt1.insert(0, "hello").unwrap();
-        let u = t1.diff_update(&StateVector::default()).unwrap();
+        let u = t1
+            .diff_update(&StateVector::default(), Encoding::V1)
+            .unwrap();
 
         let (d2, _) = multi_doc(1);
         let mut t2 = d2.transact_mut("test").unwrap();
-        t2.apply_update(&u, Version::V1).unwrap();
+        t2.apply_update(&u, Encoding::V1).unwrap();
 
         let mut txt1 = txt.mount_mut(&mut t1).unwrap();
         txt1.insert(5, "world").unwrap();
-        let u = t1.diff_update(&StateVector::default()).unwrap();
-        t2.apply_update(&u, Version::V1).unwrap();
+        let u = t1
+            .diff_update(&StateVector::default(), Encoding::V1)
+            .unwrap();
+        t2.apply_update(&u, Encoding::V1).unwrap();
 
         t1.commit(None).unwrap();
         t2.commit(None).unwrap();
@@ -233,19 +276,19 @@ mod test {
             let u1 = updates.pop().unwrap();
 
             let mut t2 = d2.transact_mut("test").unwrap();
-            t2.apply_update(&u1, Version::V1).unwrap();
+            t2.apply_update(&u1, Encoding::V1).unwrap();
             let m2 = map.mount(&t2).unwrap();
             assert_eq!(m2.to_value().unwrap(), lib0!({"a": 1.0})); // applied
             t2.commit(None).unwrap();
 
             let mut t2 = d2.transact_mut("test").unwrap();
-            t2.apply_update(&u3, Version::V1).unwrap();
+            t2.apply_update(&u3, Encoding::V1).unwrap();
             let m2 = map.mount(&t2).unwrap();
             assert_eq!(m2.to_value().unwrap(), lib0!({"a": 1.0})); // pending update waiting for u2
             t2.commit(None).unwrap();
 
             let mut t2 = d2.transact_mut("test").unwrap();
-            t2.apply_update(&u2, Version::V1).unwrap();
+            t2.apply_update(&u2, Encoding::V1).unwrap();
             let m2 = map.mount(&t2).unwrap();
             assert_eq!(m2.to_value().unwrap(), lib0!({"a": 1.1, "b": 2.0})); // applied all updates
             t2.commit(None).unwrap();
