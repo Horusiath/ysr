@@ -81,6 +81,13 @@ impl<'tx> BlockCursor<'tx> {
         Ok(())
     }
 
+    pub fn remove(&mut self, block_id: ID) -> crate::Result<()> {
+        let key = BlockKey::new(block_id);
+        self.cursor.set_range(key.as_bytes())?;
+        self.cursor.del()?;
+        Ok(())
+    }
+
     pub fn get_or_insert_node(&self, node: Node, node_type: NodeType) -> crate::Result<BlockMut> {
         let node_id = node.id();
         let key = BlockKey::new(node_id);
@@ -163,9 +170,10 @@ impl<'tx> BlockCursor<'tx> {
         // fast path: check if we're already at the right position
         if let Ok((key, value)) = self.cursor.key_value()
             && let Some(block) = Self::parse_block(key, value)?
-                && block.id() == &id {
-                    return Ok(block);
-                }
+            && block.id() == &id
+        {
+            return Ok(block);
+        }
 
         let key = BlockKey::new(id);
         match self.cursor.set_key(key.as_bytes()) {
@@ -181,9 +189,10 @@ impl<'tx> BlockCursor<'tx> {
         match self.cursor.set_range(key.as_bytes()) {
             Ok((found_key, value)) => {
                 if let Some(block) = Self::parse_block(found_key, value)?
-                    && block.id() == &id {
-                        return Ok(block);
-                    }
+                    && block.id() == &id
+                {
+                    return Ok(block);
+                }
             }
             Err(LmdbError::NOT_FOUND) => { /* no >= key found */ }
             Err(e) => return Err(Error::Lmdb(e)),

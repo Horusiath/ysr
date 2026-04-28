@@ -1,6 +1,7 @@
 use crate::block::{Block, BlockMut, ID};
 use crate::block_reader::{Carrier, Update};
 use crate::content::{ContentType, FormatAttribute};
+use crate::gc::GarbageCollector;
 use crate::id_set::IDSet;
 use crate::lib0::v1::{DecoderV1, EncoderV1};
 use crate::lib0::v2::{DecoderV2, EncoderV2};
@@ -835,6 +836,16 @@ impl<'db> Transaction<'db> {
             ds.merge(state.delete_set.clone());
         }
         Ok(Snapshot::new(sv, ds))
+    }
+
+    /// Performs a garbage collection of items marked in the provided `delete_set`. Only unreachable
+    /// collections and their children can be collected cleanly from the database.
+    ///
+    /// Other elements, which still could be referenced elsewhere, will only be tombstoned
+    /// (contents removed, but the rudimentary block metadata will still be there).
+    pub fn gc(&mut self, delete_set: &IDSet) -> crate::Result<()> {
+        let mut gc = GarbageCollector::new(self.write_context()?);
+        gc.collect(delete_set)
     }
 
     pub fn read_context(&self) -> crate::Result<TxScope<'_>> {

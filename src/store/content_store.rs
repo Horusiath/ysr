@@ -46,7 +46,7 @@ impl<'a> ContentStore<'a> {
     }
 
     pub fn delete_range(
-        &mut self,
+        &self,
         content_type: ContentType,
         range: &BlockRange,
     ) -> crate::Result<usize> {
@@ -179,8 +179,7 @@ impl<'a> ReadRange<'a> {
                     let end = ID::new(self.range.head().client, self.range.end());
                     match parse_id(key)? {
                         Some(&id) if id <= end => {
-                            let content =
-                                Content::new(self.content_type, Cow::Borrowed(value));
+                            let content = Content::new(self.content_type, Cow::Borrowed(value));
                             Ok(Some(content))
                         }
                         _ => {
