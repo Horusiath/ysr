@@ -120,7 +120,7 @@ impl<'tx, 'db> ListRef<&'tx mut Transaction<'db>> {
         Ok((left, right))
     }
 
-    pub fn insert<T>(&mut self, index: usize, value: T) -> crate::Result<()>
+    pub fn insert<T>(&mut self, index: usize, value: T) -> crate::Result<T::Return>
     where
         T: Prelim,
     {
@@ -128,7 +128,7 @@ impl<'tx, 'db> ListRef<&'tx mut Transaction<'db>> {
         let start = self.block.start().copied();
         let (left, right) = Self::seek(&mut ctx, start, index)?;
 
-        InsertBlockData::insert_block(
+        let (_, result) = InsertBlockData::insert_block(
             &mut ctx,
             &mut self.block,
             left.as_ref(),
@@ -137,7 +137,7 @@ impl<'tx, 'db> ListRef<&'tx mut Transaction<'db>> {
             value,
         )?;
 
-        Ok(())
+        Ok(result)
     }
 
     pub fn insert_range<T, I>(&mut self, index: usize, values: I) -> crate::Result<()>
@@ -173,7 +173,7 @@ impl<'tx, 'db> ListRef<&'tx mut Transaction<'db>> {
         Ok(())
     }
 
-    pub fn push_back<T>(&mut self, value: T) -> crate::Result<()>
+    pub fn push_back<T>(&mut self, value: T) -> crate::Result<T::Return>
     where
         T: Prelim,
     {
@@ -181,7 +181,7 @@ impl<'tx, 'db> ListRef<&'tx mut Transaction<'db>> {
         self.insert(len, value)
     }
 
-    pub fn push_front<T>(&mut self, value: T) -> crate::Result<()>
+    pub fn push_front<T>(&mut self, value: T) -> crate::Result<T::Return>
     where
         T: Prelim,
     {

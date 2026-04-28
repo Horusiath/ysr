@@ -98,14 +98,13 @@ impl<'db, 'tx: 'db> MapRef<&'tx Transaction<'db>> {
 }
 
 impl<'tx, 'db> MapRef<&'tx mut Transaction<'db>> {
-    pub fn insert<K, V>(&mut self, key: K, value: V) -> crate::Result<()>
+    pub fn insert<K, V>(&mut self, key: K, value: V) -> crate::Result<V::Return>
     where
         K: AsRef<str>,
         V: Prelim,
     {
         let mut tx = self.tx.write_context()?;
-        Self::insert_internal(&mut self.block, &mut tx, key.as_ref(), value)?;
-        Ok(())
+        Self::insert_internal(&mut self.block, &mut tx, key.as_ref(), value)
     }
 
     fn insert_internal<V: Prelim>(
@@ -113,12 +112,13 @@ impl<'tx, 'db> MapRef<&'tx mut Transaction<'db>> {
         tx: &mut TxMutScope<'_>,
         key: &str,
         value: V,
-    ) -> crate::Result<()> {
+    ) -> crate::Result<V::Return> {
         let node_id = parent.id();
         let map_entries = tx.db.map_entries();
         let left_id = map_entries.get(node_id, key)?;
-        InsertBlockData::insert_block(tx, parent, left_id, None, Some(key), value)?;
-        Ok(())
+        let (_, result) =
+            InsertBlockData::insert_block(tx, parent, left_id, None, Some(key), value)?;
+        Ok(result)
     }
 
     pub fn remove<K>(&mut self, key: K) -> crate::Result<bool>

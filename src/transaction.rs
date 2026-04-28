@@ -100,11 +100,6 @@ impl TransactionState {
             // }
         }
 
-        //TODO: if (doc.gc) {
-        //  tryGcDeleteSet(ds, store, doc.gcFilter)
-        //}
-        //tryMergeDeleteSet(ds, store)
-
         // on all affected store.clients props, try to merge
         let mut cursor = blocks.cursor()?;
         let mut key_changes = BTreeMap::new();
@@ -849,6 +844,9 @@ impl<'db> Transaction<'db> {
     /// Other elements, which still could be referenced elsewhere, will only be tombstoned
     /// (contents removed, but the rudimentary block metadata will still be there).
     pub fn gc(&mut self, delete_set: &IDSet) -> crate::Result<()> {
+        if delete_set.is_empty() {
+            return Ok(());
+        }
         let mut gc = GarbageCollector::new(self.write_context()?);
         gc.collect(delete_set)
     }
