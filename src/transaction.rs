@@ -16,7 +16,6 @@ use crate::store::meta_store::MetaStore;
 use crate::store::{Db, MapEntriesStore};
 use crate::{ClientID, Clock, Error, Optional, StateVector, U32, lib0};
 use bitflags::bitflags;
-use bytes::{BufMut, Bytes, BytesMut};
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
@@ -678,6 +677,12 @@ impl<'db> Transaction<'db> {
             }
         }
         found.ok_or_else(|| Error::NotFound)
+    }
+
+    /// Returns the delete set of elements removed in a current transaction.
+    pub fn delete_set(&self) -> Option<&IDSet> {
+        let state = self.state.get()?;
+        Some(&state.delete_set)
     }
 
     /// Decodes an incoming `update` (which will be decoded using provided lib0 `version`) and

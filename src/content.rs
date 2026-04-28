@@ -16,6 +16,7 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, TryFromBytes};
 #[repr(u8)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq, TryFromBytes, KnownLayout, Immutable, IntoBytes)]
 pub enum ContentType {
+    /// Marker for soft deleted (tombstoned) content.
     Deleted = CONTENT_TYPE_DELETED,
     Json = CONTENT_TYPE_JSON,
     Binary = CONTENT_TYPE_BINARY,
