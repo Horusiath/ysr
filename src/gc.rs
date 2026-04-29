@@ -185,11 +185,12 @@ mod test {
         tx.commit(None).unwrap();
 
         let tx = doc.transact("test").unwrap();
-        for clock in 0..3 {
-            // blocks are tombstoned
-            let block = block(&tx, id(clock)).unwrap();
-            assert_eq!(block.content_type(), ContentType::Deleted);
+        // sequential updates were merged, so we only have one block
+        let block = block(&tx, id(0)).unwrap();
+        assert_eq!(block.content_type(), ContentType::Deleted);
+        assert_eq!(block.clock_len().get(), 3);
 
+        for clock in 0..3 {
             // content should be deleted regardless of soft/hard delete
             assert!(!content_exists(&tx, id(clock)));
         }

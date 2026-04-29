@@ -70,8 +70,9 @@ impl<'a> ContentStore<'a> {
 
         if is_multipart {
             let end = ID::new(curr.client, range.end());
-            while curr != end {
-                let (next_key, _) = cursor.next()?;
+            while curr != end
+                && let Some((next_key, _)) = cursor.key_value().optional()?
+            {
                 curr = match parse_id(next_key)? {
                     Some(id) => *id,
                     None => break,
