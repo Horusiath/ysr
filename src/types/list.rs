@@ -854,8 +854,6 @@ mod test {
             a.push_back(MapPrelim::from(m)).unwrap();
         }
 
-        //println!("{:#?}", tx.db.get().inspect());
-
         let mut count = 0;
         for (i, value) in a.iter::<Value>().map(Result::unwrap).enumerate() {
             assert_eq!(value, lib0!({"value": (i as f64) }));

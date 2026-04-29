@@ -14,7 +14,7 @@ use crate::store::content_store::ContentStore;
 use crate::store::intern_strings::InternStringsStore;
 use crate::store::meta_store::MetaStore;
 use crate::store::{Db, MapEntriesStore};
-use crate::{ClientID, Clock, Error, Optional, StateVector, U32, lib0};
+use crate::{BlockHeader, ClientID, Clock, Error, Optional, StateVector, U32, lib0};
 use bitflags::bitflags;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
@@ -102,20 +102,32 @@ impl TransactionState {
 
         // on all affected store.clients props, try to merge
         let mut cursor = blocks.cursor()?;
-        let mut key_changes = BTreeMap::new();
-        for (client, &clock) in self.current_state.iter() {
+        let mut merged = BTreeSet::new();
+        for (client, &after_clock) in self.current_state.iter() {
             let before_clock = self.begin_state.get(client);
-            if before_clock != clock {
-                cursor.seek_containing(ID::new(*client, before_clock))?;
-                Self::merge_with_lefts(&mut cursor, &mut key_changes)?;
+            if before_clock != after_clock {
+                let block =
+                    cursor.seek_containing(ID::new(*client, after_clock - Clock::new(1)))?;
+                let mut block = BlockMut::from(block);
+                while block.id().client == *client && block.id().clock >= before_clock {
+                    if Self::merge_with_lefts(&mut block, &mut cursor, &mut merged)? {
+                        break; // we reached the end
+                    }
+                }
             }
         }
 
         // try to merge mergeStructs
         for id in self.merge_blocks.iter() {
-            if let Some(_) = cursor.seek_containing(*id).optional()? {
-                Self::merge_with_lefts(&mut cursor, &mut key_changes)?;
+            if let Some(block) = cursor.seek_containing(*id).optional()? {
+                let mut block = BlockMut::from(block);
+                Self::merge_with_lefts(&mut block, &mut cursor, &mut merged)?;
             }
+        }
+
+        // remove merged blocks
+        for id in merged {
+            cursor.remove(id)?;
         }
 
         // persist updated state vector
@@ -237,35 +249,81 @@ impl TransactionState {
         Ok(())
     }
 
-    /// Moving cursor right to left, try to merge structs with their left neighbors.
-    /// Returns ID of the current position after merging.
-    /// Expects that cursor is set within a block keyspace position.
-    fn merge_with_lefts(
-        cursor: &mut BlockCursor<'_>,
-        key_changes: &mut BTreeMap<(NodeID, U32, ID), ID>,
-    ) -> crate::Result<ID> {
-        let mut right: BlockMut = cursor.current()?.into();
-        let _end = *right.id();
-        let mut left = cursor.prev()?.map(BlockMut::from);
-        while let Some(mut curr) = left {
-            if curr.merge(right.as_block()) {
-                if let Some(&parent_sub) = right.key_hash() {
-                    let e = key_changes
-                        .entry((*right.parent(), parent_sub, *right.id()))
-                        .or_insert(*curr.id());
-                    *e = *curr.id(); // update key
+    fn merge_with_lefts<'tx>(
+        right: &mut BlockMut,
+        cursor: &mut BlockCursor<'tx>,
+        merged: &mut BTreeSet<ID>,
+    ) -> crate::Result<bool> {
+        let mut reached_end = true;
+        while let Some(left) = cursor.prev()?
+            && left.id().client == right.id().client
+        {
+            reached_end = false;
+            let mut merge_to = BlockMut::from(left);
+
+            if merge_to.merge(right.as_block()) {
+                merged.insert(*right.id());
+
+                // once blocks are merged we need to check for their contents
+                match merge_to.content_type() {
+                    ContentType::String => {
+                        // for string data we merge the contents together
+                        let contents = cursor.content_store();
+                        match (merge_to.try_inline_data(), right.try_inline_data()) {
+                            (None, None) => {
+                                // no inline data, merge content from content store
+                                let left = contents.get(*merge_to.id())?;
+                                let right = contents.get(*right.id())?;
+                                contents.insert(*merge_to.id(), &[left, right].concat())?;
+                            }
+                            (Some(left), Some(right)) => {
+                                // both block had inline data, we need to check if the result is
+                                // inline-able as well
+                                if left.len() + right.len() <= BlockHeader::INLINE_CONTENT_LEN {
+                                    merge_to.extend_inline_content(right)
+                                } else {
+                                    // we couldn't inline the result, need to set it back to content store
+                                    contents.insert(*merge_to.id(), &[left, right].concat())?;
+                                    merge_to.clear_inline_content();
+                                }
+                            }
+                            (Some(left), None) => {
+                                // merge into inlineable content, but we know that result is not inlineable
+                                let right = contents.get(*right.id())?;
+                                contents.insert(*merge_to.id(), &[left, right].concat())?;
+                                merge_to.clear_inline_content();
+                            }
+                            (None, Some(right)) => {
+                                let left = contents.get(*merge_to.id())?;
+                                contents.insert(*merge_to.id(), &[left, right].concat())?;
+                            }
+                        };
+                    }
+                    ContentType::Atom | ContentType::Json => {
+                        // For Atom/JSON data we store multi-value block contents as separate
+                        // entries in content store. If that value was inline in any of the blocks,
+                        // we need to move it over to content store.
+                        let contents = cursor.content_store();
+                        if let Some(left_data) = merge_to.try_inline_data() {
+                            contents.insert(*merge_to.id(), left_data)?;
+                            merge_to.clear_inline_content();
+                        }
+                        if let Some(right_data) = right.try_inline_data() {
+                            contents.insert(*right.id(), right_data)?;
+                            // right block is going to be deleted anyway
+                        }
+                    }
+                    _ => { /* not used */ }
                 }
-                //TODO: delete right
+
+                cursor.update_current(*merge_to.id(), merge_to.header())?;
+                *right = merge_to;
             } else {
-                break; // we couldn't merge left and right blocks
+                *right = merge_to;
+                break;
             }
-
-            // move to left block
-            left = cursor.prev()?.map(BlockMut::from);
-            right = curr;
         }
-
-        Ok(*right.id())
+        Ok(reached_end)
     }
 }
 

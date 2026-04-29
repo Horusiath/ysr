@@ -622,19 +622,17 @@ impl BlockMut {
             self.len += other.len;
             self.set_right(other.right());
             // other.right.left points to the last id, so we don't need to update it
-            if self.content_type() == ContentType::String
-                && self.len.get() <= BlockHeader::INLINE_CONTENT_LEN as u32
-            {
-                let size = self.inline_content_len as usize;
-                let other_size = other.inline_content_len as usize;
-                self.inline_content[size..(size + other_size)]
-                    .copy_from_slice(&other.inline_content[..other_size]);
-                self.inline_content_len += other_size as u8;
-            }
             true
         } else {
             false
         }
+    }
+
+    pub fn extend_inline_content(&mut self, other: &[u8]) {
+        let size = self.inline_content_len as usize;
+        let other_size = other.len();
+        self.inline_content[size..(size + other_size)].copy_from_slice(&other[..other_size]);
+        self.inline_content_len += other_size as u8;
     }
 
     pub fn can_merge(&self, other: &Block<'_>) -> bool {
@@ -1412,43 +1410,6 @@ mod test {
         assert_eq!(right.try_inline_data().unwrap(), b" w");
         assert_eq!(right.left(), Some(&ID::new(1.into(), 9.into())));
         assert_eq!(right.right(), Some(&ID::new(CLIENT, 16.into())));
-    }
-
-    #[test]
-    fn block_merge_inline_text() {
-        let parent: NodeID = Node::root_named("parent").id();
-        let mut left = BlockMut::new(
-            ID::new(CLIENT, 5.into()),
-            BlockHeader::new(
-                5.into(),
-                Some(&ID::new(CLIENT, 4.into())),
-                Some(&ID::new(CLIENT, 10.into())),
-                Some(&ID::new(CLIENT, 4.into())),
-                Some(&ID::new(CLIENT, 16.into())),
-                parent,
-                None,
-            ),
-        );
-        left.set_inline_content(&Content::str(&"hello"));
-        let mut right = BlockMut::new(
-            ID::new(CLIENT, 10.into()),
-            BlockHeader::new(
-                2.into(),
-                Some(&ID::new(CLIENT, 9.into())),
-                Some(&ID::new(CLIENT, 16.into())),
-                Some(&ID::new(CLIENT, 9.into())),
-                Some(&ID::new(CLIENT, 16.into())),
-                parent,
-                None,
-            ),
-        );
-        right.set_inline_content(&Content::str(&" w"));
-
-        assert!(left.merge(right.as_block()));
-        assert_eq!(left.clock_len(), Clock::new(7));
-        assert_eq!(left.try_inline_data().unwrap(), b"hello w");
-        assert_eq!(left.left(), Some(&ID::new(CLIENT, 4.into())));
-        assert_eq!(left.right(), Some(&ID::new(CLIENT, 16.into())));
     }
 
     #[test]
