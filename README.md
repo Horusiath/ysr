@@ -34,6 +34,7 @@ areas:
 - [x] update application with conflict resolution
     - [ ] support for weak links
 - [x] block split/merge algorithms
+- [x] garbage collection (GC) of unreachable blocks: on demand only
 - [x] update generation
 - [x] collaborative Map
     - [x] core API implemented

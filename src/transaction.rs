@@ -898,11 +898,36 @@ impl<'db> Transaction<'db> {
         Ok(Snapshot::new(sv, ds))
     }
 
-    /// Performs a garbage collection of items marked in the provided `delete_set`. Only unreachable
-    /// collections and their children can be collected cleanly from the database.
-    ///
-    /// Other elements, which still could be referenced elsewhere, will only be tombstoned
+    /// Performs a garbage collection of items marked in the provided `delete_set`:
+    /// - Only unreachable collections and their children can be collected cleanly from the database.
+    /// - Other elements, which still could be referenced elsewhere, will only be tombstoned
     /// (contents removed, but the rudimentary block metadata will still be there).
+    ///
+    /// # Example
+    ///
+    /// ```rust,norun
+    /// use ysr::*;
+    ///
+    /// let root: Unmounted<Map> = Unmounted::root("root");
+    /// let multi_doc = MultiDoc::new(env, Some(1));
+    ///
+    /// // initialise test document data: { "root": { "nested": [1,2,3] } }
+    /// let mut tx = multi_doc.transact_mut("test-doc")?;
+    /// let map = root.mount_mut(&mut tx)?;
+    /// map.insert("nested", ListPrelim::from([1.into(), 2.into(), 3.into()]))?;
+    /// tx.commit(None)?;
+    ///
+    /// // remove the 'nested' list with all of its children
+    /// let mut tx = multi_doc.transact_mut("test-doc")?;
+    /// let map = root.mount_mut(&mut tx)?;
+    /// map.remove("nested")?;
+    ///
+    /// // garbage collect elements removed in this transaction
+    /// if let Some(ds) = tx.delete_set().cloned() {
+    ///   tx.gc(&ds)?;
+    /// }
+    /// tx.commit(None)?;
+    /// ```
     pub fn gc(&mut self, delete_set: &IDSet) -> crate::Result<()> {
         if delete_set.is_empty() {
             return Ok(());
