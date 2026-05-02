@@ -381,7 +381,7 @@ mod test {
             l.push_back("c").unwrap(); // id(2)
             l.push_back("d").unwrap(); // id(3)
         }
-        tx.commit(None).unwrap();
+        tx.commit(None).unwrap(); // blocks [0..3] merged together
 
         // items pushed sequentially will be merged into one block
         let mut tx = doc.transact_mut("test").unwrap();
@@ -397,22 +397,23 @@ mod test {
 
         {
             let mut l = list.mount_mut(&mut tx).unwrap();
-            l.remove(1).unwrap(); // remove "b"
+            l.remove(1).unwrap(); // remove "b", split block into ["a"], ["c", "d"]
         }
 
         let ds = tx.delete_set().cloned().unwrap_or_default();
         tx.gc(&ds).unwrap();
         tx.commit(None).unwrap();
 
-        let tx = doc.transact_mut("test").unwrap();
+        let tx = doc.transact("test").unwrap();
         // "b" tombstoned
         let b = block(&tx, id(1)).unwrap();
         assert_eq!(b.content_type(), ContentType::Deleted);
 
-        // "a", "c", "d" untouched — blocks exist and are NOT tombstoned
-        for clock in [0, 2, 3] {
+        // ["a"], ["c", "d"] untouched — blocks exist and are NOT tombstoned
+        for (clock, len) in [(0, 1), (2, 2)] {
             let block = block(&tx, id(clock)).unwrap();
             assert_ne!(block.content_type(), ContentType::Deleted);
+            assert_eq!(block.clock_len().get(), len);
             assert!(content_exists(&tx, id(clock)), "content_exists: {}", clock);
         }
         tx.commit(None).unwrap();

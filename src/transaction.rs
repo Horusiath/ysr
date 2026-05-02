@@ -105,12 +105,15 @@ impl TransactionState {
         for (client, &after_clock) in self.current_state.iter() {
             let before_clock = self.begin_state.get(client);
             if before_clock != after_clock {
-                let block =
-                    cursor.seek_containing(ID::new(*client, after_clock - Clock::new(1)))?;
-                let mut block = BlockMut::from(block);
-                while block.id().client == *client && block.id().clock >= before_clock {
-                    if Self::merge_with_lefts(&mut block, &mut cursor, &mut merged)? {
-                        break; // we reached the end
+                if let Some(block) = cursor
+                    .seek_containing(ID::new(*client, after_clock - Clock::new(1)))
+                    .optional()?
+                {
+                    let mut block = BlockMut::from(block);
+                    while block.id().client == *client && block.id().clock >= before_clock {
+                        if Self::merge_with_lefts(&mut block, &mut cursor, &mut merged)? {
+                            break; // we reached the end
+                        }
                     }
                 }
             }
