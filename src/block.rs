@@ -1260,7 +1260,7 @@ impl Display for BlockHeader {
             write!(f, ", hash_key: {}", key)?;
         }
         if self.flags.contains(BlockFlags::COUNTABLE) || self.flags.contains(BlockFlags::DELETED) {
-            write!(f, ", clock-len: {}", self.len)?;
+            write!(f, ", clock-len: {}", self.clock_len())?;
         }
         if self.flags.contains(BlockFlags::LEFT) {
             write!(f, ", left: {}", self.left)?;

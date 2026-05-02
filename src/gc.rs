@@ -64,7 +64,8 @@ impl<'tx> GarbageCollector<'tx> {
 
             if !block.flags().contains(BlockFlags::INLINE_CONTENT) {
                 let contents = self.tx.db.contents();
-                contents.delete_range(block.content_type(), &BlockRange::new(*block.id(), len))?;
+                let range = BlockRange::new(*block.id(), len);
+                contents.delete_range(block.content_type(), &range)?;
             }
 
             if parent_gc {
@@ -91,8 +92,8 @@ impl<'tx> GarbageCollector<'tx> {
         while let Some(id) = current.take() {
             // remove all list-like entries
             let block = self.tx.cursor.seek(id)?;
-            self.gc_block(&block, true)?;
             current = block.right().copied();
+            self.gc_block(&block, true)?;
         }
 
         // remove all map-like entries
@@ -293,8 +294,8 @@ mod test {
             let mut m = root.mount_mut(&mut tx).unwrap();
             nested_list = m
                 .insert(
-                    "items",
-                    ListPrelim::from(vec!["x".into(), "y".into(), "z".into()]), // id(1), id(2), id(3)
+                    "items",                                                    // id(0) for prelim itself
+                    ListPrelim::from(vec!["x".into(), "y".into(), "z".into()]), // id(1), id(2), id(3) for items
                 )
                 .unwrap();
         }

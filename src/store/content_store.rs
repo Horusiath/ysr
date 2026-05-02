@@ -128,23 +128,26 @@ impl<'tx> Debug for Inspect<'tx> {
         let mut s = f.debug_map();
 
         let mut cursor = self.db.cursor().map_err(|_| std::fmt::Error)?;
-        let (mut key, mut value) = cursor
+        if let Some((mut key, mut value)) = cursor
             .set_range(&[ContentStore::PREFIX])
-            .map_err(|_| std::fmt::Error)?;
-        loop {
-            match parse_id(key).map_err(|_| std::fmt::Error)? {
-                Some(id) => {
-                    s.key(id);
-                    s.value(&ReadableBytes::new(value));
+            .optional()
+            .map_err(|_| std::fmt::Error)?
+        {
+            loop {
+                match parse_id(key).map_err(|_| std::fmt::Error)? {
+                    Some(id) => {
+                        s.key(id);
+                        s.value(&ReadableBytes::new(value));
+                    }
+                    None => break,
                 }
-                None => break,
-            }
-            match cursor.next() {
-                Ok(kv) => {
-                    key = kv.0;
-                    value = kv.1;
+                match cursor.next() {
+                    Ok(kv) => {
+                        key = kv.0;
+                        value = kv.1;
+                    }
+                    Err(_) => break,
                 }
-                Err(_) => break,
             }
         }
         s.finish()
