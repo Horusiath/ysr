@@ -22,6 +22,7 @@ mod update;
 
 pub use crate::block::{Block, BlockHeader, BlockMut, ID};
 pub use input::In;
+pub use lib0::Encoding;
 pub use multi_doc::MultiDoc;
 pub use output::Out;
 pub use prelim::*;

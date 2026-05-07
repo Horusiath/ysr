@@ -176,7 +176,7 @@ fn bench_incremental_update(c: &mut Criterion) {
         ds.apply(&mut tx);
 
         group.bench_function(ds.name, |b| {
-            b.iter(|| tx.incremental_update().unwrap());
+            b.iter(|| tx.incremental_update(Encoding::V1).unwrap());
         });
 
         tx.commit(None).unwrap();
@@ -205,7 +205,7 @@ fn bench_diff_update(c: &mut Criterion) {
         let empty_sv = StateVector::default();
 
         group.bench_function(ds.name, |b| {
-            b.iter(|| tx.diff_update(&empty_sv).unwrap());
+            b.iter(|| tx.diff_update(&empty_sv, Encoding::V1).unwrap());
         });
 
         tx.commit(None).unwrap();

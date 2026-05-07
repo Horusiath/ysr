@@ -490,6 +490,7 @@ impl<'db> Transaction<'db> {
         Ok(buf)
     }
 
+    /// Returns an update that contains all changes that happened `since` a given state vector.
     pub fn diff_update_with<E: Encoder>(
         &self,
         since: &StateVector,
@@ -606,6 +607,7 @@ impl<'db> Transaction<'db> {
         Ok(())
     }
 
+    /// Returns an update that contains all changes that happened within current transaction scope.
     pub fn incremental_update_with<E: Encoder>(&self, writer: &mut E) -> crate::Result<()> {
         if let Some(state) = self.state.get() {
             let db = self.db.get();
@@ -753,6 +755,12 @@ impl<'db> Transaction<'db> {
         }
     }
 
+    /// Decodes an incoming `update` (which will be decoded using provided lib0 `version`) and
+    /// integrates the changes it provided into current document.
+    ///
+    /// Any missing updates that would block the changes from being integrated will be stashed
+    /// (and persisted) aside as pending updates (you can access them using [MetaStore::pending]
+    /// method).
     pub fn apply_update_with<D: Decoder>(&mut self, decoder: &mut D) -> crate::Result<()> {
         let mut current = Some(Update::decode_with(decoder)?);
         while let Some(update) = current.take() {
@@ -905,7 +913,7 @@ impl<'db> Transaction<'db> {
     ///
     /// # Example
     ///
-    /// ```rust,norun
+    /// ```rust
     /// use ysr::*;
     ///
     /// let root: Unmounted<Map> = Unmounted::root("root");
@@ -926,6 +934,7 @@ impl<'db> Transaction<'db> {
     /// if let Some(ds) = tx.delete_set().cloned() {
     ///   tx.gc(&ds)?;
     /// }
+    ///
     /// tx.commit(None)?;
     /// ```
     pub fn gc(&mut self, delete_set: &IDSet) -> crate::Result<()> {
